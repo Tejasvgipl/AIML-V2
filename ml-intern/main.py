@@ -28,7 +28,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
-MODEL_DIR = Path(os.getenv("ML_INTERN_MODEL_DIR", "/app/models"))
+MODEL_DIR = Path(os.getenv("ML_INTERN_MODEL_DIR", "./models"))
 CANDIDATE_DIR = MODEL_DIR / "candidates"
 REPORT_DIR = MODEL_DIR / "reports"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)

@@ -64,9 +64,9 @@ async def ask_groq(prompt: str, max_tokens: int = 700) -> str:
                 msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}")
                 if "restricted" in msg.lower() or "billing" in msg.lower() or "limit" in msg.lower():
                     if "WHAT THIS ALERT MEANS" in prompt:
-                        return "**Simulated AI Analysis (Account Restricted):**\n\nWHAT THIS ALERT MEANS:\nThis represents a significant behavioral deviation from the IP's established baseline.\n\nWHY IT IS HIGH:\nThis activity matches known adversary tactics such as lateral movement or credential access.\n\nWHAT TO DO:\nInvestigate the IP trail, check for successful logins, and consider immediate blocking if the behavior persists."
+                        return "<b>Simulated AI Analysis (Account Restricted):</b>\n\nWHAT THIS ALERT MEANS:\nThis represents a significant behavioral deviation from the IP's established baseline.\n\nWHY IT IS HIGH:\nThis activity matches known adversary tactics such as lateral movement or credential access.\n\nWHAT TO DO:\nInvestigate the IP trail, check for successful logins, and consider immediate blocking if the behavior persists."
                     else:
-                        return "**Simulated AI Analysis (Account Restricted):**\n\nWHY THIS SCORE:\nThe Isolation Forest model detected this IP as an outlier compared to the normal traffic patterns.\n\nWHAT THE ANOMALY SCORE MEANS:\nA negative score indicates the behavior is highly unusual. The baseline deviations and threat indicators heavily influenced this result.\n\nCONFIDENCE:\nHigh. Multiple corroborating signals confirm this is not normal network activity."
+                        return "<b>Simulated AI Analysis (Account Restricted):</b>\n\nWHY THIS SCORE:\nThe Isolation Forest model detected this IP as an outlier compared to the normal traffic patterns.\n\nWHAT THE ANOMALY SCORE MEANS:\nA negative score indicates the behavior is highly unusual. The baseline deviations and threat indicators heavily influenced this result.\n\nCONFIDENCE:\nHigh. Multiple corroborating signals confirm this is not normal network activity."
                 return f"AI provider error: {msg}"
             return data["choices"][0]["message"]["content"]
     except Exception as e:
@@ -885,7 +885,7 @@ Reference the actual data. If evidence is missing, say what is missing instead o
         "ip": ip,
         "explanation": await ask_groq(prompt, max_tokens=850),
         "risk_score": ml.get("risk_score"),
-        "model": AI_MODEL,
+        "model": GROQ_MODEL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
