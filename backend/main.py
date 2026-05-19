@@ -796,8 +796,8 @@ async def rebuild_runtime_indexes(r: aioredis.Redis) -> dict:
         pipe.sadd("blocklist:auto", ip)
     baseline_keys = await r.keys("baseline:*")
     daily_keys = await r.keys("daily:*")
-    ipstat_keys = await r.keys("ipstat:*")
-    for key in trail_keys + alert_keys + baseline_keys + daily_keys + ipstat_keys:
+    ipcnt_keys = await r.keys("ipcnt:*")
+    for key in alert_keys + baseline_keys + daily_keys + ipcnt_keys:
         pipe.persist(key)
     await pipe.execute()
 
@@ -831,11 +831,15 @@ async def force_build_baseline(ip: str):
 
 @app.post("/api/baseline/build-all")
 async def build_all_baselines():
-    r    = await get_redis()
-    keys = await r.keys("trail:*")
-    for key in keys:
-        await build_baseline(r, key.replace("trail:",""))
-    return {"status":"done","baselines_built":len(keys)}
+    r = await get_redis()
+    if OPENSEARCH_ENABLED:
+        ips = osc.get_all_unique_ips()
+    else:
+        cnt_keys = await r.keys("ipcnt:*")
+        ips = [k.replace("ipcnt:", "") for k in cnt_keys]
+    for ip in ips:
+        await build_baseline(r, ip)
+    return {"status": "done", "baselines_built": len(ips)}
 
 
 # ── alerts ────────────────────────────────────────────────────────────────────
@@ -878,13 +882,11 @@ async def get_ip_alerts(ip: str):
 # ── AI explanations ──────────────────────────────────────────────────────────
 
 async def collect_ip_context(r: aioredis.Redis, ip: str) -> dict:
-    raw_trail = await r.zrange(f"trail:{ip}", -40, -1)
-    events = []
-    for item in raw_trail:
-        try:
-            events.append(json.loads(item))
-        except Exception:
-            pass
+    # Pull recent events from OpenSearch for AI explanations
+    if OPENSEARCH_ENABLED:
+        events = osc.get_ip_events_desc(ip, limit=40)
+    else:
+        events = [e for _, e in _get_recent(ip, limit=40)]
 
     alert_keys = await r.keys(f"alert:{ip}:*")
     alerts = []
@@ -899,12 +901,14 @@ async def collect_ip_context(r: aioredis.Redis, ip: str) -> dict:
 
     bsl_raw = await r.get(f"baseline:{ip}")
     ml_raw = await r.get(f"ml:score:{ip}")
+    # Use ipcnt counter for event count; full stats come from OpenSearch
+    ipcnt = await r.get(f"ipcnt:{ip}")
     return {
         "events": events,
         "alerts": alerts,
         "baseline": json.loads(bsl_raw) if bsl_raw else {},
         "ml": json.loads(ml_raw) if ml_raw else {},
-        "stats": await r.hgetall(f"ipstat:{ip}"),
+        "stats": {"total": ipcnt or "0"},
     }
 
 
@@ -1278,9 +1282,9 @@ async def get_trail_full(ip: str, limit: int = 10000, days: int = 0):
         total = hits.get("total", {}).get("value", 0)
         events = [hit["_source"] for hit in hits.get("hits", [])]
 
-        # Also get Redis stats for this IP
+        # Use lightweight ipcnt counter instead of removed ipstat
         r = await get_redis()
-        stats = await r.hgetall(f"ipstat:{ip}")
+        ipcnt = await r.get(f"ipcnt:{ip}")
 
         return {
             "ip": ip,
@@ -1288,7 +1292,7 @@ async def get_trail_full(ip: str, limit: int = 10000, days: int = 0):
             "total": total,
             "returned": len(events),
             "events": events,
-            "stats": stats,
+            "stats": {"total": ipcnt or "0"},
         }
     except Exception as e:
         logger.error(f"OpenSearch query failed for {ip}: {e}")

@@ -163,11 +163,6 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
         "window_minutes":       round(window_seconds/60, 2),
     }
 
-    "std_interval_s","unique_dst_ips","unique_dst_ports","unique_countries",
-    "pct_critical","pct_high","brute_force_cnt","ssh_bf_cnt",
-    "rdp_cnt","db_scan_cnt","known_bad_cnt","priv_esc_cnt",
-    "vpn_bf_cnt","baseline_alerts","critical_alerts",
-]
 
 # ── baseline deviation summary per IP ─────────────────────────────────────────
 
@@ -203,9 +198,15 @@ async def get_baseline_deviation_summary(r: aioredis.Redis, ip: str) -> dict:
 # ── train / load ──────────────────────────────────────────────────────────────
 
 async def get_all_ip_features(r: aioredis.Redis):
-    keys     = await r.keys("trail:*")
-    ips      = [k.replace("trail:","") for k in keys]
+    """Collect feature vectors for all IPs. Uses OpenSearch if enabled."""
     features = []
+    if OS_ENABLED and osc:
+        ips = osc.get_all_unique_ips(size=10000)
+    else:
+        # Fallback: ipcnt:{ip} keys (lightweight counters we still write)
+        cnt_keys = await r.keys("ipcnt:*")
+        ips = [k.replace("ipcnt:", "") for k in cnt_keys]
+
     for ip in ips:
         f = await extract_ip_features(r, ip)
         if f:
@@ -355,24 +356,29 @@ async def all_baseline_alerts():
 
 @app.get("/api/ml/clusters")
 async def get_clusters():
-    r    = await get_redis()
-    keys = await r.keys("trail:*")
-    ips  = [k.replace("trail:","") for k in keys]
-    G    = nx.Graph()
+    r = await get_redis()
 
-    subnets: dict[str,list] = {}
+    # Discover IPs from OpenSearch or from ipcnt:* counter keys
+    if OS_ENABLED and osc:
+        ips = osc.get_all_unique_ips(size=10000)
+    else:
+        cnt_keys = await r.keys("ipcnt:*")
+        ips = [k.replace("ipcnt:", "") for k in cnt_keys]
+
+    G = nx.Graph()
+    subnets: dict[str, list] = {}
     for ip in ips:
         parts = ip.split(".")
         if len(parts) == 4:
             sn = ".".join(parts[:3])
-            subnets.setdefault(sn,[]).append(ip)
+            subnets.setdefault(sn, []).append(ip)
 
     for sn, sn_ips in subnets.items():
         if len(sn_ips) > 1:
             for ip in sn_ips:
                 G.add_node(ip, subnet=sn)
             for i in range(len(sn_ips)):
-                for j in range(i+1, len(sn_ips)):
+                for j in range(i + 1, len(sn_ips)):
                     G.add_edge(sn_ips[i], sn_ips[j], weight=1)
 
     clusters = []
@@ -383,8 +389,9 @@ async def get_clusters():
             total_events = 0
             total_alerts = 0
             for ip in ips_list:
-                stat = await r.hget(f"ipstat:{ip}","total")
-                total_events += int(stat or 0)
+                # Use ipcnt (lightweight counter) instead of removed ipstat
+                cnt = await r.get(f"ipcnt:{ip}")
+                total_events += int(cnt or 0)
                 ak = await r.keys(f"alert:{ip}:*")
                 total_alerts += len(ak)
 
@@ -398,7 +405,7 @@ async def get_clusters():
             })
 
     clusters.sort(key=lambda x: x["total_events"], reverse=True)
-    return {"clusters":clusters,"total_subnets":len(subnets)}
+    return {"clusters": clusters, "total_subnets": len(subnets)}
 
 # ── anomaly list ──────────────────────────────────────────────────────────────
 
@@ -431,5 +438,6 @@ async def list_anomalies():
 @app.get("/api/ml/health")
 async def ml_health():
     model_ready = (MODEL_DIR/"isolation_forest.pkl").exists()
-    return {"status":"ok","model_ready":model_ready,"version":"2.0.0",
+    return {"status":"ok","model_ready":model_ready,"version":"2.1.0",
+            "opensearch_enabled": OS_ENABLED,
             "time":datetime.now(timezone.utc).isoformat()}
