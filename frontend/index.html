@@ -2691,7 +2691,7 @@
           const sc = e.severity || 'low';
           return `<div class="ti">
         <span class="tdot ${sc}"></span>
-        <span class="tts">${(e.ts || '').substring(0, 19).replace('T', ' ')}</span>
+        <span class="tts">${(e.ts || e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}</span>
         <span class="tdesc">
           <b>${(e.threat_type || 'unknown').replace(/_/g, ' ')}</b> — ${e.rule || ''}
           ${e.signature ? `<br><span style="color:var(--accent);font-size:11px">${e.signature}</span>` : ''}
@@ -2764,9 +2764,9 @@
         const t = await get(`${API}/trail/${h.ip}?limit=20`);
         if (t && t.events) t.events.forEach(e => all.push({ ...e, _ip: h.ip }));
       }
-      all.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+      all.sort((a, b) => (b.ts || b['@timestamp'] || '').localeCompare(a.ts || a['@timestamp'] || ''));
       document.getElementById('live-tbody').innerHTML = all.slice(0, 100).map(e => `<tr>
-    <td style="font-size:11px">${(e.ts || '').substring(0, 19).replace('T', ' ')}</td>
+    <td style="font-size:11px">${(e.ts || e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}</td>
     <td style="color:var(--accent);cursor:pointer" onclick="goTrail('${e._ip}')">${e._ip}</td>
     <td>${(e.threat_type || '').replace(/_/g, ' ')}</td>
     <td style="font-size:11px;color:var(--muted);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(e.rule || '').substring(0, 55)}</td>
