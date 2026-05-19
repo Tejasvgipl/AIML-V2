@@ -10,7 +10,7 @@ try:
     import opensearch_client as osc
 except Exception:
     osc = None  # type: ignore
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import pandas as pd
@@ -1083,70 +1083,264 @@ Reference the actual data. If evidence is missing, say what is missing instead o
     }
 
 
-# ── AI Reports ────────────────────────────────────────────────────────────────
+# ── Deterministic Reports ─────────────────────────────────────────────────────
+
+def _human_count(value) -> str:
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return "0"
+
+
+def _top_items(values: dict, limit: int = 5) -> list[tuple[str, int]]:
+    items = []
+    for key, value in (values or {}).items():
+        try:
+            items.append((str(key), int(value)))
+        except Exception:
+            continue
+    return sorted(items, key=lambda item: item[1], reverse=True)[:limit]
+
+
+def _primary_driver(counts: dict) -> str:
+    items = _top_items(counts, 1)
+    return items[0][0].replace("_", " ") if items else "unknown activity"
+
+
+def _report_window(timeframe: str) -> tuple[int, datetime, datetime]:
+    if timeframe not in ("weekly", "monthly"):
+        raise HTTPException(400, "Timeframe must be weekly or monthly")
+    days = 7 if timeframe == "weekly" else 30
+    end = datetime.now(timezone.utc)
+    return days, end - timedelta(days=days), end
+
+
+async def _report_from_opensearch(days: int, r: aioredis.Redis) -> dict:
+    client = get_opensearch()
+    if not client:
+        return {}
+    query = {"bool": {"filter": [{"range": {"@timestamp": {"gte": f"now-{days}d"}}}]}}
+    try:
+        resp = client.search(
+            index="cybersentinel-logs-*",
+            body={
+                "size": 0,
+                "query": query,
+                "aggs": {
+                    "threats": {"terms": {"field": "threat_type", "size": 12}},
+                    "severities": {"terms": {"field": "severity", "size": 8}},
+                    "top_ips": {
+                        "terms": {"field": "src_ip", "size": 10},
+                        "aggs": {
+                            "threats": {"terms": {"field": "threat_type", "size": 5}},
+                            "severities": {"terms": {"field": "severity", "size": 5}},
+                            "ports": {"terms": {"field": "dst_port", "size": 5}},
+                            "last_seen": {"max": {"field": "@timestamp"}},
+                            "samples": {
+                                "top_hits": {
+                                    "size": 3,
+                                    "sort": [{"@timestamp": {"order": "desc"}}],
+                                    "_source": ["@timestamp", "rule", "threat_type", "severity", "dst_ip", "dst_port", "agent", "username"],
+                                }
+                            },
+                        },
+                    },
+                    "agents": {"terms": {"field": "agent", "size": 8}},
+                },
+            },
+        )
+    except Exception as e:
+        logger.warning(f"OpenSearch report aggregation failed: {e}")
+        return {}
+
+    total = resp.get("hits", {}).get("total", {}).get("value", 0)
+    aggs = resp.get("aggregations", {})
+    top_ips = []
+    for bucket in aggs.get("top_ips", {}).get("buckets", []):
+        ip = bucket.get("key")
+        threat_counts = {b["key"]: b["doc_count"] for b in bucket.get("threats", {}).get("buckets", [])}
+        severity_counts = {b["key"]: b["doc_count"] for b in bucket.get("severities", {}).get("buckets", [])}
+        ports = [str(b["key"]) for b in bucket.get("ports", {}).get("buckets", []) if b.get("key") not in ("", None)]
+        samples = [h.get("_source", {}) for h in bucket.get("samples", {}).get("hits", {}).get("hits", [])]
+        ml_raw = await r.get(f"ml:score:{ip}") if ip else None
+        try:
+            ml_score = json.loads(ml_raw) if ml_raw else {}
+        except Exception:
+            ml_score = {}
+        alerts = await get_ip_alerts(ip) if ip else {"alerts": []}
+        top_ips.append({
+            "ip": ip,
+            "events": int(bucket.get("doc_count", 0)),
+            "driver": _primary_driver(threat_counts),
+            "threat_counts": threat_counts,
+            "severity_counts": severity_counts,
+            "top_ports": ports,
+            "last_seen": bucket.get("last_seen", {}).get("value_as_string"),
+            "samples": samples,
+            "risk_score": ml_score.get("risk_score"),
+            "is_anomaly": ml_score.get("is_anomaly"),
+            "alert_count": len(alerts.get("alerts", [])),
+        })
+
+    return {
+        "source": "opensearch",
+        "total_logs": total,
+        "threat_counts": {b["key"]: b["doc_count"] for b in aggs.get("threats", {}).get("buckets", [])},
+        "severity_counts": {b["key"]: b["doc_count"] for b in aggs.get("severities", {}).get("buckets", [])},
+        "top_agents": {b["key"]: b["doc_count"] for b in aggs.get("agents", {}).get("buckets", [])},
+        "top_ips": top_ips,
+    }
+
+
+async def _report_from_redis(r: aioredis.Redis) -> dict:
+    stats = await get_stats()
+    top_ips = []
+    for ip in list(stats.get("hot_ips", []))[:10]:
+        summary = await trail_summary(ip)
+        ml_raw = await r.get(f"ml:score:{ip}")
+        try:
+            ml_score = json.loads(ml_raw) if ml_raw else {}
+        except Exception:
+            ml_score = {}
+        top_ips.append({
+            "ip": ip,
+            "events": summary.get("total", 0),
+            "driver": _primary_driver(summary.get("threat_types", {})),
+            "threat_counts": summary.get("threat_types", {}),
+            "severity_counts": summary.get("severities", {}),
+            "top_ports": [],
+            "last_seen": summary.get("last_seen"),
+            "samples": [],
+            "risk_score": ml_score.get("risk_score"),
+            "is_anomaly": ml_score.get("is_anomaly"),
+            "alert_count": 0,
+        })
+    return {
+        "source": "redis",
+        "total_logs": stats.get("total_logs", 0),
+        "threat_counts": stats.get("threat_counts", {}),
+        "severity_counts": {},
+        "top_agents": {},
+        "top_ips": top_ips,
+    }
+
+
+def _render_security_report(timeframe: str, start: datetime, end: datetime, data: dict, controls: dict) -> str:
+    top_threats = _top_items(data.get("threat_counts", {}), 6)
+    top_ips = data.get("top_ips", [])
+    critical = int(data.get("severity_counts", {}).get("critical", 0) or 0)
+    high = int(data.get("severity_counts", {}).get("high", 0) or 0)
+    total = int(data.get("total_logs", 0) or 0)
+    posture = "Elevated" if critical or high > 100 else "Active" if total else "No recent data"
+    main_driver = top_threats[0][0].replace("_", " ") if top_threats else "no dominant threat type"
+
+    lines = [
+        f"# CyberSentinel {timeframe.capitalize()} Security Report",
+        "",
+        f"**Period:** {start.strftime('%Y-%m-%d %H:%M UTC')} to {end.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"**Data source:** {data.get('source', 'unknown')}",
+        f"**Generated:** {end.isoformat()}",
+        "",
+        "## Executive Summary",
+        f"- Posture: **{posture}**.",
+        f"- Processed **{_human_count(total)}** security events in this period.",
+        f"- Primary observed activity: **{main_driver}**.",
+        f"- Severity pressure: **{_human_count(critical)} critical** and **{_human_count(high)} high** events.",
+        f"- Current controls: **{_human_count(controls.get('auto_blocked'))} auto-blocked** and **{_human_count(controls.get('manual_blocked'))} manually blocked** indicators.",
+        "",
+        "## Threat Breakdown",
+    ]
+
+    if top_threats:
+        lines.extend([f"- **{name.replace('_', ' ')}:** {_human_count(count)} events" for name, count in top_threats])
+    else:
+        lines.append("- No threat distribution available for this period.")
+
+    lines.extend(["", "## Notable IP Activity"])
+    if top_ips:
+        lines.append("| IP | Events | Main activity | Severity | Risk | What happened |")
+        lines.append("|---|---:|---|---|---:|---|")
+        for item in top_ips[:8]:
+            sev = ", ".join(f"{k}:{v}" for k, v in _top_items(item.get("severity_counts", {}), 2)) or "-"
+            ports = ", ".join(item.get("top_ports", [])[:3]) or "not observed"
+            sample_rule = ""
+            for sample in item.get("samples", []):
+                sample_rule = sample.get("rule") or sample.get("signature") or sample_rule
+                if sample_rule:
+                    break
+            action = f"{item['ip']} generated {item['events']} events, mainly {item['driver']}"
+            if ports != "not observed":
+                action += f", touching ports {ports}"
+            if sample_rule:
+                action += f". Latest evidence: {sample_rule[:90]}"
+            risk = item.get("risk_score")
+            risk_text = str(risk) if risk is not None else "-"
+            if item.get("is_anomaly"):
+                risk_text += " anomaly"
+            lines.append(f"| `{item['ip']}` | {_human_count(item['events'])} | {item['driver']} | {sev} | {risk_text} | {action} |")
+    else:
+        lines.append("- No high-signal IPs were available for this period.")
+
+    lines.extend(["", "## Detection And Baseline Findings"])
+    alert_counts = controls.get("alert_type_counts", {})
+    if alert_counts:
+        for name, count in _top_items(alert_counts, 6):
+            lines.append(f"- **{name.replace('_', ' ')}:** {_human_count(count)} detections")
+    else:
+        lines.append("- No baseline deviation counts are currently available.")
+
+    lines.extend(["", "## Recommended Actions"])
+    if top_ips:
+        lines.append(f"- Review the top IP `{top_ips[0]['ip']}` first because it has the highest event volume in this report window.")
+    if critical or high:
+        lines.append("- Validate whether critical/high events map to expected scanners, trusted agents, or external attackers; block or suppress only after ownership is confirmed.")
+    if controls.get("auto_blocked", 0):
+        lines.append("- Confirm auto-blocked indicators are enforced on the firewall, not only listed in CyberSentinel.")
+    lines.append("- Keep this report with the incident notes; update the editable section before sharing if business context is known.")
+
+    return "\n".join(lines) + "\n"
+
+
+async def _generate_report_payload(timeframe: str) -> dict:
+    days, start, end = _report_window(timeframe)
+    r = await get_redis()
+    data = await _report_from_opensearch(days, r) if OPENSEARCH_ENABLED else {}
+    if not data:
+        data = await _report_from_redis(r)
+    blocklist_auto = await r.smembers("blocklist:auto")
+    blocklist_manual = await r.smembers("blocklist:manual")
+    stats = await get_stats()
+    controls = {
+        "auto_blocked": len(blocklist_auto),
+        "manual_blocked": len(blocklist_manual),
+        "alert_type_counts": stats.get("alert_type_counts", {}),
+    }
+    report = _render_security_report(timeframe, start, end, data, controls)
+    return {
+        "timeframe": timeframe,
+        "period_days": days,
+        "source": data.get("source"),
+        "generated_by": "deterministic-cybersentinel-report-v1",
+        "generated_at": end.isoformat(),
+        "summary": {
+            "total_logs": data.get("total_logs", 0),
+            "top_threats": dict(_top_items(data.get("threat_counts", {}), 6)),
+            "top_ips": data.get("top_ips", [])[:8],
+            "auto_blocked": controls["auto_blocked"],
+            "manual_blocked": controls["manual_blocked"],
+        },
+        "report": report,
+    }
+
+
+@app.get("/api/reports/generate")
+async def generate_report(timeframe: str = "weekly"):
+    return await _generate_report_payload(timeframe)
+
 
 @app.get("/api/report/smart")
 async def generate_smart_report(timeframe: str = "weekly"):
-    if timeframe not in ["weekly", "monthly"]:
-        raise HTTPException(400, "Timeframe must be weekly or monthly")
-    
-    days = 7 if timeframe == "weekly" else 30
-    
-    r = await get_redis()
-    
-    # 1. Get OpenSearch aggregates if available
-    os_stats = {}
-    if OPENSEARCH_ENABLED and osc:
-        os_stats["total_docs"] = osc.get_total_doc_count()
-        os_stats["global_threats"] = osc.get_global_threat_counts()
-    
-    # 2. Get active Redis states
-    hot_ips = await r.smembers("hot_ips")
-    blocklist_auto = await r.smembers("blocklist:auto")
-    blocklist_manual = await r.smembers("blocklist:manual")
-    total_alerts = await r.get("stat:total_alerts") or "0"
-    
-    # 3. Get top 3 hot IPs context
-    top_hot_ips = []
-    for ip in list(hot_ips)[:3]:
-        ctx = await collect_ip_context(r, ip.decode("utf-8") if isinstance(ip, bytes) else ip)
-        # only keep last 5 events for brevity
-        ctx["events"] = ctx["events"][-5:]
-        top_hot_ips.append(ctx)
-        
-    prompt = f"""You are a senior cybersecurity analyst generating a highly precise and effective executive {timeframe} report.
-Do not use generic fluff. Focus on exactly WHAT happened, WHICH IPs caused it, and WHAT the system did.
-
-Timeframe: Last {days} days
-
-System Posture Data:
-- Total logs indexed: {os_stats.get('total_docs', 'Unknown')}
-- Global threat breakdown: {json.dumps(os_stats.get('global_threats', {}))}
-- Total deviation alerts generated: {int(total_alerts)}
-- Active Hot IPs: {len(hot_ips)}
-- Auto-blocked IPs: {len(blocklist_auto)}
-- Manually blocked IPs: {len(blocklist_manual)}
-
-Top 3 Highest Risk IPs Analysis (Sample):
-{json.dumps(top_hot_ips, indent=2)}
-
-Write the report in beautifully formatted Markdown. Include these exact sections:
-# CyberSentinel Executive Report ({timeframe.capitalize()})
-## 1. High-Level Summary
-(Summarize the threat pressure, log volume, and block actions.)
-## 2. Threat Landscape
-(Analyze the global threat breakdown and what types of attacks are most prevalent.)
-## 3. Notable Attackers & Root Causes
-(Critically analyze the provided Top 3 IPs. Explicitly state WHICH IP caused WHAT, referring to the ML anomaly score and actual events.)
-## 4. SOC Recommendations
-(Provide 2-3 precise recommendations based solely on this data.)
-"""
-    return {
-        "timeframe": timeframe,
-        "report": await ask_groq(prompt, max_tokens=1500),
-        "model": AI_MODEL,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    return await _generate_report_payload(timeframe)
 
 
 

@@ -1874,7 +1874,7 @@
         <div class="ni" onclick="nav('blocklist')"><span class="ndot nd-r"></span>Blocklist</div>
         <div class="ni" onclick="nav('ingest')"><span class="ndot nd-g"></span>Ingest Logs</div>
         <div class="ns">Reporting</div>
-        <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Smart Reports</div>
+        <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Reports</div>
       </nav>
       <div class="sfooter">
         <div class="srow"><span class="pulse"></span>Backend API</div>
@@ -2455,17 +2455,17 @@
       </div>
       <div id="page-reports" class="page">
         <div class="term-panel">
-          <div class="term-title">Executive AI Reporting</div>
+          <div class="term-title">SOC Reports</div>
           <div class="term-grid">
-            <div class="term"><b>Smart Analysis:</b> AI reads your OpenSearch aggregates, active hot IPs, and threat counts to generate a precise SOC summary.</div>
-            <div class="term"><b>Editable:</b> Switch to Edit Mode to tweak the Markdown before saving/sharing with stakeholders.</div>
-            <div class="term"><b>Download:</b> Export the finalized report as a cleanly formatted .md file.</div>
+            <div class="term"><b>Evidence-based:</b> Reports are generated from OpenSearch, Redis counters, ML scores, baseline alerts, and blocklist state.</div>
+            <div class="term"><b>Precise:</b> The report lists which IP caused what activity, the dominant threat types, and the operational response.</div>
+            <div class="term"><b>Editable:</b> Preview, edit, and download the Markdown report for handoff or incident notes.</div>
           </div>
         </div>
         <div class="card" style="margin-bottom:16px">
           <div class="cb" style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn ai" onclick="generateReport('weekly')">Generate Weekly Report</button>
-            <button class="btn ai" onclick="generateReport('monthly')">Generate Monthly Report</button>
+            <button class="btn pri" onclick="generateReport('weekly')">Generate Weekly Report</button>
+            <button class="btn" onclick="generateReport('monthly')">Generate Monthly Report</button>
             <span id="rep-status" style="font-size:12px;color:var(--muted);align-self:center"></span>
           </div>
         </div>
@@ -2474,8 +2474,8 @@
             <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
               <span class="ct">Report Preview</span>
               <div>
-                <button class="btn" id="rep-edit-btn" onclick="toggleReportEdit()">✏️ Edit</button>
-                <button class="btn pri" onclick="downloadReport()">💾 Download .md</button>
+                <button class="btn" id="rep-edit-btn" onclick="toggleReportEdit()">Edit</button>
+                <button class="btn pri" onclick="downloadReport()">Download .md</button>
               </div>
             </div>
             <div class="cb">
@@ -2514,7 +2514,7 @@
         overview: 'Overview', trail: 'IP Trail', livealerts: 'Live Alerts',
         deviations: 'Baseline Deviations', bslexplorer: 'Baseline Explorer',
         aiinvestigate: 'AI Investigator', ml: 'ML Anomaly', mlintern: 'ML Intern', clusters: 'Subnet Clusters',
-        blocklist: 'Blocklist', ingest: 'Ingest Logs', reports: 'Smart Reports'
+        blocklist: 'Blocklist', ingest: 'Ingest Logs', reports: 'Reports'
       };
       document.getElementById('page-title').textContent = T[name] || name;
       if (name === 'overview') refreshAll();
@@ -2581,6 +2581,36 @@
         .split(/\n{2,}/)
         .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
         .join('');
+    }
+    function formatReportText(text) {
+      const lines = escapeHTML(text || '').split('\n');
+      let html = '', inList = false, inTable = false;
+      const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+      const closeTable = () => { if (inTable) { html += '</tbody></table>'; inTable = false; } };
+      lines.forEach(line => {
+        if (!line.trim()) { closeList(); closeTable(); return; }
+        if (line.startsWith('# ')) { closeList(); closeTable(); html += `<h2>${line.slice(2)}</h2>`; return; }
+        if (line.startsWith('## ')) { closeList(); closeTable(); html += `<h3>${line.slice(3)}</h3>`; return; }
+        if (line.startsWith('- ')) {
+          closeTable();
+          if (!inList) { html += '<ul>'; inList = true; }
+          html += `<li>${line.slice(2).replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')}</li>`;
+          return;
+        }
+        if (line.startsWith('|')) {
+          closeList();
+          const cells = line.split('|').slice(1, -1).map(c => c.trim());
+          if (cells.every(c => /^-+$|^---+$|^-+:$|^:-+$|^:-+:$/.test(c))) return;
+          if (!inTable) { html += '<table class="tbl" style="margin:12px 0"><tbody>'; inTable = true; }
+          const tag = html.endsWith('<tbody>') ? 'th' : 'td';
+          html += `<tr>${cells.map(c => `<${tag}>${c.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')}</${tag}>`).join('')}</tr>`;
+          return;
+        }
+        closeList(); closeTable();
+        html += `<p>${line.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')}</p>`;
+      });
+      closeList(); closeTable();
+      return html;
     }
     function setSignal(id, value, cap, suffix = '') {
       const safeValue = Number(value || 0);
@@ -2763,22 +2793,22 @@
       isReportEditMode = false;
       preview.style.display = 'block';
       editor.style.display = 'none';
-      document.getElementById('rep-edit-btn').textContent = '✏️ Edit';
-      
+      document.getElementById('rep-edit-btn').textContent = 'Edit';
+
       aiLoading(preview);
-      btnStatus.textContent = 'Generating ' + timeframe + ' report...';
-      
-      const r = await get(`${API}/report/smart?timeframe=${timeframe}`);
+      btnStatus.textContent = 'Building ' + timeframe + ' report from current evidence...';
+
+      const r = await get(`${API}/reports/generate?timeframe=${timeframe}`);
       if (!r) { 
         preview.innerHTML = '<span style="color:var(--danger)">Report generation failed.</span>';
         btnStatus.textContent = '';
         return; 
       }
-      
+
       editor.value = r.report;
-      preview.innerHTML = formatAIText(r.report);
-      btnStatus.textContent = `Generated successfully by ${r.model || 'AI'}`;
-      toast('Report ready', 'ai');
+      preview.innerHTML = formatReportText(r.report);
+      btnStatus.textContent = `Generated from ${r.source || 'available'} data · ${r.generated_at ? String(r.generated_at).substring(0, 19) : ''}`;
+      toast('Report ready', 'ok');
     }
 
     function toggleReportEdit() {
@@ -2790,12 +2820,12 @@
       if (isReportEditMode) {
         preview.style.display = 'none';
         editor.style.display = 'block';
-        btn.textContent = '👁️ Preview';
+        btn.textContent = 'Preview';
       } else {
         editor.style.display = 'none';
         preview.style.display = 'block';
-        preview.innerHTML = formatAIText(editor.value);
-        btn.textContent = '✏️ Edit';
+        preview.innerHTML = formatReportText(editor.value);
+        btn.textContent = 'Edit';
       }
     }
 
