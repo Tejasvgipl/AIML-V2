@@ -2459,7 +2459,7 @@
           <div class="term-grid">
             <div class="term"><b>Evidence-based:</b> Reports are generated from OpenSearch, Redis counters, ML scores, baseline alerts, and blocklist state.</div>
             <div class="term"><b>Precise:</b> The report lists which IP caused what activity, the dominant threat types, and the operational response.</div>
-            <div class="term"><b>Editable:</b> Preview, edit, and download the Markdown report for handoff or incident notes.</div>
+            <div class="term"><b>Export-ready:</b> Preview, edit, and download the report as PDF, JSON, or Markdown for handoff or incident notes.</div>
           </div>
         </div>
         <div class="card" style="margin-bottom:16px">
@@ -2469,13 +2469,37 @@
             <span id="rep-status" style="font-size:12px;color:var(--muted);align-self:center"></span>
           </div>
         </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="ch"><span class="ct">Report API Endpoint</span></div>
+          <div class="cb" style="display:grid;gap:8px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <code id="rep-api-json" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
+              <button class="btn" onclick="copyReportEndpoint('json')">Copy JSON</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <code id="rep-api-md" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
+              <button class="btn" onclick="copyReportEndpoint('md')">Copy Markdown</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <code id="rep-api-pdf" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
+              <button class="btn" onclick="copyReportEndpoint('pdf')">Copy PDF</button>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <code id="rep-api-html" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
+              <button class="btn" onclick="copyReportEndpoint('html')">Copy HTML</button>
+            </div>
+          </div>
+        </div>
         <div id="report-container" style="display:none">
           <div class="card">
             <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
               <span class="ct">Report Preview</span>
               <div>
                 <button class="btn" id="rep-edit-btn" onclick="toggleReportEdit()">Edit</button>
-                <button class="btn pri" onclick="downloadReport()">Download .md</button>
+                <button class="btn pri" onclick="printReportPDF()">PDF</button>
+                <button class="btn" onclick="downloadReport('json')">JSON</button>
+                <button class="btn" onclick="downloadReport('md')">Markdown</button>
+                <button class="btn" onclick="downloadReport('html')">HTML</button>
               </div>
             </div>
             <div class="cb">
@@ -2524,6 +2548,7 @@
       if (name === 'ml') loadAnomalies();
       if (name === 'mlintern') loadMLIntern();
       if (name === 'deviations') loadDeviations();
+      if (name === 'reports') refreshReportEndpoints();
     }
     function toast(msg, type = 'ok') {
       const w = document.getElementById('toast-wrap');
@@ -2783,6 +2808,41 @@
     }
     
     let isReportEditMode = false;
+    let currentReportPayload = null;
+    function reportEndpoint(format, timeframe = 'weekly') {
+      return `${API}/reports/generate?timeframe=${timeframe}&format=${format}`;
+    }
+
+    function refreshReportEndpoints() {
+      const formats = ['json', 'md', 'pdf', 'html'];
+      formats.forEach(format => {
+        const el = document.getElementById(`rep-api-${format}`);
+        if (el) el.textContent = `GET ${reportEndpoint(format)}`;
+      });
+    }
+
+    async function copyText(value) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+      const tmp = document.createElement('textarea');
+      tmp.value = value;
+      tmp.style.position = 'fixed';
+      tmp.style.left = '-9999px';
+      document.body.appendChild(tmp);
+      tmp.focus();
+      tmp.select();
+      document.execCommand('copy');
+      document.body.removeChild(tmp);
+    }
+
+    async function copyReportEndpoint(format) {
+      const value = reportEndpoint(format);
+      await copyText(value);
+      toast(format.toUpperCase() + ' endpoint copied', 'ok');
+    }
+
     async function generateReport(timeframe) {
       const btnStatus = document.getElementById('rep-status');
       const container = document.getElementById('report-container');
@@ -2805,6 +2865,7 @@
         return; 
       }
 
+      currentReportPayload = r;
       editor.value = r.report;
       preview.innerHTML = formatReportText(r.report);
       btnStatus.textContent = `Generated from ${r.source || 'available'} data · ${r.generated_at ? String(r.generated_at).substring(0, 19) : ''}`;
@@ -2829,18 +2890,106 @@
       }
     }
 
-    function downloadReport() {
+    function reportDateSlug() {
+      return new Date().toISOString().split('T')[0];
+    }
+
+    function reportBaseName() {
+      const timeframe = currentReportPayload?.timeframe || 'security';
+      return `CyberSentinel_${timeframe}_Report_${reportDateSlug()}`;
+    }
+
+    function getEditedReportText() {
       const editor = document.getElementById('rep-editor');
-      if (!editor.value) return toast('No report to download', 'warn');
-      const blob = new Blob([editor.value], { type: 'text/markdown' });
+      return editor.value || '';
+    }
+
+    function buildEditedReportPayload() {
+      const reportText = getEditedReportText();
+      return {
+        ...(currentReportPayload || {}),
+        report: reportText,
+        edited: true,
+        exported_at: new Date().toISOString()
+      };
+    }
+
+    function downloadBlob(content, type, filename) {
+      const blob = new Blob([content], { type });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `CyberSentinel_Report_${new Date().toISOString().split('T')[0]}.md`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    }
+
+    function downloadReport(format) {
+      const reportText = getEditedReportText();
+      if (!reportText) return toast('No report to download', 'warn');
+      const name = reportBaseName();
+      if (format === 'json') {
+        downloadBlob(JSON.stringify(buildEditedReportPayload(), null, 2), 'application/json', `${name}.json`);
+        return toast('JSON report downloaded', 'ok');
+      }
+      if (format === 'html') {
+        downloadBlob(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHTML(name.replace(/_/g, ' '))}</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #151b23; margin: 28px; line-height: 1.55; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
+    th, td { border: 1px solid #d0d7de; padding: 7px; vertical-align: top; text-align: left; }
+    th { background: #f6f8fa; }
+  </style>
+</head>
+<body>${formatReportText(reportText)}</body>
+</html>`, 'text/html', `${name}.html`);
+        return toast('HTML report downloaded', 'ok');
+      }
+      downloadBlob(reportText, 'text/markdown', `${name}.md`);
+      toast('Markdown report downloaded', 'ok');
+    }
+
+    function printReportPDF() {
+      const reportText = getEditedReportText();
+      if (!reportText) return toast('No report to export', 'warn');
+      const w = window.open('', '_blank', 'width=960,height=720');
+      if (!w) return toast('Allow popups to export PDF', 'warn');
+      const title = escapeHTML(reportBaseName().replace(/_/g, ' '));
+      const body = formatReportText(reportText);
+      w.document.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${title}</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #151b23; margin: 28px; line-height: 1.55; }
+    h2 { font-size: 24px; margin: 0 0 14px; }
+    h3 { font-size: 16px; margin: 22px 0 8px; border-bottom: 1px solid #d0d7de; padding-bottom: 6px; }
+    p { margin: 8px 0; }
+    ul { margin: 8px 0 14px 20px; padding: 0; }
+    li { margin: 4px 0; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
+    th, td { border: 1px solid #d0d7de; padding: 7px; vertical-align: top; text-align: left; }
+    th { background: #f6f8fa; }
+    code { font-family: Consolas, Menlo, monospace; }
+    @media print { body { margin: 18mm; } button { display: none; } }
+  </style>
+</head>
+<body>
+  ${body}
+  <script>
+    window.onload = () => { window.focus(); window.print(); };
+  <\/script>
+</body>
+</html>`);
+      w.document.close();
+      toast('PDF export opened. Choose Save as PDF.', 'ok');
     }
 
     async function loadIntel() {
@@ -3735,6 +3884,7 @@
     const fadeStyle = document.createElement('style');
     fadeStyle.textContent = '.fade-in-visible { opacity: 1 !important; transform: translateY(0) !important; transition: opacity 0.45s cubic-bezier(0.4,0,0.2,1), transform 0.45s cubic-bezier(0.4,0,0.2,1); transition-delay: var(--delay, 0s); }';
     document.head.appendChild(fadeStyle);
+    refreshReportEndpoints();
     refreshAll();
     setInterval(refreshAll, 30000);
   </script>

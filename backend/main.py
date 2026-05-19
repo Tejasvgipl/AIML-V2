@@ -4,7 +4,7 @@ Handles: log ingestion, IP trail, threat intel, stats, 24 behavioural baselines,
          hot/cold archive storage, incremental baseline updates,
          OpenSearch persistent store with ILM
 """
-import os, json, time, statistics, gzip, logging, asyncio, threading
+import os, json, time, statistics, gzip, logging, asyncio, threading, html, textwrap
 from collections import deque, OrderedDict
 try:
     import opensearch_client as osc
@@ -18,6 +18,7 @@ import redis.asyncio as aioredis
 import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 logger = logging.getLogger("cybersentinel.backend")
 
@@ -1301,6 +1302,83 @@ def _render_security_report(timeframe: str, start: datetime, end: datetime, data
     return "\n".join(lines) + "\n"
 
 
+def _report_filename(timeframe: str, ext: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"CyberSentinel_{timeframe}_Report_{stamp}.{ext}"
+
+
+def _render_report_html(report: str, payload: dict) -> str:
+    title = f"CyberSentinel {str(payload.get('timeframe', 'weekly')).capitalize()} Security Report"
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; color: #151b23; margin: 32px; line-height: 1.55; }}
+    pre {{ white-space: pre-wrap; font-family: Consolas, Menlo, monospace; font-size: 12px; }}
+  </style>
+</head>
+<body>
+  <pre>{html.escape(report)}</pre>
+</body>
+</html>"""
+
+
+def _pdf_escape(value: str) -> str:
+    safe = value.encode("latin-1", "replace").decode("latin-1")
+    return safe.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _render_report_pdf(report: str) -> bytes:
+    wrapped_lines: list[str] = []
+    for raw_line in report.splitlines():
+        if not raw_line.strip():
+            wrapped_lines.append("")
+            continue
+        width = 90 if raw_line.startswith("|") else 96
+        wrapped_lines.extend(textwrap.wrap(raw_line, width=width, replace_whitespace=False) or [""])
+
+    lines_per_page = 52
+    pages = [wrapped_lines[i:i + lines_per_page] for i in range(0, len(wrapped_lines), lines_per_page)] or [[]]
+    objects: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"",  # filled after page object numbers are known
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    page_numbers = []
+    for page_lines in pages:
+        page_obj = len(objects) + 1
+        content_obj = page_obj + 1
+        page_numbers.append(page_obj)
+        content_lines = ["BT", "/F1 10 Tf", "50 785 Td", "13 TL"]
+        for line in page_lines:
+            content_lines.append(f"({_pdf_escape(line)}) Tj")
+            content_lines.append("T*")
+        content_lines.append("ET")
+        stream = "\n".join(content_lines).encode("latin-1", "replace")
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj} 0 R >>".encode())
+        objects.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+
+    kids = " ".join(f"{num} 0 R" for num in page_numbers)
+    objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_numbers)} >>".encode()
+
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{idx} 0 obj\n".encode())
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref_at = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode())
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode())
+    pdf.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n".encode())
+    return bytes(pdf)
+
+
 async def _generate_report_payload(timeframe: str) -> dict:
     days, start, end = _report_window(timeframe)
     r = await get_redis()
@@ -1334,8 +1412,29 @@ async def _generate_report_payload(timeframe: str) -> dict:
 
 
 @app.get("/api/reports/generate")
-async def generate_report(timeframe: str = "weekly"):
-    return await _generate_report_payload(timeframe)
+async def generate_report(timeframe: str = "weekly", format: str = "json"):
+    payload = await _generate_report_payload(timeframe)
+    fmt = (format or "json").lower()
+    if fmt in ("json", "data"):
+        return payload
+    if fmt in ("md", "markdown", "text"):
+        return PlainTextResponse(
+            payload["report"],
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{_report_filename(payload["timeframe"], "md")}"'},
+        )
+    if fmt == "html":
+        return HTMLResponse(
+            _render_report_html(payload["report"], payload),
+            headers={"Content-Disposition": f'attachment; filename="{_report_filename(payload["timeframe"], "html")}"'},
+        )
+    if fmt == "pdf":
+        return Response(
+            _render_report_pdf(payload["report"]),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{_report_filename(payload["timeframe"], "pdf")}"'},
+        )
+    raise HTTPException(400, "Format must be json, markdown, md, text, html, or pdf")
 
 
 @app.get("/api/report/smart")

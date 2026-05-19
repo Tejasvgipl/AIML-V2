@@ -113,6 +113,7 @@ POST /api/blocklist/add           Block an IP
 DEL  /api/blocklist/{ip}          Unblock an IP
 GET  /api/search?q=               Search IPs by prefix
 GET  /api/reports/generate        Generate deterministic weekly/monthly SOC report
+                                  ?timeframe=weekly|monthly&format=json|md|html|pdf
 ```
 
 ### ML Engine endpoints
