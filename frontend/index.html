@@ -1873,6 +1873,8 @@
         <div class="ns">Control</div>
         <div class="ni" onclick="nav('blocklist')"><span class="ndot nd-r"></span>Blocklist</div>
         <div class="ni" onclick="nav('ingest')"><span class="ndot nd-g"></span>Ingest Logs</div>
+        <div class="ns">Reporting</div>
+        <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Smart Reports</div>
       </nav>
       <div class="sfooter">
         <div class="srow"><span class="pulse"></span>Backend API</div>
@@ -2451,6 +2453,38 @@
           </div>
         </div>
       </div>
+      <div id="page-reports" class="page">
+        <div class="term-panel">
+          <div class="term-title">Executive AI Reporting</div>
+          <div class="term-grid">
+            <div class="term"><b>Smart Analysis:</b> AI reads your OpenSearch aggregates, active hot IPs, and threat counts to generate a precise SOC summary.</div>
+            <div class="term"><b>Editable:</b> Switch to Edit Mode to tweak the Markdown before saving/sharing with stakeholders.</div>
+            <div class="term"><b>Download:</b> Export the finalized report as a cleanly formatted .md file.</div>
+          </div>
+        </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="cb" style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn ai" onclick="generateReport('weekly')">Generate Weekly Report</button>
+            <button class="btn ai" onclick="generateReport('monthly')">Generate Monthly Report</button>
+            <span id="rep-status" style="font-size:12px;color:var(--muted);align-self:center"></span>
+          </div>
+        </div>
+        <div id="report-container" style="display:none">
+          <div class="card">
+            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
+              <span class="ct">Report Preview</span>
+              <div>
+                <button class="btn" id="rep-edit-btn" onclick="toggleReportEdit()">✏️ Edit</button>
+                <button class="btn pri" onclick="downloadReport()">💾 Download .md</button>
+              </div>
+            </div>
+            <div class="cb">
+              <div id="rep-preview" class="ai-body" style="background:var(--bg3);padding:16px;border-radius:6px;min-height:300px;line-height:1.8"></div>
+              <textarea id="rep-editor" style="display:none;width:100%;height:400px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:16px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;resize:vertical"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
   <div class="toast-wrap" id="toast-wrap"></div>
@@ -2480,7 +2514,7 @@
         overview: 'Overview', trail: 'IP Trail', livealerts: 'Live Alerts',
         deviations: 'Baseline Deviations', bslexplorer: 'Baseline Explorer',
         aiinvestigate: 'AI Investigator', ml: 'ML Anomaly', mlintern: 'ML Intern', clusters: 'Subnet Clusters',
-        blocklist: 'Blocklist', ingest: 'Ingest Logs'
+        blocklist: 'Blocklist', ingest: 'Ingest Logs', reports: 'Smart Reports'
       };
       document.getElementById('page-title').textContent = T[name] || name;
       if (name === 'overview') refreshAll();
@@ -2717,6 +2751,68 @@
       body.innerHTML = formatAIText(r.explanation);
       toast('AI analysis ready', 'ai');
     }
+    
+    let isReportEditMode = false;
+    async function generateReport(timeframe) {
+      const btnStatus = document.getElementById('rep-status');
+      const container = document.getElementById('report-container');
+      const preview = document.getElementById('rep-preview');
+      const editor = document.getElementById('rep-editor');
+      
+      container.style.display = 'block';
+      isReportEditMode = false;
+      preview.style.display = 'block';
+      editor.style.display = 'none';
+      document.getElementById('rep-edit-btn').textContent = '✏️ Edit';
+      
+      aiLoading(preview);
+      btnStatus.textContent = 'Generating ' + timeframe + ' report...';
+      
+      const r = await get(`${API}/report/smart?timeframe=${timeframe}`);
+      if (!r) { 
+        preview.innerHTML = '<span style="color:var(--danger)">Report generation failed.</span>';
+        btnStatus.textContent = '';
+        return; 
+      }
+      
+      editor.value = r.report;
+      preview.innerHTML = formatAIText(r.report);
+      btnStatus.textContent = `Generated successfully by ${r.model || 'AI'}`;
+      toast('Report ready', 'ai');
+    }
+
+    function toggleReportEdit() {
+      isReportEditMode = !isReportEditMode;
+      const preview = document.getElementById('rep-preview');
+      const editor = document.getElementById('rep-editor');
+      const btn = document.getElementById('rep-edit-btn');
+      
+      if (isReportEditMode) {
+        preview.style.display = 'none';
+        editor.style.display = 'block';
+        btn.textContent = '👁️ Preview';
+      } else {
+        editor.style.display = 'none';
+        preview.style.display = 'block';
+        preview.innerHTML = formatAIText(editor.value);
+        btn.textContent = '✏️ Edit';
+      }
+    }
+
+    function downloadReport() {
+      const editor = document.getElementById('rep-editor');
+      if (!editor.value) return toast('No report to download', 'warn');
+      const blob = new Blob([editor.value], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `CyberSentinel_Report_${new Date().toISOString().split('T')[0]}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
     async function loadIntel() {
       if (!curIP) return;
       const d = await get(`${API}/intel/${curIP}`); if (!d) return;

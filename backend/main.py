@@ -1083,7 +1083,73 @@ Reference the actual data. If evidence is missing, say what is missing instead o
     }
 
 
-# ── stats ─────────────────────────────────────────────────────────────────────
+# ── AI Reports ────────────────────────────────────────────────────────────────
+
+@app.get("/api/report/smart")
+async def generate_smart_report(timeframe: str = "weekly"):
+    if timeframe not in ["weekly", "monthly"]:
+        raise HTTPException(400, "Timeframe must be weekly or monthly")
+    
+    days = 7 if timeframe == "weekly" else 30
+    
+    r = await get_redis()
+    
+    # 1. Get OpenSearch aggregates if available
+    os_stats = {}
+    if OPENSEARCH_ENABLED and osc:
+        os_stats["total_docs"] = osc.get_total_doc_count()
+        os_stats["global_threats"] = osc.get_global_threat_counts()
+    
+    # 2. Get active Redis states
+    hot_ips = await r.smembers("hot_ips")
+    blocklist_auto = await r.smembers("blocklist:auto")
+    blocklist_manual = await r.smembers("blocklist:manual")
+    total_alerts = await r.get("stat:total_alerts") or "0"
+    
+    # 3. Get top 3 hot IPs context
+    top_hot_ips = []
+    for ip in list(hot_ips)[:3]:
+        ctx = await collect_ip_context(r, ip.decode("utf-8") if isinstance(ip, bytes) else ip)
+        # only keep last 5 events for brevity
+        ctx["events"] = ctx["events"][-5:]
+        top_hot_ips.append(ctx)
+        
+    prompt = f"""You are a senior cybersecurity analyst generating a highly precise and effective executive {timeframe} report.
+Do not use generic fluff. Focus on exactly WHAT happened, WHICH IPs caused it, and WHAT the system did.
+
+Timeframe: Last {days} days
+
+System Posture Data:
+- Total logs indexed: {os_stats.get('total_docs', 'Unknown')}
+- Global threat breakdown: {json.dumps(os_stats.get('global_threats', {}))}
+- Total deviation alerts generated: {int(total_alerts)}
+- Active Hot IPs: {len(hot_ips)}
+- Auto-blocked IPs: {len(blocklist_auto)}
+- Manually blocked IPs: {len(blocklist_manual)}
+
+Top 3 Highest Risk IPs Analysis (Sample):
+{json.dumps(top_hot_ips, indent=2)}
+
+Write the report in beautifully formatted Markdown. Include these exact sections:
+# CyberSentinel Executive Report ({timeframe.capitalize()})
+## 1. High-Level Summary
+(Summarize the threat pressure, log volume, and block actions.)
+## 2. Threat Landscape
+(Analyze the global threat breakdown and what types of attacks are most prevalent.)
+## 3. Notable Attackers & Root Causes
+(Critically analyze the provided Top 3 IPs. Explicitly state WHICH IP caused WHAT, referring to the ML anomaly score and actual events.)
+## 4. SOC Recommendations
+(Provide 2-3 precise recommendations based solely on this data.)
+"""
+    return {
+        "timeframe": timeframe,
+        "report": await ask_groq(prompt, max_tokens=1500),
+        "model": AI_MODEL,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+
 
 @app.get("/api/stats")
 async def get_stats():
