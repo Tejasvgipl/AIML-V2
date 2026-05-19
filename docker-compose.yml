@@ -28,6 +28,13 @@ services:
       - LOG_LEVEL=INFO
       - ARCHIVE_DIR=/app/archive
       - TRAIL_RETAIN=${TRAIL_RETAIN:-200}
+      - OPENSEARCH_ENABLED=${OPENSEARCH_ENABLED:-false}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-10.200.10.23}
+      - OPENSEARCH_PORT=${OPENSEARCH_PORT:-9200}
+      - OPENSEARCH_USER=${OPENSEARCH_USER:-admin}
+      - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
+      - OS_BULK_SIZE=${OS_BULK_SIZE:-200}
+      - OS_FLUSH_INTERVAL=${OS_FLUSH_INTERVAL:-5.0}
     volumes:
       - ./sample-data:/app/sample-data
       - ./scripts:/app/scripts

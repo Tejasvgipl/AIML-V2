@@ -1,9 +1,10 @@
 """
-CyberSentinel Backend — FastAPI v2.1
+CyberSentinel Backend — FastAPI v2.2
 Handles: log ingestion, IP trail, threat intel, stats, 24 behavioural baselines,
-         hot/cold archive storage, incremental baseline updates
+         hot/cold archive storage, incremental baseline updates,
+         OpenSearch persistent store with ILM
 """
-import os, json, time, statistics, gzip
+import os, json, time, statistics, gzip, logging, asyncio, threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,7 +14,9 @@ import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="CyberSentinel API", version="2.1.0")
+logger = logging.getLogger("cybersentinel.backend")
+
+app = FastAPI(title="CyberSentinel API", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 REDIS_HOST    = os.getenv("REDIS_HOST", "localhost")
@@ -33,6 +36,16 @@ ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", "/app/archive"))
 ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 TRAIL_RETAIN = int(os.getenv("TRAIL_RETAIN", 200))   # events to keep in Redis per IP
 
+# ── OpenSearch config ─────────────────────────────────────────────────────────
+OPENSEARCH_ENABLED = os.getenv("OPENSEARCH_ENABLED", "false").lower() in ("true", "1", "yes")
+OPENSEARCH_HOST    = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_PORT    = int(os.getenv("OPENSEARCH_PORT", 9200))
+OPENSEARCH_USER    = os.getenv("OPENSEARCH_USER", "admin")
+OPENSEARCH_PASS    = os.getenv("OPENSEARCH_PASS", "admin")
+OS_INDEX_ALIAS     = "cybersentinel-logs"           # rollover write alias
+OS_BULK_SIZE       = int(os.getenv("OS_BULK_SIZE", 200))
+OS_FLUSH_INTERVAL  = float(os.getenv("OS_FLUSH_INTERVAL", 5.0))  # seconds
+
 _redis: Optional[aioredis.Redis] = None
 
 async def get_redis() -> aioredis.Redis:
@@ -40,6 +53,103 @@ async def get_redis() -> aioredis.Redis:
     if _redis is None:
         _redis = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
     return _redis
+
+# ── OpenSearch client & bulk buffer ───────────────────────────────────────────
+
+_os_client = None
+_os_buffer: list[dict] = []
+_os_lock = threading.Lock()
+_os_flush_task: Optional[asyncio.Task] = None
+
+def get_opensearch():
+    """Lazy singleton for the OpenSearch client."""
+    global _os_client
+    if _os_client is not None:
+        return _os_client
+    if not OPENSEARCH_ENABLED:
+        return None
+    try:
+        from opensearchpy import OpenSearch
+        _os_client = OpenSearch(
+            hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
+            http_auth=(OPENSEARCH_USER, OPENSEARCH_PASS),
+            use_ssl=True,
+            verify_certs=False,
+            ssl_show_warn=False,
+            timeout=30,
+        )
+        info = _os_client.info()
+        ver = info.get("version", {}).get("number", "?")
+        logger.info(f"OpenSearch connected: v{ver} at {OPENSEARCH_HOST}:{OPENSEARCH_PORT}")
+        return _os_client
+    except Exception as e:
+        logger.warning(f"OpenSearch connection failed: {e} — continuing with Redis only")
+        _os_client = None
+        return None
+
+
+def _os_queue_doc(doc: dict) -> None:
+    """Add a document to the bulk buffer. Thread-safe."""
+    if not OPENSEARCH_ENABLED:
+        return
+    with _os_lock:
+        _os_buffer.append(doc)
+        if len(_os_buffer) >= OS_BULK_SIZE:
+            _flush_os_buffer_sync()
+
+
+def _flush_os_buffer_sync() -> None:
+    """Flush the OpenSearch bulk buffer (called under _os_lock)."""
+    global _os_buffer
+    if not _os_buffer:
+        return
+    client = get_opensearch()
+    if client is None:
+        _os_buffer.clear()
+        return
+    docs_to_flush = _os_buffer[:]
+    _os_buffer = []
+
+    bulk_body = []
+    for doc in docs_to_flush:
+        bulk_body.append({"index": {"_index": OS_INDEX_ALIAS}})
+        bulk_body.append(doc)
+    try:
+        resp = client.bulk(body=bulk_body, refresh=False)
+        errors = resp.get("errors", False)
+        if errors:
+            failed = sum(1 for item in resp.get("items", []) if item.get("index", {}).get("error"))
+            logger.warning(f"OpenSearch bulk: {len(docs_to_flush)} docs, {failed} errors")
+        else:
+            logger.debug(f"OpenSearch bulk: {len(docs_to_flush)} docs indexed")
+    except Exception as e:
+        logger.error(f"OpenSearch bulk flush failed: {e}")
+
+
+async def _os_periodic_flush() -> None:
+    """Background task that flushes OpenSearch buffer every OS_FLUSH_INTERVAL seconds."""
+    while True:
+        await asyncio.sleep(OS_FLUSH_INTERVAL)
+        with _os_lock:
+            _flush_os_buffer_sync()
+
+
+@app.on_event("startup")
+async def _start_os_flusher():
+    global _os_flush_task
+    if OPENSEARCH_ENABLED:
+        get_opensearch()  # warm up connection
+        _os_flush_task = asyncio.create_task(_os_periodic_flush())
+        logger.info(f"OpenSearch bulk flusher started (interval={OS_FLUSH_INTERVAL}s, batch={OS_BULK_SIZE})")
+
+
+@app.on_event("shutdown")
+async def _stop_os_flusher():
+    if _os_flush_task:
+        _os_flush_task.cancel()
+    # Final flush
+    with _os_lock:
+        _flush_os_buffer_sync()
 
 async def ask_groq(prompt: str, max_tokens: int = 700) -> str:
     if not AI_API_KEY:
@@ -426,12 +536,15 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
     except Exception:
         score = time.time()
 
+    dst_ip_val  = str(row.get("data.dstip", row.get("data.dest_ip", row.get("network.destIp", row.get("data.win.eventdata.destinationIp","")))))
+    dst_port_val = str(row.get("data.dstport", row.get("data.dest_port", row.get("network.destPort", row.get("data.win.eventdata.destinationPort","")))))
+
     event = {
         "ts":        ts,
         "rule":      str(row.get("rule.description",""))[:120],
         "action":    str(row.get("data.action","")),
-        "dst_ip":    str(row.get("data.dstip", row.get("data.dest_ip", row.get("network.destIp", row.get("data.win.eventdata.destinationIp",""))))),
-        "dst_port":  str(row.get("data.dstport", row.get("data.dest_port", row.get("network.destPort", row.get("data.win.eventdata.destinationPort",""))))),
+        "dst_ip":    dst_ip_val,
+        "dst_port":  dst_port_val,
         "country":   str(row.get("data.srccountry","")),
         "signature": str(row.get("data.alert.signature",""))[:100],
         "agent":     str(row.get("agent.name","")),
@@ -455,6 +568,28 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
             pipe.sadd("blocklist:auto", src_ip)
             break
     await pipe.execute()
+
+    # ── Dual-write: also index into OpenSearch ────────────────────────────
+    if OPENSEARCH_ENABLED:
+        os_doc = {
+            "@timestamp":  ts,
+            "ingested_at": datetime.now(timezone.utc).isoformat(),
+            "src_ip":      src_ip,
+            "dst_ip":      dst_ip_val,
+            "dst_port":    dst_port_val,
+            "threat_type": classification["threat_type"],
+            "severity":    classification["severity"],
+            "rule":        str(row.get("rule.description",""))[:120],
+            "rule_id":     str(row.get("rule.id","")),
+            "action":      str(row.get("data.action","")),
+            "country":     str(row.get("data.srccountry","")),
+            "agent":       str(row.get("agent.name","")),
+            "mitre":       str(row.get("rule.mitre.id","")),
+            "username":    str(row.get("data.user", row.get("data.win.eventdata.user",""))),
+            "useragent":   str(row.get("data.http.http_user_agent","")),
+            "signature":   str(row.get("data.alert.signature",""))[:100],
+        }
+        _os_queue_doc(os_doc)
 
     # Baseline deviation check
     alerts = await detect_deviations(r, src_ip, event, score)
@@ -1039,14 +1174,198 @@ async def search_ip(q: str):
 
 @app.get("/api/health")
 async def health():
+    os_status = "disabled"
+    if OPENSEARCH_ENABLED:
+        client = get_opensearch()
+        if client:
+            try:
+                client.ping()
+                os_status = "connected"
+            except Exception:
+                os_status = "error"
+        else:
+            os_status = "connection_failed"
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "ai": "configured" if AI_API_KEY else "missing",
         "archive_dir": str(ARCHIVE_DIR),
         "trail_retain": TRAIL_RETAIN,
+        "opensearch": os_status,
         "time": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ── OpenSearch query endpoints ────────────────────────────────────────────────
+
+@app.get("/api/trail/{ip}/full")
+async def get_trail_full(ip: str, limit: int = 10000, days: int = 0):
+    """Full IP trail from OpenSearch — complete history, not limited by Redis TRAIL_RETAIN."""
+    if not OPENSEARCH_ENABLED:
+        # Fallback: return Redis trail
+        return await get_trail(ip, limit=limit)
+
+    client = get_opensearch()
+    if not client:
+        return await get_trail(ip, limit=limit)
+
+    query: dict = {
+        "bool": {
+            "must": [{"term": {"src_ip": ip}}]
+        }
+    }
+    if days > 0:
+        query["bool"]["filter"] = [
+            {"range": {"@timestamp": {"gte": f"now-{days}d"}}}
+        ]
+
+    try:
+        resp = client.search(
+            index="cybersentinel-logs-*",
+            body={
+                "query": query,
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "size": min(limit, 10000),
+            },
+        )
+        hits = resp.get("hits", {})
+        total = hits.get("total", {}).get("value", 0)
+        events = [hit["_source"] for hit in hits.get("hits", [])]
+
+        # Also get Redis stats for this IP
+        r = await get_redis()
+        stats = await r.hgetall(f"ipstat:{ip}")
+
+        return {
+            "ip": ip,
+            "source": "opensearch",
+            "total": total,
+            "returned": len(events),
+            "events": events,
+            "stats": stats,
+        }
+    except Exception as e:
+        logger.error(f"OpenSearch query failed for {ip}: {e}")
+        return await get_trail(ip, limit=limit)
+
+
+@app.get("/api/opensearch/stats")
+async def opensearch_stats():
+    """OpenSearch index health, doc counts, and ILM phase info."""
+    if not OPENSEARCH_ENABLED:
+        return {"status": "disabled"}
+
+    client = get_opensearch()
+    if not client:
+        return {"status": "connection_failed"}
+
+    try:
+        cat = client.cat.indices(index="cybersentinel-logs-*", format="json")
+        indices = []
+        total_docs = 0
+        total_size = ""
+        for idx in cat:
+            doc_count = int(idx.get("docs.count", 0))
+            total_docs += doc_count
+            indices.append({
+                "index": idx.get("index"),
+                "docs": doc_count,
+                "size": idx.get("store.size", "?"),
+                "health": idx.get("health", "?"),
+                "status": idx.get("status", "?"),
+            })
+            total_size = idx.get("store.size", total_size)
+
+        # Check alias
+        alias_targets = []
+        try:
+            alias_info = client.indices.get_alias(name=OS_INDEX_ALIAS)
+            alias_targets = list(alias_info.keys())
+        except Exception:
+            pass
+
+        # Pending buffer size
+        with _os_lock:
+            pending = len(_os_buffer)
+
+        return {
+            "status": "connected",
+            "total_docs": total_docs,
+            "indices": indices,
+            "write_alias": OS_INDEX_ALIAS,
+            "alias_targets": alias_targets,
+            "pending_buffer": pending,
+            "bulk_size": OS_BULK_SIZE,
+            "flush_interval": OS_FLUSH_INTERVAL,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/opensearch/flush")
+async def opensearch_flush():
+    """Manually flush the OpenSearch bulk buffer."""
+    if not OPENSEARCH_ENABLED:
+        return {"status": "disabled"}
+    with _os_lock:
+        count = len(_os_buffer)
+        _flush_os_buffer_sync()
+    return {"status": "flushed", "docs_flushed": count}
+
+
+@app.get("/api/search/advanced")
+async def advanced_search(
+    q: str = "",
+    src_ip: str = "",
+    threat_type: str = "",
+    severity: str = "",
+    days: int = 7,
+    limit: int = 200,
+):
+    """Advanced search across OpenSearch with filters."""
+    if not OPENSEARCH_ENABLED:
+        # Fallback to basic Redis search
+        if src_ip:
+            return await search_ip(src_ip)
+        return {"error": "OpenSearch not enabled", "events": []}
+
+    client = get_opensearch()
+    if not client:
+        return {"error": "OpenSearch connection failed", "events": []}
+
+    must_clauses = []
+    if q:
+        must_clauses.append({"multi_match": {"query": q, "fields": ["rule", "signature", "username", "agent"]}})
+    if src_ip:
+        must_clauses.append({"term": {"src_ip": src_ip}})
+    if threat_type:
+        must_clauses.append({"term": {"threat_type": threat_type}})
+    if severity:
+        must_clauses.append({"term": {"severity": severity}})
+
+    if not must_clauses:
+        must_clauses.append({"match_all": {}})
+
+    try:
+        resp = client.search(
+            index="cybersentinel-logs-*",
+            body={
+                "query": {
+                    "bool": {
+                        "must": must_clauses,
+                        "filter": [{"range": {"@timestamp": {"gte": f"now-{days}d"}}}],
+                    }
+                },
+                "sort": [{"@timestamp": {"order": "desc"}}],
+                "size": min(limit, 10000),
+            },
+        )
+        hits = resp.get("hits", {})
+        total = hits.get("total", {}).get("value", 0)
+        events = [hit["_source"] for hit in hits.get("hits", [])]
+        return {"total": total, "returned": len(events), "events": events, "source": "opensearch"}
+    except Exception as e:
+        return {"error": str(e), "events": []}
 
 
 # ── hot/cold archive system ──────────────────────────────────────────────────
