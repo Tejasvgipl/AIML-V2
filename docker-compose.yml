@@ -35,6 +35,8 @@ services:
       - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
       - OS_BULK_SIZE=${OS_BULK_SIZE:-200}
       - OS_FLUSH_INTERVAL=${OS_FLUSH_INTERVAL:-5.0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./sample-data:/app/sample-data
       - ./scripts:/app/scripts
