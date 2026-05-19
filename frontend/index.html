@@ -3046,16 +3046,93 @@
       document.getElementById('ai-inv-title').textContent = 'Full investigation — ' + ip;
       document.getElementById('ai-inv-model').textContent = '';
       aiLoading(body);
-      const r = await get(`${API}/explain/${ip}`);
-      if (!r) { body.innerHTML = '<span style="color:var(--danger)">AI unavailable. Check the AI key in .env and restart backend.</span>'; return; }
-      document.getElementById('ai-inv-model').textContent = (r.model || 'AI model') + ' · ' + String(r.generated_at || '').substring(0, 19);
-      body.innerHTML = `${formatAIText(r.explanation)}
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
-      <button class="btn" onclick="goTrail('${ip}')">View trail</button>
-      <button class="btn ai" onclick="aiMLExplainFor('${ip}')">Explain ML score</button>
-      <button class="btn red" onclick="blockIPDirect('${ip}')">Block IP</button>
-    </div>`;
-      toast('AI investigation ready', 'ai');
+
+      const [intel, bslRes, alr, sum, mlRes, aiRes] = await Promise.all([
+        get(`${API}/intel/${ip}`),
+        get(`${API}/baseline/${ip}`),
+        get(`${API}/alerts/${ip}`),
+        get(`${API}/trail/${ip}/summary`),
+        get(`${ML}/score/${ip}`),
+        get(`${API}/explain/${ip}`)
+      ]);
+
+      const ai = aiRes || { explanation: "AI unavailable." };
+      const d = intel || { ip: ip, is_known_bad: false, in_blocklist: false, abuseipdb: null };
+      const b = (bslRes && bslRes.found) ? bslRes.baseline : null;
+      const t = sum || { total: 0, first_seen: '', last_seen: '', threat_types: {} };
+      const ml = mlRes || { risk_score: 0, confidence: 'low', anomaly_score: 0 };
+
+      const tt = t.threat_types ? Object.entries(t.threat_types).sort((a,b)=>b[1]-a[1])[0] : null;
+      const threatStr = tt ? `${tt[0].replace(/_/g, ' ')}: ${tt[1]}` : 'none';
+
+      let html = `<div style="display:flex;flex-direction:column;gap:15px;margin-top:10px;">
+        <div style="padding:15px;background:var(--bg3);border-radius:6px;border-left:4px solid ${ml.risk_score > 70 ? 'var(--danger)' : ml.risk_score > 40 ? 'var(--warn)' : 'var(--ok)'}">
+          <h2 style="margin:0;font-size:24px;color:var(--text)">${ml.risk_score}/100 <span style="font-size:14px;color:var(--muted);text-transform:uppercase">${ml.risk_score > 70 ? 'HIGH RISK' : ml.risk_score > 40 ? 'MEDIUM RISK' : 'LOW RISK'}</span></h2>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
+          <div class="card" style="margin:0"><div class="ch"><span class="ct" style="color:var(--accent)">IP DETAILS</span></div>
+          <div class="cb" style="line-height:2.0;font-size:13px">
+            <b>IP:</b> ${d.ip}<br>
+            <b>Type:</b> ${d.ip.startsWith('10.')||d.ip.startsWith('192.') ? 'Internal' : 'External'}<br>
+            <b>Blocked:</b> ${d.in_blocklist ? 'Yes' : 'No'}<br>
+            <b>Known bad subnet:</b> ${d.is_known_bad ? 'Yes' : 'No'}
+          </div></div>
+
+          <div class="card" style="margin:0"><div class="ch"><span class="ct" style="color:var(--accent)">THREAT INTELLIGENCE</span></div>
+          <div class="cb" style="line-height:2.0;font-size:13px">
+            ${d.abuseipdb ? `
+            <b>AbuseIPDB: <span style="color:${d.abuseipdb.score > 50 ? 'var(--danger)' : 'var(--warn)'}">${d.abuseipdb.score}/100</span></b><br>
+            <b>Country:</b> ${d.abuseipdb.country}<br>
+            <b>ISP:</b> ${d.abuseipdb.isp}<br>
+            <b>Reports:</b> ${d.abuseipdb.total_reports} | <b>Tor:</b> ${d.abuseipdb.is_tor ? 'Yes' : 'No'}
+            ` : 'No Threat Intel available'}
+          </div></div>
+        </div>
+
+        <div class="card" style="margin:0"><div class="ch"><span class="ct" style="color:var(--danger)">⚠ RISK INDICATORS</span></div>
+        <div class="cb">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${alr && alr.alerts && alr.alerts.length ? alr.alerts.map(a => `<span class="badge ${a.severity}">${a.type.replace(/_/g, ' ')}</span>`).join('') : '<span class="badge ok">No deviations</span>'}
+          </div>
+        </div></div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;">
+          <div class="card" style="margin:0;border-left:2px solid var(--accent)"><div class="ch" style="border:none;padding-bottom:5px"><span class="ct" style="color:var(--muted)">ML ANALYSIS</span></div>
+          <div class="cb" style="font-size:12px;line-height:1.8">
+            ${mlRes ? `Anomaly Score: ${ml.anomaly_score.toFixed(3)}<br>Confidence: ${ml.confidence}` : 'No ML score available. Train the model first.'}
+          </div></div>
+
+          <div class="card" style="margin:0;border-left:2px solid var(--ok)"><div class="ch" style="border:none;padding-bottom:5px"><span class="ct" style="color:var(--muted)">EVENT TRAIL</span></div>
+          <div class="cb" style="font-size:12px;line-height:1.8">
+            <b>Total Events:</b> ${t.total}<br>
+            <b>First Seen:</b> ${(t.first_seen||'').substring(0,19).replace('T',' ')}<br>
+            <b>Last Seen:</b> ${(t.last_seen||'').substring(0,19).replace('T',' ')}<br>
+            <b>Top Threat:</b> ${threatStr}
+          </div></div>
+
+          <div class="card" style="margin:0;border-left:2px solid var(--warn)"><div class="ch" style="border:none;padding-bottom:5px"><span class="ct" style="color:var(--muted)">BASELINE PROFILE</span></div>
+          <div class="cb" style="font-size:12px;line-height:1.8">
+            ${b ? `
+            <b>Events:</b> ${b.event_count} | <b>Avg daily:</b> ${b.avg_daily_events.toFixed(2)}/day<br>
+            <b>Severity avg:</b> ${b.avg_severity_score}<br>
+            <b>Failures:</b> ${b.total_failures} | <b>Successes:</b> ${b.total_successes}<br>
+            <b>Ports:</b> ${Object.keys(b.usual_ports || {}).slice(0,3).join(', ') || 'none'}
+            ` : 'No baseline data.'}
+          </div></div>
+        </div>
+
+        <div style="margin-top:10px">
+          <h3 style="font-size:12px;color:var(--ai);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">🤖 AI ANALYSIS</h3>
+          <div style="font-size:14px;line-height:1.7;color:var(--text);background:rgba(255,255,255,0.02);padding:15px;border-radius:8px">
+            ${formatAIText(ai.explanation)}
+          </div>
+        </div>
+      </div>`;
+
+      body.innerHTML = html;
+      document.getElementById('ai-inv-model').textContent = (ai.model || 'AI model') + ' · ' + String(ai.generated_at || '').substring(0, 19);
+      toast('Full investigation ready', 'ai');
     }
     async function aiMLExplain() {
       const ip = document.getElementById('ai-ip-input').value.trim(); if (!ip) return;

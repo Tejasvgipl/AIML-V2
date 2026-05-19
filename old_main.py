@@ -64,9 +64,9 @@ async def ask_groq(prompt: str, max_tokens: int = 700) -> str:
                 msg = data.get("error", {}).get("message", f"HTTP {resp.status_code}")
                 if "restricted" in msg.lower() or "billing" in msg.lower() or "limit" in msg.lower():
                     if "WHAT THIS ALERT MEANS" in prompt:
-                        return "**Simulated AI Analysis (Account Restricted):**\n\nWHAT THIS ALERT MEANS:\nThis represents a significant behavioral deviation from the IP's established baseline.\n\nWHY IT IS HIGH:\nThis activity matches known adversary tactics such as lateral movement or credential access.\n\nWHAT TO DO:\nInvestigate the IP trail, check for successful logins, and consider immediate blocking if the behavior persists."
+                        return "<b>Simulated AI Analysis (Account Restricted):</b>\n\nWHAT THIS ALERT MEANS:\nThis represents a significant behavioral deviation from the IP's established baseline.\n\nWHY IT IS HIGH:\nThis activity matches known adversary tactics such as lateral movement or credential access.\n\nWHAT TO DO:\nInvestigate the IP trail, check for successful logins, and consider immediate blocking if the behavior persists."
                     else:
-                        return "**Simulated AI Analysis (Account Restricted):**\n\nWHY THIS SCORE:\nThe Isolation Forest model detected this IP as an outlier compared to the normal traffic patterns.\n\nWHAT THE ANOMALY SCORE MEANS:\nA negative score indicates the behavior is highly unusual. The baseline deviations and threat indicators heavily influenced this result.\n\nCONFIDENCE:\nHigh. Multiple corroborating signals confirm this is not normal network activity."
+                        return "<b>Simulated AI Analysis (Account Restricted):</b>\n\nWHY THIS SCORE:\nThe Isolation Forest model detected this IP as an outlier compared to the normal traffic patterns.\n\nWHAT THE ANOMALY SCORE MEANS:\nA negative score indicates the behavior is highly unusual. The baseline deviations and threat indicators heavily influenced this result.\n\nCONFIDENCE:\nHigh. Multiple corroborating signals confirm this is not normal network activity."
                 return f"AI provider error: {msg}"
             return data["choices"][0]["message"]["content"]
     except Exception as e:
@@ -414,10 +414,10 @@ async def save_alerts(r: aioredis.Redis, ip: str, alerts: list):
 
 # ── ingestion ─────────────────────────────────────────────────────────────────
 
-async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
+async def ingest_log_row(r: aioredis.Redis, row: dict):
     src_ip = extract_src_ip(row)
     if not src_ip:
-        return False
+        return
 
     classification = classify_event(row)
     ts = row.get("@timestamp", datetime.now(timezone.utc).isoformat())
@@ -466,8 +466,6 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
     if total and int(total) % 50 == 0:
         await build_baseline(r, src_ip)
 
-    return True
-
 
 @app.post("/api/ingest/csv")
 async def ingest_csv(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
@@ -489,7 +487,7 @@ async def ingest_csv(background_tasks: BackgroundTasks, file: UploadFile = File(
 
 
 @app.post("/api/ingest/bulk")
-async def ingest_bulk(request: Request):
+async def ingest_bulk(background_tasks: BackgroundTasks, request: Request):
     body = await request.json()
     if isinstance(body, list):
         logs = body
@@ -497,15 +495,12 @@ async def ingest_bulk(request: Request):
         logs = body["logs"]
     else:
         raise HTTPException(400, "Expected a list or {logs: [...]}")
-    r = await get_redis()
-    saved = 0
-    skipped = 0
-    for log in logs:
-        if await ingest_log_row(r, log):
-            saved += 1
-        else:
-            skipped += 1
-    return {"status":"ok","count":len(logs),"saved":saved,"skipped":skipped}
+    async def process():
+        r = await get_redis()
+        for log in logs:
+            await ingest_log_row(r, log)
+    background_tasks.add_task(process)
+    return {"status":"ingesting","count":len(logs)}
 
 
 @app.post("/api/ingest/log")
@@ -890,7 +885,7 @@ Reference the actual data. If evidence is missing, say what is missing instead o
         "ip": ip,
         "explanation": await ask_groq(prompt, max_tokens=850),
         "risk_score": ml.get("risk_score"),
-        "model": AI_MODEL,
+        "model": GROQ_MODEL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
