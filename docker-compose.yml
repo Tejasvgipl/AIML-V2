@@ -3,7 +3,7 @@ services:
     build: ./redis-config
     container_name: cs_redis
     ports:
-      - "6380:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-16380}:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -17,7 +17,7 @@ services:
     build: ./backend
     container_name: cs_backend
     ports:
-      - "8010:8000"
+      - "${BACKEND_HOST_PORT:-18110}:8000"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -41,7 +41,7 @@ services:
     build: ./ml-engine
     container_name: cs_ml
     ports:
-      - "8011:8001"
+      - "${ML_ENGINE_HOST_PORT:-18111}:8001"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -58,7 +58,7 @@ services:
     build: ./ml-intern
     container_name: cs_ml_intern
     ports:
-      - "8012:8002"
+      - "${ML_INTERN_HOST_PORT:-18112}:8002"
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -80,7 +80,7 @@ services:
     build: ./frontend
     container_name: cs_frontend
     ports:
-      - "3001:80"
+      - "${FRONTEND_HOST_PORT:-18180}:80"
     depends_on:
       - backend
       - ml-engine
@@ -90,7 +90,7 @@ services:
     build: ./nginx
     container_name: cs_nginx
     ports:
-      - "8888:80"
+      - "${NGINX_HOST_PORT:-18888}:80"
     depends_on:
       - frontend
       - backend
@@ -108,8 +108,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - WAZUH_ALERTS_PATH=/wazuh/alerts.json
-      - WAZUH_API_URL=http://backend:8000
-      - WAZUH_ML_API_URL=http://ml-engine:8001
+      - WAZUH_API_URL=${WAZUH_API_URL:-http://backend:8000}
+      - WAZUH_ML_API_URL=${WAZUH_ML_API_URL:-http://ml-engine:8001}
       - WAZUH_POLL_INTERVAL=${WAZUH_POLL_INTERVAL:-5}
       - WAZUH_BATCH_SIZE=${WAZUH_BATCH_SIZE:-200}
       - WAZUH_OFFSET_FILE=/app/data/wazuh_offset.json
