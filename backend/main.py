@@ -6,7 +6,10 @@ Handles: log ingestion, IP trail, threat intel, stats, 24 behavioural baselines,
 """
 import os, json, time, statistics, gzip, logging, asyncio, threading
 from collections import deque, OrderedDict
-import opensearch_client as osc
+try:
+    import opensearch_client as osc
+except Exception:
+    osc = None  # type: ignore
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -300,7 +303,7 @@ async def build_baseline(r: aioredis.Redis, ip: str):
     Falls back to the in-process recent-events cache when OpenSearch is disabled.
     """
     # --- source: OpenSearch (preferred) ---
-    if OPENSEARCH_ENABLED:
+    if OPENSEARCH_ENABLED and osc:
         events = osc.get_ip_events(ip, limit=5000)  # up to last 5k events
     else:
         # Fallback: use in-process cache
@@ -647,7 +650,7 @@ async def ingest_csv(background_tasks: BackgroundTasks, file: UploadFile = File(
         for row in rows:
             await ingest_log_row(r, row)
         # Build baselines for all IPs seen in OpenSearch after CSV ingest
-        if OPENSEARCH_ENABLED:
+        if OPENSEARCH_ENABLED and osc:
             for ip in osc.get_all_unique_ips():
                 await build_baseline(r, ip)
         else:
@@ -691,7 +694,7 @@ async def ingest_single(log: dict):
 @app.get("/api/trail/{ip}")
 async def get_trail(ip: str, limit: int = 100):
     """Recent trail for an IP. Reads from OpenSearch when enabled."""
-    if OPENSEARCH_ENABLED:
+    if OPENSEARCH_ENABLED and osc:
         events = osc.get_ip_events_desc(ip, limit=limit)
         total  = osc.get_ip_total_count(ip)
         threat_counts = osc.get_ip_threat_counts(ip)
@@ -706,7 +709,7 @@ async def get_trail(ip: str, limit: int = 100):
 async def trail_summary(ip: str):
     """IP summary: threat types, severities, first/last seen — from OpenSearch."""
     r = await get_redis()
-    if OPENSEARCH_ENABLED:
+    if OPENSEARCH_ENABLED and osc:
         total = osc.get_ip_total_count(ip)
         if total == 0:
             return {"ip": ip, "found": False}
@@ -832,7 +835,7 @@ async def force_build_baseline(ip: str):
 @app.post("/api/baseline/build-all")
 async def build_all_baselines():
     r = await get_redis()
-    if OPENSEARCH_ENABLED:
+    if OPENSEARCH_ENABLED and osc:
         ips = osc.get_all_unique_ips()
     else:
         cnt_keys = await r.keys("ipcnt:*")
@@ -883,7 +886,7 @@ async def get_ip_alerts(ip: str):
 
 async def collect_ip_context(r: aioredis.Redis, ip: str) -> dict:
     # Pull recent events from OpenSearch for AI explanations
-    if OPENSEARCH_ENABLED:
+    if OPENSEARCH_ENABLED and osc:
         events = osc.get_ip_events_desc(ip, limit=40)
     else:
         events = [e for _, e in _get_recent(ip, limit=40)]
