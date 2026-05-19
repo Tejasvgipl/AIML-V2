@@ -8,6 +8,7 @@ CyberSentinel ML Engine v2.0
 import os, json, joblib, statistics
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 import numpy as np
 import redis.asyncio as aioredis
 from sklearn.ensemble import IsolationForest
@@ -16,7 +17,16 @@ import networkx as nx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="CyberSentinel ML Engine", version="2.0.0")
+# Import shared OpenSearch client (same directory as this file in Docker)
+sys.path.insert(0, "/app")
+try:
+    import opensearch_client as osc
+    OS_ENABLED = osc.OPENSEARCH_ENABLED
+except ImportError:
+    osc = None
+    OS_ENABLED = False
+
+app = FastAPI(title="CyberSentinel ML Engine", version="2.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 REDIS_HOST = os.getenv("REDIS_HOST","localhost")
@@ -33,8 +43,50 @@ async def get_redis():
     return _redis
 
 # ── feature extraction ────────────────────────────────────────────────────────
+# Primary source: OpenSearch (full event history per IP)
+# Fallback: Redis trail:{ip} (legacy, used when OpenSearch is disabled)
+
+FEATURE_COLS = [
+    "n_events","event_rate_pm","avg_interval_s","min_interval_s",
+    "std_interval_s","unique_dst_ips","unique_dst_ports","unique_countries",
+    "pct_critical","pct_high","brute_force_cnt","ssh_bf_cnt",
+    "rdp_cnt","db_scan_cnt","known_bad_cnt","priv_esc_cnt",
+    "vpn_bf_cnt","baseline_alerts","critical_alerts",
+]
+
+async def _get_alert_counts(r: aioredis.Redis, ip: str) -> tuple[int, int]:
+    """Return (baseline_alert_count, critical_alert_count) from Redis."""
+    alert_keys = await r.keys(f"alert:{ip}:*")
+    baseline_alerts = len(alert_keys)
+    critical_alerts = 0
+    for key in alert_keys:
+        val = await r.get(key)
+        if val:
+            try:
+                a = json.loads(val)
+                if a.get("severity") == "critical":
+                    critical_alerts += 1
+            except Exception:
+                pass
+    return baseline_alerts, critical_alerts
 
 async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
+    """Extract feature vector for an IP. Uses OpenSearch if enabled, Redis trail otherwise."""
+    baseline_alerts, critical_alerts = await _get_alert_counts(r, ip)
+
+    # --- OpenSearch path (preferred) ---
+    if OS_ENABLED and osc:
+        events = osc.get_ip_events(ip, limit=2000)
+        if not events:
+            return {}
+        f = osc.extract_features_from_events(ip, events)
+        if not f:
+            return {}
+        f["baseline_alerts"] = baseline_alerts
+        f["critical_alerts"]  = critical_alerts
+        return f
+
+    # --- Legacy Redis path (fallback) ---
     raw = await r.zrange(f"trail:{ip}", 0, -1, withscores=True)
     if not raw:
         return {}
@@ -63,8 +115,6 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
     severities    = {"critical":0,"high":0,"medium":0,"low":0}
     dst_ips       = set()
     dst_ports     = set()
-    hours_seen    = set()
-    weekdays_seen = set()
     countries     = set()
 
     for e in events:
@@ -86,30 +136,8 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
         if c and c not in ("","None","nan"):
             countries.add(c)
 
-        try:
-            dt = datetime.fromtimestamp(e["_score"], tz=timezone.utc)
-            hours_seen.add(dt.hour)
-            weekdays_seen.add(dt.weekday())
-        except Exception:
-            pass
-
     window_seconds = (max(timestamps)-min(timestamps)) + 1
     event_rate     = n / window_seconds * 60
-
-    # Baseline deviation score — how many baseline alerts fired
-    alert_keys = await r.keys(f"alert:{ip}:*")
-    baseline_alert_count = len(alert_keys)
-
-    critical_alert_count = 0
-    for key in alert_keys:
-        val = await r.get(key)
-        if val:
-            try:
-                a = json.loads(val)
-                if a.get("severity") == "critical":
-                    critical_alert_count += 1
-            except Exception:
-                pass
 
     return {
         "ip":                   ip,
@@ -121,8 +149,6 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
         "unique_dst_ips":       len(dst_ips),
         "unique_dst_ports":     len(dst_ports),
         "unique_countries":     len(countries),
-        "unique_hours":         len(hours_seen),
-        "unique_weekdays":      len(weekdays_seen),
         "pct_critical":         round(severities["critical"]/n, 3),
         "pct_high":             round(severities["high"]/n, 3),
         "brute_force_cnt":      threat_counts.get("brute_force", 0),
@@ -132,13 +158,11 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
         "known_bad_cnt":        threat_counts.get("known_malicious", 0),
         "priv_esc_cnt":         threat_counts.get("privilege_escalation", 0),
         "vpn_bf_cnt":           threat_counts.get("vpn_bruteforce", 0),
-        "baseline_alerts":      baseline_alert_count,
-        "critical_alerts":      critical_alert_count,
+        "baseline_alerts":      baseline_alerts,
+        "critical_alerts":      critical_alerts,
         "window_minutes":       round(window_seconds/60, 2),
     }
 
-FEATURE_COLS = [
-    "n_events","event_rate_pm","avg_interval_s","min_interval_s",
     "std_interval_s","unique_dst_ips","unique_dst_ports","unique_countries",
     "pct_critical","pct_high","brute_force_cnt","ssh_bf_cnt",
     "rdp_cnt","db_scan_cnt","known_bad_cnt","priv_esc_cnt",

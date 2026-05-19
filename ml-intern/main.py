@@ -7,6 +7,7 @@ becomes active. It does not replace the backend or the existing ML engine.
 """
 import json
 import os
+import sys
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,8 +22,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
+# Import shared OpenSearch client
+sys.path.insert(0, "/app")
+try:
+    import opensearch_client as osc
+    OS_ENABLED = osc.OPENSEARCH_ENABLED
+except ImportError:
+    osc = None
+    OS_ENABLED = False
 
-app = FastAPI(title="CyberSentinel ML Intern", version="1.0.0")
+app = FastAPI(title="CyberSentinel ML Intern", version="1.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -96,7 +105,32 @@ def safe_float(value, default: float = 0.0) -> float:
 
 
 async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
-    """Build the same per-IP feature style used by the existing ML engine."""
+    """Build per-IP feature vector. Uses OpenSearch if enabled, Redis trail otherwise."""
+    # Alert counts always from Redis (small, fast)
+    alert_keys = await r.keys(f"alert:{ip}:*")
+    critical_alerts = 0
+    for key in alert_keys:
+        try:
+            a = json.loads(await r.get(key) or "{}")
+            if a.get("severity") == "critical":
+                critical_alerts += 1
+        except Exception:
+            continue
+    baseline_alerts = len(alert_keys)
+
+    # --- OpenSearch path (preferred) ---
+    if OS_ENABLED and osc:
+        events = osc.get_ip_events(ip, limit=2000)
+        if not events:
+            return {}
+        f = osc.extract_features_from_events(ip, events)
+        if not f:
+            return {}
+        f["baseline_alerts"] = baseline_alerts
+        f["critical_alerts"]  = critical_alerts
+        return f
+
+    # --- Legacy Redis path (fallback when OpenSearch disabled) ---
     raw = await r.zrange(f"trail:{ip}", 0, -1, withscores=True)
     if not raw:
         return {}
@@ -122,35 +156,21 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
     for event in events:
         threat_type = event.get("threat_type", "unknown")
         threat_counts[threat_type] = threat_counts.get(threat_type, 0) + 1
-
         severity = event.get("severity", "low")
         if severity in severities:
             severities[severity] += 1
-
         dst_ip = str(event.get("dst_ip", "")).strip()
         if dst_ip and dst_ip not in ("None", "nan"):
             dst_ips.add(dst_ip)
-
         dst_port = str(event.get("dst_port", "")).strip()
         if dst_port and dst_port not in ("None", "nan"):
             dst_ports.add(dst_port)
-
         country = str(event.get("country", "")).strip()
         if country and country not in ("None", "nan"):
             countries.add(country)
 
     n_events = len(events)
     window_seconds = (max(timestamps) - min(timestamps)) + 1
-    alert_keys = await r.keys(f"alert:{ip}:*")
-    critical_alerts = 0
-    for key in alert_keys:
-        try:
-            alert = json.loads(await r.get(key) or "{}")
-            if alert.get("severity") == "critical":
-                critical_alerts += 1
-        except Exception:
-            continue
-
     return {
         "ip": ip,
         "n_events": n_events,
@@ -170,14 +190,26 @@ async def extract_ip_features(r: aioredis.Redis, ip: str) -> dict:
         "known_bad_cnt": threat_counts.get("known_malicious", 0),
         "priv_esc_cnt": threat_counts.get("privilege_escalation", 0),
         "vpn_bf_cnt": threat_counts.get("vpn_bruteforce", 0),
-        "baseline_alerts": len(alert_keys),
+        "baseline_alerts": baseline_alerts,
         "critical_alerts": critical_alerts,
     }
 
 
 async def collect_training_features(r: aioredis.Redis) -> list[dict]:
-    keys = await r.keys("trail:*")
+    """Collect feature vectors for all IPs. Uses OpenSearch if enabled."""
     features = []
+
+    if OS_ENABLED and osc:
+        # Get all IPs from OpenSearch
+        ips = osc.get_all_unique_ips(size=10000)
+        for ip in ips:
+            row = await extract_ip_features(r, ip)
+            if row:
+                features.append(row)
+        return features
+
+    # Fallback: scan Redis trail:* keys
+    keys = await r.keys("trail:*")
     for key in keys:
         ip = key.replace("trail:", "")
         row = await extract_ip_features(r, ip)

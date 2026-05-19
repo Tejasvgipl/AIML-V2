@@ -55,6 +55,13 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - MODEL_RETRAIN_HOURS=24
+      - OPENSEARCH_ENABLED=${OPENSEARCH_ENABLED:-false}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-10.200.10.23}
+      - OPENSEARCH_PORT=${OPENSEARCH_PORT:-9200}
+      - OPENSEARCH_USER=${OPENSEARCH_USER:-admin}
+      - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ml_models:/app/models
       - ./sample-data:/app/sample-data
@@ -78,6 +85,13 @@ services:
       - ML_INTERN_STRONG_DRIFT_THRESHOLD=${ML_INTERN_STRONG_DRIFT_THRESHOLD:-0.35}
       - ML_INTERN_MIN_TRAINING_IPS=${ML_INTERN_MIN_TRAINING_IPS:-5}
       - ML_INTERN_MODEL_DIR=/app/models
+      - OPENSEARCH_ENABLED=${OPENSEARCH_ENABLED:-false}
+      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-10.200.10.23}
+      - OPENSEARCH_PORT=${OPENSEARCH_PORT:-9200}
+      - OPENSEARCH_USER=${OPENSEARCH_USER:-admin}
+      - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ml_models:/app/models
     depends_on:

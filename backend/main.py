@@ -5,6 +5,8 @@ Handles: log ingestion, IP trail, threat intel, stats, 24 behavioural baselines,
          OpenSearch persistent store with ILM
 """
 import os, json, time, statistics, gzip, logging, asyncio, threading
+from collections import deque, OrderedDict
+import opensearch_client as osc
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -53,6 +55,35 @@ async def get_redis() -> aioredis.Redis:
     if _redis is None:
         _redis = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
     return _redis
+
+# ── In-process recent-events LRU cache ───────────────────────────────────────
+# Keeps last RECENT_PER_IP events per IP in Python process memory (NOT Redis).
+# Bounded by RECENT_MAX_IPS active IPs — evicts LRU IP when exceeded.
+# Used by deviation detection (target_shift, automated_tool).
+# Lost on container restart — acceptable: needs a few events to warm up.
+
+RECENT_PER_IP  = 50           # events kept per IP
+RECENT_MAX_IPS = 3000         # max IPs tracked; LRU eviction beyond this
+
+_recent: OrderedDict[str, deque] = OrderedDict()   # ip → deque of (score, event)
+
+def _push_recent(ip: str, score: float, event: dict) -> None:
+    """Append an event to the in-process recent-events cache."""
+    if ip not in _recent:
+        if len(_recent) >= RECENT_MAX_IPS:
+            _recent.popitem(last=False)          # evict oldest IP
+        _recent[ip] = deque(maxlen=RECENT_PER_IP)
+    else:
+        _recent.move_to_end(ip)
+    _recent[ip].append((score, event))
+
+def _get_recent(ip: str, limit: int = 50) -> list[tuple[float, dict]]:
+    """Return last `limit` (score, event) tuples for an IP, newest last."""
+    dq = _recent.get(ip)
+    if not dq:
+        return []
+    items = list(dq)
+    return items[-limit:]
 
 # ── OpenSearch client & bulk buffer ───────────────────────────────────────────
 
@@ -263,18 +294,20 @@ def get_subnet24(ip: str) -> str:
 # ── baseline builder ──────────────────────────────────────────────────────────
 
 async def build_baseline(r: aioredis.Redis, ip: str):
-    raw = await r.zrange(f"trail:{ip}", 0, -1, withscores=True)
-    if len(raw) < MIN_EVENTS_FOR_BASELINE:
-        return
+    """
+    Build a behavioural baseline for an IP.
+    Source of truth is OpenSearch (full history).
+    Falls back to the in-process recent-events cache when OpenSearch is disabled.
+    """
+    # --- source: OpenSearch (preferred) ---
+    if OPENSEARCH_ENABLED:
+        events = osc.get_ip_events(ip, limit=5000)  # up to last 5k events
+    else:
+        # Fallback: use in-process cache
+        events = [e for _, e in _get_recent(ip, limit=RECENT_PER_IP)]
 
-    events = []
-    for item, score in raw:
-        try:
-            e = json.loads(item)
-            e["_ts"] = score
-            events.append(e)
-        except Exception:
-            pass
+    if len(events) < MIN_EVENTS_FOR_BASELINE:
+        return
 
     if not events:
         return
@@ -396,19 +429,14 @@ async def detect_deviations(r: aioredis.Redis, ip: str, event: dict, ts: float) 
             f"External IP now reaching internal host {dip}",
             "critical", {"internal_dst":dip}))
 
-    # 5. TARGET SHIFT — unique dst IPs spiking
+    # 5. TARGET SHIFT — unique dst IPs spiking (uses in-process LRU cache)
     if b.get("usual_dst_ips"):
         usual_unique = len(b["usual_dst_ips"])
-        recent_raw   = await r.zrange(f"trail:{ip}", -50, -1)
         recent_dsts  = set()
-        for item in recent_raw:
-            try:
-                e2 = json.loads(item)
-                d  = str(e2.get("dst_ip","")).strip()
-                if d and d not in ("","None","nan"):
-                    recent_dsts.add(d)
-            except Exception:
-                pass
+        for _, e2 in _get_recent(ip, limit=50):
+            d = str(e2.get("dst_ip","")).strip()
+            if d and d not in ("","None","nan"):
+                recent_dsts.add(d)
         if len(recent_dsts) > usual_unique * 2 and len(recent_dsts) > 5:
             alerts.append(alert("target_shift",
                 f"Now targeting {len(recent_dsts)} unique IPs — baseline was {usual_unique}",
@@ -478,10 +506,10 @@ async def detect_deviations(r: aioredis.Redis, ip: str, event: dict, ts: float) 
                 f"FIRST LOGIN SUCCESS after {b['total_failures']} prior failures — possible breach",
                 "critical", {"prior_failures":b["total_failures"]}))
 
-    # 13. AUTOMATED TOOL (inter-event interval collapse)
-    recent_ws = await r.zrange(f"trail:{ip}", -20, -1, withscores=True)
+    # 13. AUTOMATED TOOL (inter-event interval collapse) — uses in-process LRU cache
+    recent_ws = _get_recent(ip, limit=20)
     if len(recent_ws) >= 10:
-        recent_ts_list = [sc for _, sc in recent_ws]
+        recent_ts_list = [sc for sc, _ in recent_ws]
         ivs = [recent_ts_list[i+1]-recent_ts_list[i] for i in range(len(recent_ts_list)-1)]
         if ivs:
             avg_iv = sum(ivs)/len(ivs)
@@ -536,7 +564,7 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
     except Exception:
         score = time.time()
 
-    dst_ip_val  = str(row.get("data.dstip", row.get("data.dest_ip", row.get("network.destIp", row.get("data.win.eventdata.destinationIp","")))))
+    dst_ip_val   = str(row.get("data.dstip", row.get("data.dest_ip", row.get("network.destIp", row.get("data.win.eventdata.destinationIp","")))))
     dst_port_val = str(row.get("data.dstport", row.get("data.dest_port", row.get("network.destPort", row.get("data.win.eventdata.destinationPort","")))))
 
     event = {
@@ -555,21 +583,23 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
         **classification,
     }
 
+    # ── Update in-process recent-events LRU cache (for deviation detection) ─
+    _push_recent(src_ip, score, event)
+
+    # ── Redis: thin aggregates only — NO trail, NO ipstat per-IP ─────────
     pipe = r.pipeline()
-    pipe.zadd(f"trail:{src_ip}", {json.dumps(event): score})
-    pipe.hincrby(f"ipstat:{src_ip}", classification["threat_type"], 1)
-    pipe.hincrby(f"ipstat:{src_ip}", "total", 1)
     pipe.incr("stat:total_logs")
     pipe.incr(f"stat:threat:{classification['threat_type']}")
-    if classification["severity"] in ("critical","high"):
+    pipe.incr(f"ipcnt:{src_ip}")            # lightweight per-IP event counter
+    if classification["severity"] in ("critical", "high"):
         pipe.sadd("hot_ips", src_ip)
     for subnet in KNOWN_BAD_SUBNETS:
         if src_ip.startswith(subnet):
             pipe.sadd("blocklist:auto", src_ip)
             break
-    await pipe.execute()
+    results = await pipe.execute()
 
-    # ── Dual-write: also index into OpenSearch ────────────────────────────
+    # ── OpenSearch: primary log store ─────────────────────────────────────
     if OPENSEARCH_ENABLED:
         os_doc = {
             "@timestamp":  ts,
@@ -591,14 +621,15 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
         }
         _os_queue_doc(os_doc)
 
-    # Baseline deviation check
+    # ── Baseline deviation check ──────────────────────────────────────────
     alerts = await detect_deviations(r, src_ip, event, score)
     if alerts:
         await save_alerts(r, src_ip, alerts)
 
-    # Rebuild baseline every 50 events
-    total = await r.hget(f"ipstat:{src_ip}", "total")
-    if total and int(total) % 50 == 0:
+    # ── Rebuild baseline every 100 events per IP ──────────────────────────
+    # ipcnt result is the 3rd pipeline result (index 2)
+    ipcnt_val = results[2] if len(results) > 2 else 0
+    if ipcnt_val and int(ipcnt_val) % 100 == 0:
         await build_baseline(r, src_ip)
 
     return True
@@ -615,9 +646,14 @@ async def ingest_csv(background_tasks: BackgroundTasks, file: UploadFile = File(
         r = await get_redis()
         for row in rows:
             await ingest_log_row(r, row)
-        keys = await r.keys("trail:*")
-        for key in keys:
-            await build_baseline(r, key.replace("trail:",""))
+        # Build baselines for all IPs seen in OpenSearch after CSV ingest
+        if OPENSEARCH_ENABLED:
+            for ip in osc.get_all_unique_ips():
+                await build_baseline(r, ip)
+        else:
+            # Fallback: build from in-process cache
+            for ip in list(_recent.keys()):
+                await build_baseline(r, ip)
 
     background_tasks.add_task(process)
     return {"status":"ingesting","rows":len(rows)}
@@ -654,44 +690,54 @@ async def ingest_single(log: dict):
 
 @app.get("/api/trail/{ip}")
 async def get_trail(ip: str, limit: int = 100):
-    r   = await get_redis()
-    raw = await r.zrange(f"trail:{ip}", -limit, -1)
-    events = []
-    for item in raw:
-        try:
-            events.append(json.loads(item))
-        except Exception:
-            pass
-    stats = await r.hgetall(f"ipstat:{ip}")
-    return {"ip":ip,"events":events,"stats":stats,"total":len(events)}
+    """Recent trail for an IP. Reads from OpenSearch when enabled."""
+    if OPENSEARCH_ENABLED:
+        events = osc.get_ip_events_desc(ip, limit=limit)
+        total  = osc.get_ip_total_count(ip)
+        threat_counts = osc.get_ip_threat_counts(ip)
+        return {"ip": ip, "events": events, "stats": threat_counts, "total": total, "source": "opensearch"}
+    # Fallback: in-process cache
+    recent = _get_recent(ip, limit=limit)
+    events = [e for _, e in recent]
+    return {"ip": ip, "events": events, "stats": {}, "total": len(events), "source": "cache"}
 
 
 @app.get("/api/trail/{ip}/summary")
 async def trail_summary(ip: str):
-    r   = await get_redis()
-    raw = await r.zrange(f"trail:{ip}", 0, -1, withscores=True)
-    if not raw:
-        return {"ip":ip,"found":False}
+    """IP summary: threat types, severities, first/last seen — from OpenSearch."""
+    r = await get_redis()
+    if OPENSEARCH_ENABLED:
+        total = osc.get_ip_total_count(ip)
+        if total == 0:
+            return {"ip": ip, "found": False}
+        threat_types  = osc.get_ip_threat_counts(ip)
+        severities    = osc.get_ip_severity_counts(ip)
+        first_seen, last_seen = osc.get_ip_first_last_seen(ip)
+        return {
+            "ip":           ip,
+            "found":        True,
+            "total":        total,
+            "first_seen":   first_seen,
+            "last_seen":    last_seen,
+            "threat_types": threat_types,
+            "severities":   severities,
+            "is_hot":       await r.sismember("hot_ips", ip),
+            "is_blocked":   await r.sismember("blocklist:auto", ip),
+            "source":       "opensearch",
+        }
 
-    events = []
-    for item, score in raw:
-        try:
-            e = json.loads(item)
-            e["_score"] = score
-            events.append(e)
-        except Exception:
-            pass
-
+    # Fallback when OpenSearch is disabled — use in-process cache
+    recent = _get_recent(ip, limit=RECENT_PER_IP)
+    if not recent:
+        return {"ip": ip, "found": False}
+    events = [e for _, e in recent]
     threat_types: dict = {}
     severities: dict   = {}
     for e in events:
-        k = e.get("threat_type","?")
-        threat_types[k] = threat_types.get(k,0) + 1
-        s = e.get("severity","?")
-        severities[s]   = severities.get(s,0) + 1
-
-    first_ts = min(e["_score"] for e in events)
-    last_ts  = max(e["_score"] for e in events)
+        threat_types[e.get("threat_type","?")] = threat_types.get(e.get("threat_type","?"),0)+1
+        severities[e.get("severity","?")]       = severities.get(e.get("severity","?"),0)+1
+    first_ts = min(sc for sc, _ in recent)
+    last_ts  = max(sc for sc, _ in recent)
 
     return {
         "ip":           ip,
