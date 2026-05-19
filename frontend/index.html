@@ -2472,6 +2472,7 @@
         <div class="card" style="margin-bottom:16px">
           <div class="ch"><span class="ct">Report API Endpoint</span></div>
           <div class="cb" style="display:grid;gap:8px">
+            <div id="rep-api-context" style="font-size:12px;color:var(--muted)">Current report: weekly</div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <code id="rep-api-json" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
               <button class="btn" onclick="copyReportEndpoint('json')">Copy JSON</button>
@@ -2809,15 +2810,23 @@
     
     let isReportEditMode = false;
     let currentReportPayload = null;
+    let currentReportTimeframe = 'weekly';
     function reportEndpoint(format, timeframe = 'weekly') {
       return `${API}/reports/generate?timeframe=${timeframe}&format=${format}`;
     }
 
     function refreshReportEndpoints() {
+      const timeframe = currentReportPayload?.timeframe || currentReportTimeframe || 'weekly';
+      currentReportTimeframe = timeframe;
+      const context = document.getElementById('rep-api-context');
+      if (context) {
+        const generated = currentReportPayload?.generated_at ? ` · generated ${String(currentReportPayload.generated_at).substring(0, 19)}` : '';
+        context.textContent = `Current report: ${timeframe}${generated}`;
+      }
       const formats = ['json', 'md', 'pdf', 'html'];
       formats.forEach(format => {
         const el = document.getElementById(`rep-api-${format}`);
-        if (el) el.textContent = `GET ${reportEndpoint(format)}`;
+        if (el) el.textContent = `GET ${reportEndpoint(format, timeframe)}`;
       });
     }
 
@@ -2838,7 +2847,7 @@
     }
 
     async function copyReportEndpoint(format) {
-      const value = reportEndpoint(format);
+      const value = reportEndpoint(format, currentReportPayload?.timeframe || currentReportTimeframe || 'weekly');
       await copyText(value);
       toast(format.toUpperCase() + ' endpoint copied', 'ok');
     }
@@ -2866,6 +2875,8 @@
       }
 
       currentReportPayload = r;
+      currentReportTimeframe = r.timeframe || timeframe;
+      refreshReportEndpoints();
       editor.value = r.report;
       preview.innerHTML = formatReportText(r.report);
       btnStatus.textContent = `Generated from ${r.source || 'available'} data · ${r.generated_at ? String(r.generated_at).substring(0, 19) : ''}`;

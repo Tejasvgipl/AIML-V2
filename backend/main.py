@@ -1394,12 +1394,18 @@ async def _generate_report_payload(timeframe: str) -> dict:
         "alert_type_counts": stats.get("alert_type_counts", {}),
     }
     report = _render_security_report(timeframe, start, end, data, controls)
+    report_links = {
+        fmt: f"/api/reports/generate?timeframe={timeframe}&format={fmt}"
+        for fmt in ("json", "md", "pdf", "html")
+    }
     return {
         "timeframe": timeframe,
         "period_days": days,
         "source": data.get("source"),
         "generated_by": "deterministic-cybersentinel-report-v1",
         "generated_at": end.isoformat(),
+        "api_endpoint": report_links["json"],
+        "api_endpoints": report_links,
         "summary": {
             "total_logs": data.get("total_logs", 0),
             "top_threats": dict(_top_items(data.get("threat_counts", {}), 6)),
