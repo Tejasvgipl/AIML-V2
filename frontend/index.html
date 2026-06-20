@@ -4030,8 +4030,8 @@ tr:hover td{background:#161b22}</style></head>
     }
     function openMLScore(ip) { document.getElementById('ml-ip').value = ip; scoreIP(ip); }
     async function loadAnomalies() {
-      const r = await get(`${ML}/anomalies`); if (!r) return;
-      const mlh = await get(`${ML}/health`);
+      const [r, mlh] = await Promise.all([get(`${ML}/anomalies`), get(`${ML}/health`)]);
+      if (!r) return;
       const ready = Boolean(mlh?.model_ready);
       document.getElementById('train-status').textContent = ready
         ? `Current model loaded · ${r.anomalies.length} anomalies`
@@ -4620,7 +4620,7 @@ tr:hover td{background:#161b22}</style></head>
     document.head.appendChild(fadeStyle);
     refreshReportEndpoints();
     refreshAll();
-    setInterval(refreshAll, 30000);
+    setInterval(refreshAll, 10000);
 
     // ── IST timestamp formatter (UTC → Asia/Kolkata) ─────────────────────
     function toIST(ts) {

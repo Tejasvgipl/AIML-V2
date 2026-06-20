@@ -2277,12 +2277,15 @@ Schema:
 Rules:
 - Return ONLY the raw SQL query. No markdown, no backticks, no explanation, no comments.
 - Only SELECT statements. Absolutely no INSERT/UPDATE/DELETE/DROP/CREATE/ALTER.
-- Default time window: last 24 hours (ts > now() - INTERVAL 24 HOUR) unless the user specifies otherwise.
+- NEVER add a time filter unless the analyst explicitly mentions a time period (e.g. "today", "last hour", "this week"). If no time is mentioned, query ALL available data.
+- If the analyst says "today" use ts >= today(); "last hour" use ts >= now() - INTERVAL 1 HOUR; "last 24 hours" use ts >= now() - INTERVAL 24 HOUR; "last week" use ts >= now() - INTERVAL 7 DAY.
+- NEVER default to 5 minutes or any short window. The logs table has months of data.
 - For row-level results always add LIMIT 200 at the end; omit LIMIT for COUNT/GROUP BY aggregates.
 - External IPs: country NOT IN ('India', '') AND src_ip NOT LIKE '10.%' AND src_ip NOT LIKE '192.168.%'
 - Readable timestamps: formatDateTime(ts, '%Y-%m-%d %H:%i:%S') AS time
 - Tables needing FINAL: ml_scores, baselines, deviations, blocklist
 - Brute force filter: threat_type ILIKE '%brute%'
+- For deviations/baselines/ml_scores, do NOT add time filters — use FINAL keyword only.
 
 Analyst question: {question}
 
