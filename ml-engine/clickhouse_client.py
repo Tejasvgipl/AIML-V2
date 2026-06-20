@@ -14,6 +14,7 @@ Synchronous helpers (safe to call from any context), matching the old client.
 import os
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -39,36 +40,33 @@ OPENSEARCH_ENABLED = CLICKHOUSE_ENABLED
 LOGS_TABLE = f"{CLICKHOUSE_DB}.logs"
 AGG_TABLE  = f"{CLICKHOUSE_DB}.agg_ip_daily"
 
-_client = None
+_thread_local = threading.local()
 
 
 def get_client():
-    """Lazy singleton ClickHouse client. Returns None if disabled/unreachable."""
-    global _client
-    if _client is not None:
-        return _client
+    """Per-thread ClickHouse client. Each thread gets its own connection."""
     if not CLICKHOUSE_ENABLED:
         return None
+    client = getattr(_thread_local, "client", None)
+    if client is not None:
+        return client
     try:
         import clickhouse_connect
-        _client = clickhouse_connect.get_client(
+        client = clickhouse_connect.get_client(
             host=CLICKHOUSE_HOST,
             port=CLICKHOUSE_PORT,
             username=CLICKHOUSE_USER,
             password=CLICKHOUSE_PASS,
             database=CLICKHOUSE_DB,
             connect_timeout=10,
-            send_receive_timeout=300,   # 300s: ML training over 10k IPs can take 2-3 min
-            # async_insert: ClickHouse buffers small inserts server-side and
-            # flushes in big batches — prevents the "too many parts" failure.
+            send_receive_timeout=300,
             settings={"async_insert": 1, "wait_for_async_insert": 0},
         )
-        ver = _client.server_version
-        logger.info(f"ClickHouse connected: v{ver} at {CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}")
-        return _client
+        _thread_local.client = client
+        return client
     except Exception as e:
         logger.warning(f"ClickHouse unavailable: {e} — running without persistent store")
-        _client = None
+        _thread_local.client = None
         return None
 
 
@@ -83,6 +81,7 @@ def _q(sql: str, params: Optional[dict] = None):
         return [dict(zip(cols, row)) for row in res.result_rows]
     except Exception as e:
         logger.error(f"ClickHouse query failed: {e} :: {sql[:160]}")
+        _thread_local.client = None
         return []
 
 
