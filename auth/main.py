@@ -12,18 +12,13 @@ Seed on first startup: Tejas / tejas@123  (admin)
 from __future__ import annotations
 
 import os
-import secrets
-import time
-import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import clickhouse_connect
-import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -43,19 +38,10 @@ CH_PASS  = os.getenv("CLICKHOUSE_PASS", "tejas@123")
 SEED_USER = os.getenv("SEED_ADMIN_USER", "Tejas")
 SEED_PASS = os.getenv("SEED_ADMIN_PASS", "tejas@123")
 
-# ── Google SSO ────────────────────────────────────────────────────────────────
-GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI", "")
-GOOGLE_ALLOWED_DOMAIN = os.getenv("GOOGLE_ALLOWED_DOMAIN", "")  # e.g. "company.com" — blank = any Google account
-FRONTEND_URL         = os.getenv("FRONTEND_URL", "")            # e.g. "http://10.200.10.23:19888"
-
-GOOGLE_AUTH_URL     = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL    = "https://oauth2.googleapis.com/token"
-GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
-
-# Short-lived in-memory state store for CSRF protection (state → expiry timestamp)
-_sso_states: dict[str, float] = {}
+# ── SIEM SSO ──────────────────────────────────────────────────────────────────
+# Shared secret between SIEM and AIML. SIEM signs the exchange token with this.
+# Set in .env: SSO_SECRET=your-strong-secret-here
+SSO_SECRET = os.getenv("SSO_SECRET", "")
 
 # ── Crypto ────────────────────────────────────────────────────────────────────
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -218,118 +204,88 @@ def health():
     return {"status": "ok", "service": "auth"}
 
 
-# ── Google SSO ────────────────────────────────────────────────────────────────
+# ── SIEM SSO ─────────────────────────────────────────────────────────────────
 
-@app.get("/api/auth/sso/providers")
-def sso_providers():
-    """Return which SSO providers are configured so the frontend can show/hide buttons."""
-    return {"google": bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI)}
-
-
-@app.get("/api/auth/sso/login")
-def sso_login():
-    """Step 1 — redirect the browser to Google's OAuth2 consent screen."""
-    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI):
-        raise HTTPException(400, "Google SSO is not configured on this server")
-    # Generate a random state value and store it for 10 minutes (CSRF guard)
-    state = secrets.token_urlsafe(32)
-    _sso_states[state] = time.time() + 600
-    # Purge expired states so memory doesn't grow unbounded
-    expired = [k for k, v in _sso_states.items() if v < time.time()]
-    for k in expired:
-        _sso_states.pop(k, None)
-    params = urllib.parse.urlencode({
-        "client_id":     GOOGLE_CLIENT_ID,
-        "redirect_uri":  GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope":         "openid email profile",
-        "state":         state,
-        "access_type":   "online",
-        "prompt":        "select_account",
-    })
-    return RedirectResponse(f"{GOOGLE_AUTH_URL}?{params}")
+@app.get("/api/auth/sso/status")
+def sso_status():
+    """Frontend checks this to know if SIEM SSO is configured."""
+    return {"enabled": bool(SSO_SECRET)}
 
 
-@app.get("/api/auth/sso/callback")
-async def sso_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-    """Step 2 — Google redirects here with an auth code; exchange it for a JWT."""
-    fe = FRONTEND_URL or str(request.base_url).rstrip("/")
+@app.post("/api/auth/sso/validate")
+async def sso_validate(request: Request):
+    """
+    Called by the frontend when the SIEM redirects to /auth/sso?token=<jwt>.
+    Validates the exchange token signed with SSO_SECRET, auto-creates the user
+    if they don't exist yet, and returns a standard AIML JWT.
 
-    def _fail(reason: str):
-        return RedirectResponse(f"{fe}?sso_error={urllib.parse.quote(reason)}#login")
+    Token format SIEM must produce (JWT HS256):
+      { "sub": "username", "email": "user@company.com", "name": "Full Name" }
+    Signed with the same SSO_SECRET configured on both sides.
+    """
+    if not SSO_SECRET:
+        raise HTTPException(status_code=503, detail="SSO_SECRET not configured on this server")
 
-    if error:
-        return _fail(error)
-    if not code or not state:
-        return _fail("missing_code_or_state")
+    body = await request.json()
+    exchange_token = (body.get("token") or "").strip()
+    if not exchange_token:
+        raise HTTPException(status_code=400, detail="token is required")
 
-    # Validate CSRF state
-    expires = _sso_states.pop(state, None)
-    if not expires or time.time() > expires:
-        return _fail("invalid_or_expired_state")
-
-    # Exchange auth code for tokens
-    async with httpx.AsyncClient(timeout=15) as client:
-        token_resp = await client.post(GOOGLE_TOKEN_URL, data={
-            "code":          code,
-            "client_id":     GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri":  GOOGLE_REDIRECT_URI,
-            "grant_type":    "authorization_code",
-        })
-        if not token_resp.is_success:
-            return _fail("token_exchange_failed")
-        tokens = token_resp.json()
-
-        # Fetch user profile from Google
-        userinfo_resp = await client.get(
-            GOOGLE_USERINFO_URL,
-            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    # Validate signature — no exp check since SIEM tokens are long-lived
+    try:
+        payload = jwt.decode(
+            exchange_token,
+            SSO_SECRET,
+            algorithms=["HS256"],
+            options={"verify_exp": False},
         )
-        if not userinfo_resp.is_success:
-            return _fail("userinfo_failed")
-        userinfo = userinfo_resp.json()
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid SSO token: {e}")
 
-    email = userinfo.get("email", "").lower().strip()
-    name  = userinfo.get("name", "") or email.split("@")[0]
-    if not email:
-        return _fail("no_email_returned")
+    # Extract identity from token
+    username = (payload.get("sub") or payload.get("username") or "").strip()
+    email    = (payload.get("email") or "").strip().lower()
+    name     = (payload.get("name") or "").strip()
 
-    # Optional: restrict to a specific Google Workspace domain
-    if GOOGLE_ALLOWED_DOMAIN and not email.endswith(f"@{GOOGLE_ALLOWED_DOMAIN}"):
-        return _fail(f"domain_not_allowed_{GOOGLE_ALLOWED_DOMAIN}")
+    # Fall back to email prefix if sub is missing
+    if not username and email:
+        username = email.split("@")[0]
+    if not username:
+        raise HTTPException(status_code=400, detail="Token must contain 'sub' (username) or 'email'")
 
-    # Use email prefix as username (e.g. "tejas" from "tejas@company.com")
-    username = email.split("@")[0]
-
-    # Auto-provision the user if this is their first SSO login
+    # Auto-provision user on first SSO login
     user = _get_user(username)
     if not user:
         ch().insert(
             "cybersentinel.cs_users",
-            [[str(uuid.uuid4()), username, "",   # empty password_hash — SSO users can't use local login
-              "user", datetime.now(timezone.utc), f"google_sso:{email}", 1]],
+            [[str(uuid.uuid4()), username,
+              "",           # empty password_hash — SSO users cannot use local login
+              "user",
+              datetime.now(timezone.utc),
+              f"siem_sso:{email or username}",
+              1]],
             column_names=["id", "username", "password_hash", "role",
                           "created_at", "created_by", "is_active"],
         )
         user = _get_user(username)
 
     if not user or not user.get("is_active"):
-        return _fail("account_disabled")
+        raise HTTPException(status_code=403, detail="Account is disabled")
 
-    # Issue the standard JWT (same format as local login)
-    sid = str(uuid.uuid4())
+    # Issue standard AIML JWT — same format as local login
+    sid   = str(uuid.uuid4())
     token = _make_token(username, user["role"], sid)
-    _log(username, "sso_login", client_ip=request.client.host if request.client else "",
-         session_id=sid, extra=f"provider:google email:{email}")
+    _log(username, "siem_sso_login",
+         client_ip=request.client.host if request.client else "",
+         session_id=sid,
+         extra=f"email:{email} name:{name}")
 
-    # Redirect back to frontend — token passed in query params, frontend stores in localStorage
-    params = urllib.parse.urlencode({
-        "sso_token": token,
-        "role":      user["role"],
-        "user":      username,
-    })
-    return RedirectResponse(f"{fe}?{params}#sso")
+    return {
+        "access_token": token,
+        "role":         user["role"],
+        "username":     username,
+        "provisioned":  not bool(_get_user(username)),  # true if just created
+    }
 
 
 @app.post("/api/auth/login")
