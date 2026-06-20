@@ -143,6 +143,12 @@ services:
       - CLICKHOUSE_DB=cybersentinel
       - CLICKHOUSE_USER=default
       - CLICKHOUSE_PASS=${CLICKHOUSE_PASS:-tejas@123}
+      # Google SSO — set these in .env to enable
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-}
+      - GOOGLE_ALLOWED_DOMAIN=${GOOGLE_ALLOWED_DOMAIN:-}
+      - FRONTEND_URL=${FRONTEND_URL:-}
     depends_on:
       clickhouse:
         condition: service_healthy
