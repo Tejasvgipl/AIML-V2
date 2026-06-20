@@ -1844,6 +1844,121 @@
         font-size: 26px
       }
     }
+
+    /* ── Kill Chain horizontal flow ──────────────────────────────────────── */
+    .kc-section-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px;
+      color: var(--muted); margin: 20px 0 10px 0; display: flex; align-items: center; gap: 10px;
+    }
+    .kc-section-label::before,.kc-section-label::after {
+      content:''; flex:1; height:1px; background:var(--border);
+    }
+    .kc-flow-wrap { overflow-x: auto; padding-bottom: 8px; }
+    .kc-flow-row {
+      display: flex; align-items: center; gap: 0;
+      min-width: max-content; padding: 8px 4px 16px 4px;
+    }
+    .kc-node {
+      width: 128px; min-height: 108px; border-radius: 14px; padding: 14px 10px 12px;
+      background: var(--bg3); border: 2px solid var(--border);
+      display: flex; flex-direction: column; align-items: center; text-align: center;
+      cursor: pointer; transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+      position: relative; flex-shrink: 0;
+    }
+    .kc-node:hover { transform: translateY(-5px); box-shadow: 0 12px 32px rgba(0,0,0,0.4); }
+    .kc-node.kc-active { border-color: currentColor; }
+    .kc-node-icon { font-size: 30px; margin-bottom: 6px; line-height: 1; }
+    .kc-node-label { font-size: 11px; font-weight: 700; color: var(--text); line-height: 1.3; }
+    .kc-node-status {
+      font-size: 9px; padding: 2px 8px; border-radius: 10px;
+      margin-top: 5px; font-weight: 700; letter-spacing: 0.5px;
+    }
+    .kc-node-meta { font-size: 10px; color: var(--muted); margin-top: 4px; line-height: 1.3; }
+    .kc-arrow {
+      width: 56px; flex-shrink: 0; position: relative;
+      display: flex; align-items: center;
+    }
+    .kc-arrow-track {
+      width: 100%; height: 2px; background: var(--border);
+      position: relative; overflow: hidden; border-radius: 1px;
+    }
+    .kc-arrow-track::after {
+      content: ''; position: absolute; top: 0; left: -100%;
+      width: 40%; height: 100%;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      animation: kcFlowPulse 1.8s ease-in-out infinite;
+    }
+    .kc-arrow-head {
+      width: 0; height: 0; flex-shrink: 0; margin-left: -1px;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 8px solid var(--border);
+    }
+    @keyframes kcFlowPulse { 0% { left: -50%; } 100% { left: 140%; } }
+    @keyframes kcNodeIn {
+      from { opacity: 0; transform: translateY(14px) scale(0.88); }
+      to   { opacity: 1; transform: translateY(0)   scale(1); }
+    }
+    @keyframes kcStageIn {
+      from { opacity: 0; transform: translateX(-10px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    /* ATT&CK horizontal stages */
+    .kc-attck-row {
+      display: flex; align-items: stretch; gap: 0;
+      min-width: max-content; padding: 8px 4px 4px 4px; overflow-x: auto;
+    }
+    .kc-stage {
+      min-width: 136px; border-radius: 10px; padding: 12px 14px 10px;
+      border-top: 3px solid var(--stage-col, var(--accent));
+      background: var(--bg3); cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      flex-shrink: 0;
+    }
+    .kc-stage:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+    .kc-stage.kc-active { box-shadow: 0 0 0 2px var(--stage-col, var(--accent)); }
+    .kc-stage-num {
+      font-size: 9px; color: var(--muted); font-weight: 700;
+      text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px;
+    }
+    .kc-stage-tactic { font-size: 12px; font-weight: 700; color: var(--stage-col, var(--accent)); margin-bottom: 3px; }
+    .kc-stage-count  { font-size: 11px; color: var(--muted); }
+    .kc-stage-tech   { font-size: 10px; color: var(--muted); margin-top: 5px; line-height: 1.5; }
+    .kc-stage-arrow  {
+      display: flex; align-items: center; padding: 0 2px;
+      color: var(--border); font-size: 18px; flex-shrink: 0; font-weight: 300;
+    }
+
+    /* Detail expand panel */
+    .kc-detail {
+      border-radius: 10px; background: var(--bg2);
+      border: 1px solid var(--border); padding: 18px 20px;
+      animation: kcNodeIn 0.25s ease;
+    }
+    .kc-detail h4 { font-size: 13px; font-weight: 700; color: var(--text); margin: 0 0 12px; }
+    .kc-ip-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-family: var(--mono, monospace); color: var(--accent);
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 6px; padding: 3px 9px; cursor: pointer;
+      transition: background 0.15s; margin: 3px;
+    }
+    .kc-ip-chip:hover { background: var(--bg1); color: var(--text); }
+    .kc-tech-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .kc-tech-badge {
+      font-size: 10px; background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 5px; padding: 3px 8px; color: var(--muted);
+    }
+    .kc-topo-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr));
+      gap: 8px; margin-top: 10px;
+    }
+    .kc-topo-cell {
+      background: var(--bg3); border-radius: 7px; padding: 8px 10px;
+      font-size: 11px; color: var(--muted);
+    }
+    .kc-topo-cell b { color: var(--accent); display: block; font-size: 10px; margin-bottom: 2px; }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
   <link rel="stylesheet" href="theme.css?v=8">
@@ -4163,6 +4278,96 @@ tr:hover td{background:#161b22}</style></head>
 
     // ── Kill Chain ────────────────────────────────────────────────────────────
     function goKillChain(ip) { nav('killchain'); document.getElementById('kc-ip').value = ip; loadKillChain(); }
+
+    function kcNodeDetail(type, idx) {
+      const d = window._kcData; if (!d) return;
+      const panel = document.getElementById('kc-detail-panel'); if (!panel) return;
+      document.querySelectorAll('.kc-node,.kc-stage').forEach(el => el.classList.remove('kc-active'));
+      const clicked = event?.currentTarget; if (clicked) clicked.classList.add('kc-active');
+
+      let html = '';
+
+      if (type === 'src') {
+        html = `<div class="kc-detail">
+          <h4>🌍 Source — ${d.ip}</h4>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Originating attacker IP being analysed across all ${d.totalEvents} log events.</div>
+          <button class="btn" onclick="goTrail('${d.ip}')">View IP Trail →</button>
+        </div>`;
+      } else if (type === 'net') {
+        const n = d.netPath[idx]; if (!n) return;
+        const fw = n.stage.startsWith('Firewall');
+        const blockedIps = n.blocked_ips || [];
+        const allowedIps = n.allowed_ips || [];
+        const topoEntries = n.topology ? Object.entries(n.topology).filter(([,v])=>v) : [];
+        const col = {established:'#00bcd4',allowed:'#4ade80',blocked:'#ef4444',partial:'#facc15',observed:'#94a3b8',routed:'#00bcd4',reached:'#4ade80'}[n.status]||'#00bcd4';
+
+        const blockedBlock = blockedIps.length ? `
+          <div style="margin-top:14px">
+            <div style="font-size:10px;color:#ef4444;text-transform:uppercase;letter-spacing:1px;margin-bottom:7px;display:flex;align-items:center;gap:6px">
+              <span>🚫</span> Blocked Destinations <span style="background:rgba(239,68,68,.15);color:#ef4444;padding:1px 7px;border-radius:10px;font-weight:700">${blockedIps.length}</span>
+            </div>
+            <div>${blockedIps.map(bip=>`<span class="kc-ip-chip" onclick="goTrail('${bip}')" title="Click to view trail">🚫 ${bip}</span>`).join('')}</div>
+          </div>` : '';
+
+        const allowedBlock = allowedIps.length ? `
+          <div style="margin-top:14px">
+            <div style="font-size:10px;color:#4ade80;text-transform:uppercase;letter-spacing:1px;margin-bottom:7px;display:flex;align-items:center;gap:6px">
+              <span>✅</span> Allowed Destinations <span style="background:rgba(74,222,128,.15);color:#4ade80;padding:1px 7px;border-radius:10px;font-weight:700">${allowedIps.length}</span>
+            </div>
+            <div>${allowedIps.map(aip=>`<span class="kc-ip-chip" onclick="goTrail('${aip}')" title="Click to view trail">✅ ${aip}</span>`).join('')}</div>
+          </div>` : '';
+
+        const noIpMsg = fw && !blockedIps.length && !allowedIps.length
+          ? '<div style="color:var(--muted);font-size:12px;margin-top:10px">IDS observation only — no explicit block/allow actions in logs.</div>' : '';
+
+        const topoBlock = topoEntries.length ? `
+          <div style="margin-top:14px">
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:7px">Topology Enrichment</div>
+            <div class="kc-topo-grid">${topoEntries.map(([k,v])=>`<div class="kc-topo-cell"><b>${k}</b>${v}</div>`).join('')}</div>
+          </div>` : '';
+
+        const icon = fw ? '🛡' : n.stage.startsWith('Router') ? '🔀' : n.stage==='Endpoint' ? '💻' : '📡';
+        html = `<div class="kc-detail" style="border-left:3px solid ${col}">
+          <h4>${icon} ${n.stage} <span style="font-size:11px;font-weight:400;color:${col};margin-left:6px">${(n.status||'').toUpperCase()}</span></h4>
+          <div style="font-size:12px;color:var(--text);margin-bottom:4px">${n.detail}</div>
+          <div style="font-size:11px;color:var(--muted)">${toIST(n.first_seen)}${n.last_seen&&n.last_seen!==n.first_seen?' — '+toIST(n.last_seen):''} · ${n.events} event${n.events!==1?'s':''}</div>
+          ${blockedBlock}${allowedBlock}${noIpMsg}${topoBlock}
+        </div>`;
+      } else if (type === 'attck') {
+        const s = d.attckStages[idx]; if (!s) return;
+        const col = d.tacticColors[s.tactic] || 'var(--accent)';
+        const sevHtml = Object.entries(s.severities||{}).filter(([,v])=>v)
+          .map(([k,v])=>`<span class="badge ${k}">${k} ${v}</span>`).join('');
+        const techsHtml = (s.techniques||[])
+          .map(t=>`<div class="kc-tech-badge"><span style="color:var(--accent);font-weight:600">${t.id}</span> ${t.name} <span style="color:var(--muted)">×${t.count}</span></div>`)
+          .join('');
+        html = `<div class="kc-detail" style="border-top:3px solid ${col}">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+            <h4 style="color:${col};margin:0">${s.tactic}</h4>
+            <span style="font-size:11px;color:var(--muted)">MITRE ATT&amp;CK Tactic</span>
+          </div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+            <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Events</div>
+              <div style="font-size:24px;font-weight:700;color:${col}">${s.events}</div></div>
+            <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">First Seen</div>
+              <div style="font-size:12px;color:var(--text);margin-top:4px">${toIST(s.first_seen)}</div></div>
+            <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Last Seen</div>
+              <div style="font-size:12px;color:var(--text);margin-top:4px">${toIST(s.last_seen)}</div></div>
+            ${sevHtml ? `<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Severity</div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px">${sevHtml}</div></div>` : ''}
+          </div>
+          ${techsHtml ? `<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Techniques Observed</div>
+            <div class="kc-tech-row">${techsHtml}</div>` : ''}
+        </div>`;
+      }
+
+      if (html) {
+        panel.innerHTML = html;
+        panel.style.display = 'block';
+        setTimeout(() => panel.scrollIntoView({ behavior:'smooth', block:'nearest' }), 50);
+      }
+    }
+
     async function loadKillChain() {
       const ip = document.getElementById('kc-ip').value.trim(); if (!ip) return;
       const r = await get(`${API}/killchain/${ip}`); if (!r) return;
@@ -4227,68 +4432,72 @@ tr:hover td{background:#161b22}</style></head>
             </div>
           </div>
         </div>`;
-      const tacticColors = { Reconnaissance:'#64b5f6', 'Resource Development':'#64b5f6', 'Initial Access':'var(--ok)', Execution:'var(--warn)', Persistence:'var(--warn)', 'Privilege Escalation':'var(--danger)', 'Defense Evasion':'var(--muted)', 'Credential Access':'var(--danger)', Discovery:'#7c3aed', 'Lateral Movement':'var(--danger)', Collection:'#d97706', 'Command and Control':'var(--danger)', Exfiltration:'var(--danger)', Impact:'var(--danger)' };
-      const netColors = { established:'#00bcd4', allowed:'var(--ok)', blocked:'var(--danger)', partial:'var(--warn)', observed:'var(--muted)', routed:'#00bcd4', reached:'var(--ok)' };
-      const netIcons  = { 'TCP Connection':'🌐', Firewall:'🛡', 'Firewall / IDS':'🛡', Endpoint:'💻' };
+      const tacticColors = { Reconnaissance:'#64b5f6', 'Resource Development':'#64b5f6', 'Initial Access':'#4ade80', Execution:'#facc15', Persistence:'#fb923c', 'Privilege Escalation':'#f87171', 'Defense Evasion':'#a78bfa', 'Credential Access':'#f87171', Discovery:'#c084fc', 'Lateral Movement':'#ef4444', Collection:'#f59e0b', 'Command and Control':'#ef4444', Exfiltration:'#ef4444', Impact:'#dc2626' };
+      const netStatusColor = { established:'#00bcd4', allowed:'#4ade80', blocked:'#ef4444', partial:'#facc15', observed:'#94a3b8', routed:'#00bcd4', reached:'#4ade80' };
+      const netStatusLabel = { established:'CONNECTED', allowed:'ALLOWED', blocked:'BLOCKED', partial:'PARTIAL BLOCK', observed:'OBSERVED', routed:'ROUTED', reached:'REACHED' };
+      const netNodeIcon = n => n.stage.startsWith('Firewall') ? '🛡' : n.stage.startsWith('Router') ? '🔀' : n.stage === 'Endpoint' ? '💻' : n.stage === 'TCP Connection' ? '🌐' : '📡';
+      const netGlow = { blocked:'0 0 22px rgba(239,68,68,0.35)', partial:'0 0 22px rgba(250,204,21,0.3)', allowed:'0 0 16px rgba(74,222,128,0.2)' };
 
-      const netPath = (r.network_path || []);
-      const attckStages = (r.stages || []);
-      const total = netPath.length + attckStages.length;
-      let idx = 0;
+      const netPath    = r.network_path || [];
+      const attckStages = r.stages || [];
 
-      const netHtml = netPath.map(n => {
-        const col = netColors[n.status] || '#00bcd4';
-        const icon = Object.keys(netIcons).find(k => n.stage.startsWith(k.split(' ')[0]));
-        const isLast = (idx === total - 1);
-        const html = `<div style="display:flex;gap:0;margin-bottom:0">
-          <div style="display:flex;flex-direction:column;align-items:center;width:32px">
-            <div style="width:14px;height:14px;border-radius:3px;background:${col};border:2px solid var(--bg2);z-index:1;margin-top:13px;display:flex;align-items:center;justify-content:center;font-size:8px"></div>
-            ${!isLast ? `<div style="width:2px;flex:1;min-height:12px;background:${col};opacity:0.4"></div>` : ''}
+      // Store for click handlers
+      window._kcData = { netPath, attckStages, tacticColors, ip, totalEvents: r.total_events };
+
+      // ── Network Path (horizontal flow) ─────────────────────────────────────
+      const netFlowHtml = netPath.length ? `
+        <div class="kc-section-label">Network Path · Traffic Topology</div>
+        <div class="kc-flow-wrap"><div class="kc-flow-row">
+          <div class="kc-node" style="color:#64b5f6;animation:kcNodeIn .4s ease 0s backwards" onclick="kcNodeDetail('src')">
+            <div class="kc-node-icon">🌍</div>
+            <div class="kc-node-label">Attacker</div>
+            <div class="kc-node-status" style="background:rgba(100,181,246,.15);color:#64b5f6">${ip}</div>
+            <div class="kc-node-meta">${r.total_events} events</div>
           </div>
-          <div style="flex:1;background:var(--bg3);border-radius:8px;padding:10px 16px;margin-left:8px;margin-bottom:10px;border-left:3px solid ${col}">
-            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-              <span style="font-weight:700;color:${col};font-size:13px">${netIcons[icon]||'📡'} ${n.stage}</span>
-              <span style="font-size:10px;background:${col};color:#000;padding:1px 6px;border-radius:10px;font-weight:600">${n.status?.toUpperCase()}</span>
-            </div>
-            <div style="font-size:12px;color:var(--text);margin-bottom:4px">${n.detail}</div>
-            ${n.topology && Object.keys(n.topology).length ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${Object.entries(n.topology).map(([k,v])=>`<span style="font-size:10px;background:var(--bg2);border-radius:4px;padding:2px 7px;color:var(--accent)"><b>${k}:</b> ${v}</span>`).join('')}</div>` : ''}
-            <div style="font-size:10px;color:var(--muted);margin-top:4px">${toIST(n.first_seen)}</div>
-          </div>
-        </div>`;
-        idx++;
-        return html;
-      }).join('');
+          ${netPath.map((n, i) => {
+            const col = netStatusColor[n.status] || '#00bcd4';
+            const lbl = netStatusLabel[n.status] || (n.status||'').toUpperCase();
+            const glow = netGlow[n.status] || '';
+            const delay = 0.1 + i * 0.12;
+            return `
+              <div class="kc-arrow" style="animation:kcNodeIn .4s ease ${delay - 0.05}s backwards">
+                <div class="kc-arrow-track"></div><div class="kc-arrow-head"></div>
+              </div>
+              <div class="kc-node${n.status==='blocked'?' kc-active':''}"
+                   style="color:${col};${glow ? 'box-shadow:'+glow+';border-color:'+col : ''};animation:kcNodeIn .4s ease ${delay}s backwards"
+                   onclick="kcNodeDetail('net',${i})">
+                <div class="kc-node-icon">${netNodeIcon(n)}</div>
+                <div class="kc-node-label">${n.stage}</div>
+                <div class="kc-node-status" style="background:rgba(0,0,0,.35);color:${col}">${lbl}</div>
+                <div class="kc-node-meta">${n.events} event${n.events!==1?'s':''}</div>
+              </div>`;
+          }).join('')}
+        </div></div>` : '';
 
-      // divider between network path and ATT&CK stages
-      const divider = netPath.length && attckStages.length ? `<div style="display:flex;align-items:center;gap:10px;margin:6px 0 14px 0">
-        <div style="flex:1;height:1px;background:var(--border)"></div>
-        <span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px">ATT&amp;CK Kill Chain</span>
-        <div style="flex:1;height:1px;background:var(--border)"></div>
-      </div>` : '';
+      // ── ATT&CK Chain (horizontal stages) ─────────────────────────────────
+      const attckFlowHtml = attckStages.length ? `
+        <div class="kc-section-label">ATT&amp;CK Kill Chain Progression</div>
+        <div class="kc-flow-wrap"><div class="kc-attck-row">
+          ${attckStages.map((s, i) => {
+            const col = tacticColors[s.tactic] || 'var(--accent)';
+            const techCnt = (s.techniques||[]).length;
+            return `
+              ${i > 0 ? `<div class="kc-stage-arrow" style="animation:kcStageIn .3s ease ${i*.08}s backwards">›</div>` : ''}
+              <div class="kc-stage" style="--stage-col:${col};animation:kcStageIn .4s ease ${i*.1}s backwards" onclick="kcNodeDetail('attck',${i})">
+                <div class="kc-stage-num">STAGE ${String(i+1).padStart(2,'0')}</div>
+                <div class="kc-stage-tactic">${s.tactic}</div>
+                <div class="kc-stage-count">${s.events} events</div>
+                ${techCnt ? `<div class="kc-stage-tech">${techCnt} technique${techCnt!==1?'s':''}</div>` : ''}
+              </div>`;
+          }).join('')}
+        </div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px;padding-left:2px">
+          Click any stage to see techniques · Click network nodes to see blocked/allowed IPs
+        </div>` : '';
 
-      const attckHtml = attckStages.map(s => {
-        const col = tacticColors[s.tactic] || 'var(--accent)';
-        const techs = (s.techniques || []).map(t => `<span style="font-size:11px;color:var(--muted)">${t.id}: ${t.name} (${t.count})</span>`).join('<br>');
-        const isLast = (idx === total - 1);
-        const html = `<div style="display:flex;gap:0;margin-bottom:0">
-          <div style="display:flex;flex-direction:column;align-items:center;width:32px">
-            <div style="width:12px;height:12px;border-radius:50%;background:${col};border:2px solid var(--bg2);z-index:1;margin-top:14px"></div>
-            ${!isLast ? `<div style="width:2px;flex:1;min-height:12px;background:var(--border)"></div>` : ''}
-          </div>
-          <div style="flex:1;background:var(--bg3);border-radius:8px;padding:12px 16px;margin-left:8px;margin-bottom:10px">
-            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
-              <span style="font-weight:600;color:${col}">${s.tactic}</span>
-              <span style="font-size:11px;color:var(--muted)">${s.events} events</span>
-            </div>
-            <div style="margin-bottom:6px">${techs}</div>
-            <div style="font-size:10px;color:var(--muted)">${toIST(s.first_seen)} → ${toIST(s.last_seen)}</div>
-          </div>
-        </div>`;
-        idx++;
-        return html;
-      }).join('');
-
-      document.getElementById('kc-stages').innerHTML = netHtml + divider + attckHtml;
+      document.getElementById('kc-stages').innerHTML =
+        netFlowHtml + attckFlowHtml +
+        `<div id="kc-detail-panel" style="display:none;margin-top:20px"></div>`;
 
       // ── Correlation panel ───────────────────────────────────────────────
       const cor = r.correlation;

@@ -1510,6 +1510,12 @@ async def kill_chain(ip: str):
 
     allowed_cnt = sum(1 for a in actions if a in ("allow","allowed","accept","accepted","permit","permitted","pass"))
     blocked_cnt = sum(1 for a in actions if a in ("deny","denied","drop","dropped","block","blocked","reject","rejected"))
+    blocked_dst_ips = sorted({e.get("dst_ip","") for e in events
+                               if e.get("action","").lower() in ("deny","denied","drop","dropped","block","blocked","reject","rejected")
+                               and e.get("dst_ip","")})[:20]
+    allowed_dst_ips = sorted({e.get("dst_ip","") for e in events
+                               if e.get("action","").lower() in ("allow","allowed","accept","accepted","permit","permitted","pass")
+                               and e.get("dst_ip","")})[:20]
 
     # Unique dst_ips → pick the most common internal one for routing label
     from collections import Counter
@@ -1552,6 +1558,8 @@ async def kill_chain(ip: str):
             "last_seen":  last_ts,
             "events": len(actions),
             "status": fw_status,
+            "blocked_ips": blocked_dst_ips,
+            "allowed_ips": allowed_dst_ips,
         })
     else:
         # No explicit action field — Wazuh IDS still observed it
