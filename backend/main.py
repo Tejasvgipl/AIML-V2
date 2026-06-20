@@ -2414,23 +2414,16 @@ async def get_resilience():
 
 @app.get("/api/health")
 async def health():
+    # Keep this lightweight — Docker health check has a 5s timeout.
+    # Only verify the client can be obtained; never run a query here.
     ch_status = "disabled"
-    ch_docs = None
     if STORE_ENABLED and osc:
-        if osc.get_client():
-            ch_status = "connected"
-            try:
-                ch_docs = osc.get_total_doc_count()
-            except Exception:
-                ch_docs = None
-        else:
-            ch_status = "connection_failed"
+        ch_status = "connected" if osc.get_client() else "connection_failed"
     return {
         "status": "ok",
         "version": "2.2.0",
         "ai": "configured" if AI_API_KEY else "missing",
         "clickhouse": ch_status,
-        "clickhouse_docs": ch_docs,
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2440,6 +2433,32 @@ async def health():
 
 
 # ── storage stats ────────────────────────────────────────────────────────────
+
+@app.post("/api/archive/run")
+async def archive_run(retain_days: int = 90):
+    """Delete logs older than retain_days from ClickHouse to reclaim disk space.
+    Wazuh watcher calls this after every ARCHIVE_THRESHOLD new logs.
+    Default: keep last 90 days. Runs asynchronously — returns immediately."""
+    if not (STORE_ENABLED and osc):
+        return {"status": "disabled", "archived": 0}
+    try:
+        cutoff_sql = (
+            f"ALTER TABLE {osc.LOGS_TABLE} DELETE "
+            f"WHERE ts < now() - INTERVAL {int(retain_days)} DAY"
+        )
+        count_sql = (
+            f"SELECT count() FROM {osc.LOGS_TABLE} "
+            f"WHERE ts < now() - INTERVAL {int(retain_days)} DAY"
+        )
+        rows = await asyncio.to_thread(osc._q, count_sql)
+        old_count = rows[0].get("count()", 0) if rows else 0
+        if old_count > 0:
+            await asyncio.to_thread(osc.get_client().command, cutoff_sql)
+        return {"status": "ok", "archived": old_count, "retain_days": retain_days}
+    except Exception as e:
+        logger.error(f"Archive run failed: {e}")
+        return {"status": "error", "detail": str(e), "archived": 0}
+
 
 @app.get("/api/storage/stats")
 async def storage_stats():
