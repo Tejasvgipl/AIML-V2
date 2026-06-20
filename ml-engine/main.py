@@ -10,6 +10,7 @@ A single, unified per-IP **risk score (0-100)** that fuses three signals:
 Retraining runs automatically every 24 h (and after every 10 k new logs) via an
 in-process APScheduler job — no separate ml-intern container needed.
 """
+import asyncio
 import os, sys, joblib, json, logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,8 +71,15 @@ def extract_ip_features(ip: str) -> dict:
 def get_all_ip_features() -> list[dict]:
     if not (STORE_ENABLED and osc):
         return []
+    # Batch mode: 1 aggregation query instead of 1 query per IP (10k IPs = 10k queries → 1)
+    if hasattr(osc, "get_all_ip_features_batch"):
+        alert_counts = osc.get_all_alert_counts_batch() if hasattr(osc, "get_all_alert_counts_batch") else {}
+        batch = osc.get_all_ip_features_batch(alert_counts)
+        if batch:
+            return batch
+    # Fallback: per-IP (slow but always works)
     features = []
-    for ip in osc.get_all_unique_ips(size=10000):
+    for ip in osc.get_all_unique_ips(size=5000):
         f = extract_ip_features(ip)
         if f:
             features.append(f)
@@ -154,28 +162,38 @@ def score_features(model, scaler, features: list[dict]) -> list[dict]:
     return scored
 
 
+_train_lock = None  # type: asyncio.Lock | None
+
 @app.post("/api/ml/train")
 async def train_model():
-    features = get_all_ip_features()
-    if len(features) < 5:
-        return {"status": "not_enough_data", "ip_count": len(features)}
+    global _train_lock
+    if _train_lock is None:
+        _train_lock = asyncio.Lock()
+    # Prevent concurrent training runs from stacking up
+    if _train_lock.locked():
+        return {"status": "already_training", "note": "Training already in progress — try again shortly"}
+    async with _train_lock:
+        # Heavy CPU/IO work runs in a thread so the event loop stays responsive
+        features = await asyncio.to_thread(get_all_ip_features)
+        if len(features) < 5:
+            return {"status": "not_enough_data", "ip_count": len(features)}
 
-    model, scaler = train_isolation_forest(features)
-    if model is None:
-        return {"status": "training_failed"}
+        model, scaler = await asyncio.to_thread(train_isolation_forest, features)
+        if model is None:
+            return {"status": "training_failed"}
 
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
+        await asyncio.to_thread(joblib.dump, model, MODEL_PATH)
+        await asyncio.to_thread(joblib.dump, scaler, SCALER_PATH)
 
-    scored = score_features(model, scaler, features)
-    anomalies = [s for s in scored if s["is_anomaly"]]
-    return {
-        "status": "trained",
-        "ip_count": len(features),
-        "scored": len(scored),
-        "anomalies": len(anomalies),
-        "top_risk": sorted(scored, key=lambda x: x["risk_score"], reverse=True)[:10],
-    }
+        scored = await asyncio.to_thread(score_features, model, scaler, features)
+        anomalies = [s for s in scored if s["is_anomaly"]]
+        return {
+            "status": "trained",
+            "ip_count": len(features),
+            "scored": len(scored),
+            "anomalies": len(anomalies),
+            "top_risk": sorted(scored, key=lambda x: x["risk_score"], reverse=True)[:10],
+        }
 
 
 @app.post("/api/ml/rescore")
@@ -249,8 +267,7 @@ async def list_scores(limit: int = 100):
 # ── baseline-deviation report (read straight from ClickHouse) ──────────────────
 
 def _deviation_summary(ip: str) -> dict:
-    alerts = [a for a in (osc.get_deviations(limit=1000) if (STORE_ENABLED and osc) else [])
-              if a.get("ip") == ip]
+    alerts = osc.get_deviations(ip=ip, limit=50) if (STORE_ENABLED and osc) else []
     alerts.sort(key=lambda x: x.get("ts", ""), reverse=True)
     deviation_score = sum({"critical": 10, "high": 5, "medium": 2, "low": 1}.get(a.get("severity", "low"), 1)
                           for a in alerts)

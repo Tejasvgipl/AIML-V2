@@ -62,6 +62,11 @@ BASELINE_TTL  = 60 * 60 * 24 * 90
 MIN_EVENTS_FOR_BASELINE = 10
 VOLUME_SPIKE_MULTIPLIER = 3
 
+# ── Stats cache (avoids 7 ClickHouse queries every 10 s) ─────────────────────
+_stats_cache: dict = {}
+_stats_cache_ts: float = 0.0
+_STATS_TTL = 15  # seconds
+
 # ── Log store (ClickHouse) ────────────────────────────────────────────────────
 # STORE_ENABLED gates all log-derived reads (trail, stats, hot-ips, baselines,
 # ML features). The `osc` module is now the ClickHouse client.
@@ -769,8 +774,11 @@ async def force_build_baseline(ip: str):
 @app.post("/api/baseline/build-all")
 async def build_all_baselines():
     ips = osc.get_all_unique_ips() if (STORE_ENABLED and osc) else list(_ipcnt.keys())
-    for ip in ips:
-        await build_baseline(ip)
+    sem = asyncio.Semaphore(10)  # max 10 concurrent ClickHouse queries
+    async def _build(ip: str):
+        async with sem:
+            await build_baseline(ip)
+    await asyncio.gather(*[_build(ip) for ip in ips])
     return {"status": "done", "baselines_built": len(ips)}
 
 
@@ -1332,21 +1340,29 @@ async def generate_smart_report(timeframe: str = "weekly"):
 
 @app.get("/api/stats")
 async def get_stats():
-    # ── Everything now reads from ClickHouse (logs + state) ──
+    global _stats_cache, _stats_cache_ts
+    # Serve from cache if fresh (called every 10s from the dashboard)
+    if _stats_cache and time.time() - _stats_cache_ts < _STATS_TTL:
+        return _stats_cache
+
     if STORE_ENABLED and osc:
-        total_logs    = osc.get_total_doc_count()
-        unique_ips    = osc.get_unique_ip_count()
-        threat_counts = osc.get_global_threat_counts()
-        hot_ips       = osc.get_hot_ips_from_os(size=100)
-        total_alerts  = osc.get_deviation_total()
-        critical_ips  = osc.get_critical_ips()
-        alert_counts  = osc.get_alert_type_counts()
+        # Run all 7 ClickHouse queries in parallel via thread pool
+        (total_logs, unique_ips, threat_counts, hot_ips,
+         total_alerts, critical_ips, alert_counts) = await asyncio.gather(
+            asyncio.to_thread(osc.get_total_doc_count),
+            asyncio.to_thread(osc.get_unique_ip_count),
+            asyncio.to_thread(osc.get_global_threat_counts),
+            asyncio.to_thread(lambda: osc.get_hot_ips_from_os(size=100)),
+            asyncio.to_thread(osc.get_deviation_total),
+            asyncio.to_thread(osc.get_critical_ips),
+            asyncio.to_thread(osc.get_alert_type_counts),
+        )
     else:
         total_logs = unique_ips = total_alerts = 0
         threat_counts, alert_counts = {}, {}
         hot_ips, critical_ips = [], []
 
-    return {
+    result = {
         "total_logs":       total_logs,
         "unique_ips":       unique_ips,
         "hot_ips":          list(hot_ips or []),
@@ -1356,12 +1372,15 @@ async def get_stats():
         "alert_type_counts":alert_counts,
         "ai_configured":    bool(AI_API_KEY),
     }
+    _stats_cache = result
+    _stats_cache_ts = time.time()
+    return result
 
 
 @app.get("/api/hot-ips")
 async def get_hot_ips():
     hot = osc.get_hot_ips_from_os(size=50) if (STORE_ENABLED and osc) else []
-    result = [await trail_summary(ip) for ip in hot]
+    result = list(await asyncio.gather(*[trail_summary(ip) for ip in hot]))
     result.sort(key=lambda x: x.get("total", 0), reverse=True)
     return result
 

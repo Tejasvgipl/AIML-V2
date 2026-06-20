@@ -58,9 +58,7 @@ def get_client():
             password=CLICKHOUSE_PASS,
             database=CLICKHOUSE_DB,
             connect_timeout=10,
-            send_receive_timeout=60,
-            # async_insert: ClickHouse buffers small inserts server-side and
-            # flushes in big batches — prevents the "too many parts" failure.
+            send_receive_timeout=300,   # 300s: baseline-build/ML-train can take 2-3 min on large datasets
             settings={"async_insert": 1, "wait_for_async_insert": 0},
         )
         ver = _client.server_version
@@ -206,7 +204,12 @@ def get_global_severity_counts() -> dict:
 
 
 def get_total_doc_count() -> int:
-    rows = _q(f"SELECT count() AS c FROM {LOGS_TABLE}")
+    """Fast row count via system.parts metadata — no full table scan."""
+    rows = _q(
+        "SELECT sum(rows) AS c FROM system.parts "
+        "WHERE database = {db:String} AND table = 'logs' AND active",
+        {"db": CLICKHOUSE_DB},
+    )
     return int(rows[0]["c"]) if rows else 0
 
 
@@ -703,3 +706,73 @@ def get_all_ip_features(alert_counts: Optional[dict] = None) -> list[dict]:
         f["critical_alerts"]  = ac.get("critical_alerts", 0)
         features.append(f)
     return features
+
+
+def get_all_alert_counts_batch() -> dict:
+    """One query: returns {ip: {"baseline_alerts": N, "critical_alerts": N}} for all IPs."""
+    rows = _q(
+        f"SELECT ip, count() AS total, countIf(sev='critical') AS crit FROM ("
+        f"  SELECT ip, argMax(severity, ts) AS sev "
+        f"  FROM {DEVIATIONS_TABLE} GROUP BY ip, type"
+        f") GROUP BY ip"
+    )
+    return {
+        r["ip"]: {"baseline_alerts": int(r["total"]), "critical_alerts": int(r["crit"])}
+        for r in rows
+    }
+
+
+def get_all_ip_features_batch(alert_counts: Optional[dict] = None) -> list[dict]:
+    """All IP feature vectors in ONE aggregation query — replaces N per-IP event fetches.
+    Falls back to per-IP mode if the aggregation fails."""
+    client = get_client()
+    if not client:
+        return []
+    try:
+        sql = f"""
+        SELECT
+            src_ip                                                              AS ip,
+            toUInt64(count())                                                   AS n_events,
+            toFloat64(count()) / greatest(1.0, toFloat64(dateDiff('minute', min(ts), now()))) AS event_rate_pm,
+            toFloat64(dateDiff('second', min(ts), max(ts))) / greatest(1, toInt64(count()) - 1) AS avg_interval_s,
+            0.0                                                                 AS min_interval_s,
+            0.0                                                                 AS std_interval_s,
+            toUInt64(uniqExact(if(dst_ip='',NULL,dst_ip)))                     AS unique_dst_ips,
+            toUInt64(uniqExact(if(dst_port='',NULL,dst_port)))                 AS unique_dst_ports,
+            toUInt64(uniqExact(if(country='',NULL,country)))                   AS unique_countries,
+            toFloat64(countIf(severity='critical')) / count()                  AS pct_critical,
+            toFloat64(countIf(severity='high'))     / count()                  AS pct_high,
+            toUInt64(countIf(threat_type IN ('brute_force','ssh_bruteforce','vpn_bruteforce','rdp_relay'))) AS brute_force_cnt,
+            toUInt64(countIf(threat_type='ssh_bruteforce'))                    AS ssh_bf_cnt,
+            toUInt64(countIf(threat_type='rdp_relay'))                         AS rdp_cnt,
+            toUInt64(countIf(threat_type='db_scan'))                           AS db_scan_cnt,
+            toUInt64(countIf(threat_type='known_malicious'))                   AS known_bad_cnt,
+            toUInt64(countIf(threat_type='privilege_escalation'))              AS priv_esc_cnt,
+            toUInt64(countIf(threat_type='vpn_bruteforce'))                    AS vpn_bf_cnt
+        FROM {LOGS_TABLE}
+        WHERE ts >= now() - INTERVAL 7 DAY
+        GROUP BY src_ip
+        HAVING n_events >= 3
+        ORDER BY n_events DESC
+        LIMIT 10000
+        """
+        res = client.query(sql)
+        cols = res.column_names
+        features = []
+        for row in res.result_rows:
+            f = dict(zip(cols, row))
+            ip_val = f.get("ip", "")
+            ac = (alert_counts or {}).get(ip_val, {})
+            f["baseline_alerts"] = int(ac.get("baseline_alerts", 0))
+            f["critical_alerts"]  = int(ac.get("critical_alerts", 0))
+            for key in FEATURE_COLS:
+                if key in f:
+                    try:
+                        f[key] = float(f[key])
+                    except (TypeError, ValueError):
+                        f[key] = 0.0
+            features.append(f)
+        return features
+    except Exception as e:
+        logger.error(f"get_all_ip_features_batch failed ({e}) — falling back to per-IP mode")
+        return get_all_ip_features(alert_counts)
