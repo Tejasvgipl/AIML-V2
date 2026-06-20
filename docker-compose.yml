@@ -154,9 +154,9 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/api/auth/health"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      timeout: 8s
+      retries: 8
+      start_period: 45s
 
   frontend:
     build: ./frontend

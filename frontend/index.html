@@ -4891,7 +4891,7 @@ tr:hover td{background:#161b22}</style></head>
       const r = await get(`${API}/network/topology`);
       const el = document.getElementById('topo-status');
       const prev = document.getElementById('topo-preview');
-      if (!r) { el.textContent = 'Could not reach topology endpoint.'; return; }
+      if (!r) { el.textContent = 'Could not reach topology endpoint — check docker logs aiml_backend'; return; }
       if (r.entries === 0) {
         el.textContent = 'No topology loaded. Upload an Excel or CSV file to enrich Kill Chain.';
         prev.innerHTML = '';
@@ -4940,7 +4940,7 @@ tr:hover td{background:#161b22}</style></head>
         const r = await fetch(AUTH + '/users', { headers: { 'Authorization': 'Bearer ' + t } });
         if (!r.ok) { el.innerHTML = '<span style="color:var(--danger)">Error: ' + r.status + '</span>'; return; }
         rows = await r.json();
-      } catch(e) { el.innerHTML = '<span style="color:var(--danger)">Network error</span>'; return; }
+      } catch(e) { el.innerHTML = `<span style="color:var(--danger)">Network error: ${e.message} — check docker logs aiml_auth</span>`; return; }
 
       if (!rows.length) { el.innerHTML = '<span style="color:var(--muted)">No users yet.</span>'; return; }
 
