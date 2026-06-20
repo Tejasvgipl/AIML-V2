@@ -1926,7 +1926,7 @@
         fetch(AUTH + '/me', { headers: { 'Authorization': 'Bearer ' + t } })
           .then(function(r) {
             if (!r.ok) { localStorage.clear(); location.reload(); }
-            else { _applyAdminUI(); }
+            else { _applyAdminUI(); setTimeout(function(){ if(typeof refreshAll==='function') refreshAll(); }, 100); }
           }).catch(function() {});
       }
     })();
@@ -1952,6 +1952,7 @@
           localStorage.setItem('cs_user',  data.username);
           document.getElementById('login-screen').classList.add('hidden');
           _applyAdminUI();
+          setTimeout(function(){ if(typeof refreshAll==='function') refreshAll(); }, 100);
         } else {
           errEl.classList.add('show');
         }
@@ -2053,7 +2054,7 @@
             <div class="ops-copy" id="ops-copy">Ingested events, behavioural baselines, anomaly scores, and analyst
               controls are synced into one operational view.</div>
             <div class="ops-tape">
-              <span>LIVE REDIS TELEMETRY</span>
+              <span>LIVE CLICKHOUSE TELEMETRY</span>
               <span>BASELINE ENGINE ONLINE</span>
               <span>ML SIGNALS INDEXED</span>
               <span>AI EXPLAIN READY</span>
@@ -2982,6 +2983,7 @@ tr:hover td{background:#161b22}</style></head>
       return Object.entries(threats).sort((a, b) => b[1] - a[1])[0] || ['unknown', 0];
     }
     async function refreshAll() {
+      try {
       const s = await get(`${API}/stats`); if (!s) return;
       const totalLogs = Number(s.total_logs || 0);
       const hotCount = (s.hot_ips || []).length;
@@ -3068,6 +3070,7 @@ tr:hover td{background:#161b22}</style></head>
           ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block"></span> ML ready'
           : '<span style="width:6px;height:6px;border-radius:50%;background:var(--warn);display:inline-block"></span> Not trained';
       }
+      } catch(e) { console.error('refreshAll error:', e); }
     }
     function doSearch() { const q = document.getElementById('ip-search').value.trim(); if (!q) return; goTrail(q); }
     function goTrail(ip) { nav('trail'); document.getElementById('trail-input').value = ip; loadTrail(); }
