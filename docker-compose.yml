@@ -1,17 +1,62 @@
 services:
-  redis:
-    build: ./redis-config
-    container_name: cs_redis
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: cs_clickhouse
+    environment:
+      - CLICKHOUSE_DB=cybersentinel
     ports:
-      - "127.0.0.1:${REDIS_HOST_PORT:-16380}:6379"
+      - "${CLICKHOUSE_HTTP_PORT:-18123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-19000}:9000"
     volumes:
-      - redis_data:/data
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+      - ./clickhouse/users.d/default-password.xml:/etc/clickhouse-server/users.d/default-password.xml:ro
+      - ./clickhouse/users.d/grafana-readonly.xml:/etc/clickhouse-server/users.d/grafana-readonly.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # /ping is unauthenticated, so the password doesn't break the check
+      test: ["CMD-SHELL", "clickhouse-client --password \"$${CLICKHOUSE_PASS:-tejas@123}\" --query 'SELECT 1' || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 20s
+
+  # ── Grafana: visual log explorer for ClickHouse (timeline + raw logs) ────
+  # This is the OpenSearch-Dashboards equivalent. ClickHouse's own /play UI is
+  # SQL-only; Grafana gives the histogram + click-to-browse raw logs.
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: cs_grafana
+    environment:
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+      # Login required — set your username/password here
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASS:-tejas@123}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_DEFAULT_THEME=dark
+      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    ports:
+      - "${GRAFANA_PORT:-13000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
 
   backend:
     build: ./backend
@@ -19,32 +64,39 @@ services:
     ports:
       - "${BACKEND_HOST_PORT:-18110}:8000"
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
       - ABUSEIPDB_KEY=${ABUSEIPDB_KEY:-demo}
-      - AI_API_KEY=${AI_API_KEY}
-      - AI_MODEL=${AI_MODEL:-llama-3.3-70b-versatile}
+      - AI_API_KEY=${GROQ_API_KEY:-${AI_API_KEY}}
+      - AI_MODEL=${GROQ_MODEL:-${AI_MODEL:-llama-3.3-70b-versatile}}
       - AI_BASE_URL=${AI_BASE_URL:-https://api.groq.com/openai/v1/chat/completions}
       - LOG_LEVEL=INFO
-      - ARCHIVE_DIR=/app/archive
-      - TRAIL_RETAIN=${TRAIL_RETAIN:-200}
-      - OPENSEARCH_ENABLED=${OPENSEARCH_ENABLED:-false}
-      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-10.200.10.23}
-      - OPENSEARCH_PORT=${OPENSEARCH_PORT:-9200}
-      - OPENSEARCH_USER=${OPENSEARCH_USER:-admin}
-      - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
-      - OS_BULK_SIZE=${OS_BULK_SIZE:-200}
-      - OS_FLUSH_INTERVAL=${OS_FLUSH_INTERVAL:-5.0}
+      - CLICKHOUSE_ENABLED=${CLICKHOUSE_ENABLED:-true}
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DB=cybersentinel
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASS=${CLICKHOUSE_PASS:-tejas@123}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./sample-data:/app/sample-data
       - ./scripts:/app/scripts
-      - archive_data:/app/archive
+      - backend_data:/app/data
     depends_on:
-      redis:
+      clickhouse:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 256M
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
 
   ml-engine:
     build: ./ml-engine
@@ -52,52 +104,59 @@ services:
     ports:
       - "${ML_ENGINE_HOST_PORT:-18111}:8001"
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
       - MODEL_RETRAIN_HOURS=24
-      - OPENSEARCH_ENABLED=${OPENSEARCH_ENABLED:-false}
-      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-10.200.10.23}
-      - OPENSEARCH_PORT=${OPENSEARCH_PORT:-9200}
-      - OPENSEARCH_USER=${OPENSEARCH_USER:-admin}
-      - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
+      - ML_NEW_LOG_THRESHOLD=${ML_NEW_LOG_THRESHOLD:-10000}
+      - CLICKHOUSE_ENABLED=${CLICKHOUSE_ENABLED:-true}
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DB=cybersentinel
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASS=${CLICKHOUSE_PASS:-tejas@123}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ml_models:/app/models
       - ./sample-data:/app/sample-data
     depends_on:
-      redis:
+      clickhouse:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
     restart: unless-stopped
 
-  ml-intern:
-    build: ./ml-intern
-    container_name: cs_ml_intern
+  auth:
+    build: ./auth
+    container_name: cs_auth
     ports:
-      - "${ML_INTERN_HOST_PORT:-18112}:8002"
+      - "${AUTH_HOST_PORT:-18113}:8003"
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - ML_INTERN_CHECK_MINUTES=${ML_INTERN_CHECK_MINUTES:-5}
-      - ML_INTERN_TIME_HOURS=${ML_INTERN_TIME_HOURS:-24}
-      - ML_INTERN_NEW_LOG_THRESHOLD=${ML_INTERN_NEW_LOG_THRESHOLD:-10000}
-      - ML_INTERN_DRIFT_THRESHOLD=${ML_INTERN_DRIFT_THRESHOLD:-0.35}
-      - ML_INTERN_STRONG_DRIFT_THRESHOLD=${ML_INTERN_STRONG_DRIFT_THRESHOLD:-0.35}
-      - ML_INTERN_MIN_TRAINING_IPS=${ML_INTERN_MIN_TRAINING_IPS:-5}
-      - ML_INTERN_MODEL_DIR=/app/models
-      - OPENSEARCH_ENABLED=${OPENSEARCH_ENABLED:-false}
-      - OPENSEARCH_HOST=${OPENSEARCH_HOST:-10.200.10.23}
-      - OPENSEARCH_PORT=${OPENSEARCH_PORT:-9200}
-      - OPENSEARCH_USER=${OPENSEARCH_USER:-admin}
-      - OPENSEARCH_PASS=${OPENSEARCH_PASS:-admin}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ml_models:/app/models
+      - JWT_SECRET=${JWT_SECRET:-cs-jwt-secret-CHANGE-IN-PROD-2026}
+      - JWT_EXPIRE_HOURS=${JWT_EXPIRE_HOURS:-8}
+      - SEED_ADMIN_USER=${SEED_ADMIN_USER:-Tejas}
+      - SEED_ADMIN_PASS=${SEED_ADMIN_PASS:-tejas@123}
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DB=cybersentinel
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASS=${CLICKHOUSE_PASS:-tejas@123}
     depends_on:
-      redis:
+      clickhouse:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/api/auth/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   frontend:
     build: ./frontend
@@ -115,8 +174,12 @@ services:
     ports:
       - "${NGINX_HOST_PORT:-18888}:80"
     depends_on:
-      - frontend
-      - backend
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
     restart: unless-stopped
 
   # ── Wazuh alerts.json Streamer ──────────────────────────────────────────
@@ -128,28 +191,42 @@ services:
   wazuh-watcher:
     build: ./scripts
     container_name: cs_wazuh_watcher
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     environment:
       - PYTHONUNBUFFERED=1
       - WAZUH_ALERTS_PATH=/wazuh/alerts.json
+      # Sink: write alerts straight into ClickHouse (no backend round-trip)
+      - WATCHER_SINK=${WATCHER_SINK:-clickhouse}
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=8123
+      - CLICKHOUSE_DB=cybersentinel
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASS=${CLICKHOUSE_PASS:-tejas@123}
+      - WAZUH_SPOOL_DIR=/app/data/spool
+      # Backend is still used to trigger baseline/ML/archive after batches
       - WAZUH_API_URL=${WAZUH_API_URL:-http://backend:8000}
       - WAZUH_ML_API_URL=${WAZUH_ML_API_URL:-http://ml-engine:8001}
       - WAZUH_POLL_INTERVAL=${WAZUH_POLL_INTERVAL:-5}
-      - WAZUH_BATCH_SIZE=${WAZUH_BATCH_SIZE:-200}
+      - WAZUH_BATCH_SIZE=${WAZUH_BATCH_SIZE:-5000}
       - WAZUH_OFFSET_FILE=/app/data/wazuh_offset.json
       - WAZUH_TRAIN_THRESHOLD=${WAZUH_TRAIN_THRESHOLD:-500}
       - WAZUH_ARCHIVE_THRESHOLD=${WAZUH_ARCHIVE_THRESHOLD:-5000}
-      - WAZUH_MIN_LEVEL=${WAZUH_MIN_LEVEL:-4}
-      - WAZUH_SAMPLE_BELOW=${WAZUH_SAMPLE_BELOW:-7}
-      - WAZUH_SAMPLE_RATE=${WAZUH_SAMPLE_RATE:-10}
-      - WAZUH_MAX_PER_MINUTE=${WAZUH_MAX_PER_MINUTE:-500}
+      # Keep EVERY log at rule level >= 1 (no dropping, no sampling, no cap)
+      - WAZUH_MIN_LEVEL=${WAZUH_MIN_LEVEL:-1}
+      - WAZUH_SAMPLE_BELOW=${WAZUH_SAMPLE_BELOW:-1}
+      - WAZUH_SAMPLE_RATE=${WAZUH_SAMPLE_RATE:-1}
+      - WAZUH_MAX_PER_MINUTE=${WAZUH_MAX_PER_MINUTE:-0}
       - WAZUH_STALE_SECONDS=${WAZUH_STALE_SECONDS:-600}
     volumes:
       # READ-ONLY mount of alerts.json — cannot modify the original
       - ${WAZUH_ALERTS_PATH:-/var/ossec/logs/alerts/alerts.json}:/wazuh/alerts.json:ro
-      # Persist offset between restarts
+      # Persist offset + spool between restarts
       - watcher_data:/app/data
     depends_on:
-      redis:
+      clickhouse:
         condition: service_healthy
       backend:
         condition: service_started
@@ -158,7 +235,8 @@ services:
       - wazuh
 
 volumes:
-  redis_data:
+  clickhouse_data:
+  grafana_data:
   ml_models:
-  archive_data:
   watcher_data:
+  backend_data:

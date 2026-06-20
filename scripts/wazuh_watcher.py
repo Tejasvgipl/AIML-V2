@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """
-CyberSentinel — Wazuh alerts.json Streamer v2
+CyberSentinel — Wazuh alerts.json Streamer v3 (ClickHouse sink)
 
-Tails Wazuh's alerts.json locally with byte-offset tracking.
-Deployed ON the Wazuh server inside Docker — reads alerts.json as read-only mount.
-NOTHING gets modified, deleted, or written to the Wazuh directories.
+Tails Wazuh's alerts.json locally with byte-offset tracking and writes the
+filtered alerts STRAIGHT INTO ClickHouse (no backend round-trip).
 
-Smart filtering to handle high-volume logs (1000s/min):
-  - Level 0-3:  DROP (noise — syslog, file integrity checks, etc.)
-  - Level 4-6:  SAMPLE 1 in N (moderate — auth info, policy changes)
-  - Level 7+:   KEEP ALL (important — attacks, brute force, exploits)
+Reads alerts.json as a read-only mount — NOTHING is modified on the Wazuh side.
 
-First run:  reads ALL existing alerts — NO rate limit, processes everything
-After that: reads ONLY new alerts with rate limiting
+Production properties:
+  - Batched inserts (BATCH_SIZE rows) → ClickHouse never sees tiny inserts.
+  - Disk spool: if ClickHouse is down, the batch is written to a spool file and
+    replayed on recovery → zero log loss across restarts/outages.
+  - Offset only advances once a batch is durably stored (inserted OR spooled).
+
+Smart filtering for high-volume logs (lakhs/hour):
+  - Level 0-3:  DROP   (noise)
+  - Level 4-6:  SAMPLE 1 in N
+  - Level 7+:   KEEP ALL (attacks, brute force, exploits)
 """
 import json
 import os
 import random
 import sys
 import time
+import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,33 +36,149 @@ ALERTS_PATH = Path(os.getenv("WAZUH_ALERTS_PATH", "/var/ossec/logs/alerts/alerts
 API_BASE = os.getenv("WAZUH_API_URL", "http://backend:8000").rstrip("/")
 ML_API_BASE = os.getenv("WAZUH_ML_API_URL", "http://ml-engine:8001").rstrip("/")
 OFFSET_FILE = Path(os.getenv("WAZUH_OFFSET_FILE", "/app/data/wazuh_offset.json"))
+SPOOL_DIR = Path(os.getenv("WAZUH_SPOOL_DIR", "/app/data/spool"))
 INTERVAL = int(os.getenv("WAZUH_POLL_INTERVAL", "5"))
-BATCH_SIZE = int(os.getenv("WAZUH_BATCH_SIZE", "200"))
+BATCH_SIZE = int(os.getenv("WAZUH_BATCH_SIZE", "5000"))
 TRAIN_THRESHOLD = int(os.getenv("WAZUH_TRAIN_THRESHOLD", "500"))
 ARCHIVE_THRESHOLD = int(os.getenv("WAZUH_ARCHIVE_THRESHOLD", "5000"))
+
+# ClickHouse
+CH_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse")
+CH_PORT = int(os.getenv("CLICKHOUSE_PORT", "8123"))
+CH_USER = os.getenv("CLICKHOUSE_USER", "default")
+CH_PASS = os.getenv("CLICKHOUSE_PASS", "")
+CH_DB   = os.getenv("CLICKHOUSE_DB", "cybersentinel")
+CH_TABLE = f"{CH_DB}.logs"
 
 # Smart filtering
 MIN_LEVEL = int(os.getenv("WAZUH_MIN_LEVEL", "4"))
 SAMPLE_BELOW = int(os.getenv("WAZUH_SAMPLE_BELOW", "7"))
 SAMPLE_RATE = int(os.getenv("WAZUH_SAMPLE_RATE", "10"))
-MAX_PER_MINUTE = int(os.getenv("WAZUH_MAX_PER_MINUTE", "500"))
+MAX_PER_MINUTE = int(os.getenv("WAZUH_MAX_PER_MINUTE", "0"))   # 0 = unlimited
 STALE_SECONDS = int(os.getenv("WAZUH_STALE_SECONDS", "600"))
-
-# Chunk size: how many LINES to read per cycle (prevents reading 2M lines at once)
 CHUNK_LINES = int(os.getenv("WAZUH_CHUNK_LINES", "50000"))
 
-# ── filter stats ─────────────────────────────────────────────────────────────
+INSERT_COLS = [
+    "ts", "ingested_at", "src_ip", "dst_ip", "dst_port", "threat_type",
+    "severity", "rule", "rule_id", "rule_level", "action", "country",
+    "agent", "mitre", "username", "useragent", "signature",
+    # ── Phase 1: richer Wazuh signal ──
+    "mitre_tactic", "mitre_technique", "rule_groups", "rule_firedtimes",
+    "pci_dss", "gdpr", "hipaa", "nist",
+    "proc_image", "proc_parent", "proc_cmdline", "logon_type", "target_user",
+    "sc_path", "sc_event", "sc_sha256", "geo_lat", "geo_lon",
+    "decoder", "location", "full_log", "raw",
+]
+
 filter_stats = defaultdict(int)
 minute_counter = {"count": 0, "minute": 0}
 
 
+# ── ClickHouse client ──────────────────────────────────────────────────────────
+
+_ch_client = None
+
+
+def get_ch():
+    """Lazy ClickHouse client. Returns None if unreachable (caller spools)."""
+    global _ch_client
+    if _ch_client is not None:
+        return _ch_client
+    try:
+        import clickhouse_connect
+        _ch_client = clickhouse_connect.get_client(
+            host=CH_HOST, port=CH_PORT, username=CH_USER, password=CH_PASS,
+            database=CH_DB, connect_timeout=10, send_receive_timeout=120,
+            # Server-side batching, but WAIT for the ack so a successful insert
+            # is durable — that's what lets us safely advance the read offset.
+            settings={"async_insert": 1, "wait_for_async_insert": 1},
+        )
+        _ch_client.command("SELECT 1")
+        print(f"[Watcher] ClickHouse connected at {CH_HOST}:{CH_PORT}")
+        return _ch_client
+    except Exception as e:
+        print(f"  ✗ ClickHouse connect failed: {e}")
+        _ch_client = None
+        return None
+
+
+def ch_insert(rows: list) -> bool:
+    """Insert a list of column-ordered rows. Returns True on success."""
+    if not rows:
+        return True
+    client = get_ch()
+    if not client:
+        return False
+    try:
+        client.insert(CH_TABLE, rows, column_names=INSERT_COLS)
+        return True
+    except Exception as e:
+        print(f"  ✗ ClickHouse insert failed ({len(rows)} rows): {e}")
+        # Drop the client so the next call reconnects
+        global _ch_client
+        _ch_client = None
+        return False
+
+
+# ── disk spool (durability when ClickHouse is down) ────────────────────────────
+
+def spool_batch(rows: list) -> bool:
+    """Persist a failed batch to disk for later replay. Returns True if saved."""
+    try:
+        SPOOL_DIR.mkdir(parents=True, exist_ok=True)
+        fname = SPOOL_DIR / f"batch_{int(time.time()*1000)}_{random.randint(1000,9999)}.json"
+        # rows contain datetimes → serialise ts/ingested_at as ISO strings
+        serialisable = [[_iso(c) if isinstance(c, datetime) else c for c in row] for row in rows]
+        with open(fname, "w") as f:
+            json.dump(serialisable, f)
+        print(f"  💾 Spooled {len(rows)} rows → {fname.name} (ClickHouse unreachable)")
+        return True
+    except Exception as e:
+        print(f"  ✗ SPOOL FAILED: {e}")
+        return False
+
+
+def replay_spool() -> int:
+    """Try to flush spooled batches into ClickHouse. Returns rows replayed."""
+    if not SPOOL_DIR.exists():
+        return 0
+    files = sorted(SPOOL_DIR.glob("batch_*.json"))
+    if not files:
+        return 0
+    replayed = 0
+    for fpath in files:
+        try:
+            with open(fpath) as f:
+                rows = json.load(f)
+        except Exception:
+            fpath.unlink(missing_ok=True)
+            continue
+        # revive ts / ingested_at (cols 0,1) back into datetimes
+        for row in rows:
+            row[0] = _parse_ts(row[0])
+            row[1] = _parse_ts(row[1])
+        if ch_insert(rows):
+            replayed += len(rows)
+            fpath.unlink(missing_ok=True)
+        else:
+            break  # ClickHouse still down — stop, retry next cycle
+    if replayed:
+        print(f"  ♻ Replayed {replayed:,} spooled rows into ClickHouse")
+    return replayed
+
+
+def store_batch(rows: list) -> bool:
+    """Durably store a batch: insert, else spool. True = safe to advance offset."""
+    if ch_insert(rows):
+        return True
+    return spool_batch(rows)
+
+
+# ── filtering ──────────────────────────────────────────────────────────────────
+
 def get_rule_level(raw_alert: dict) -> int:
-    """Extract the Wazuh rule level from a raw alert."""
     rule = raw_alert.get("rule", {})
-    if isinstance(rule, dict):
-        level = rule.get("level", 0)
-    else:
-        level = 0
+    level = rule.get("level", 0) if isinstance(rule, dict) else 0
     try:
         return int(level)
     except (ValueError, TypeError):
@@ -65,32 +186,15 @@ def get_rule_level(raw_alert: dict) -> int:
 
 
 def should_ingest(raw_alert: dict) -> str:
-    """
-    Decide whether to ingest this alert.
-    Returns: 'keep', 'sample', or 'drop'
-
-    Wazuh levels:
-      0-3:  Noise (syslog, file checks, system msgs)    → DROP
-      4-6:  Moderate (auth info, policy, errors)         → SAMPLE 1/N
-      7-9:  Important (bad auth, scans, attacks)         → KEEP ALL
-      10-12: High (exploit, brute force, rootkit)        → KEEP ALL
-      13-15: Critical (active attack, breach)            → KEEP ALL
-    """
     level = get_rule_level(raw_alert)
-
     if level < MIN_LEVEL:
         return "drop"
-
     if level < SAMPLE_BELOW:
-        if random.randint(1, SAMPLE_RATE) == 1:
-            return "sample"
-        return "drop"
-
+        return "sample" if random.randint(1, SAMPLE_RATE) == 1 else "drop"
     return "keep"
 
 
 def check_rate_limit() -> bool:
-    """Check if we're within the per-minute rate limit."""
     if MAX_PER_MINUTE <= 0:
         return True
     current_minute = int(time.time() / 60)
@@ -103,7 +207,7 @@ def check_rate_limit() -> bool:
     return True
 
 
-# ── offset tracking ──────────────────────────────────────────────────────────
+# ── offset tracking ────────────────────────────────────────────────────────────
 
 def load_offset() -> dict:
     if OFFSET_FILE.exists():
@@ -128,7 +232,7 @@ def save_offset(state: dict):
         print(f"  ✗ OFFSET SAVE FAILED: {e}")
 
 
-# ── wazuh field mapping ─────────────────────────────────────────────────────
+# ── Wazuh alert → ClickHouse row mapping ───────────────────────────────────────
 
 def flatten_wazuh(alert: dict, prefix: str = "") -> dict:
     """Flatten nested Wazuh JSON into dot-notation keys."""
@@ -144,130 +248,282 @@ def flatten_wazuh(alert: dict, prefix: str = "") -> dict:
     return flat
 
 
-def map_wazuh_alert(raw_alert: dict) -> dict:
-    flat = flatten_wazuh(raw_alert)
-    if "@timestamp" not in flat and "timestamp" in flat:
-        flat["@timestamp"] = flat["timestamp"]
-    return flat
+def _first(flat: dict, *keys) -> str:
+    for k in keys:
+        v = flat.get(k)
+        if v not in (None, "", "None"):
+            return str(v)
+    return ""
 
 
-# ── API calls ────────────────────────────────────────────────────────────────
+def _iso(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
-def send_batch(alerts: list) -> tuple[bool, int]:
+
+def _parse_ts(value) -> datetime:
+    """Parse a Wazuh/ISO timestamp string to a naive-UTC datetime for ClickHouse."""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = str(value).strip()
+        dt = None
+        if s:
+            txt = s.replace("Z", "+00:00")
+            # Wazuh uses +0000 (no colon) — normalise to +00:00
+            if len(txt) >= 5 and (txt[-5] in "+-") and txt[-3] != ":":
+                txt = txt[:-2] + ":" + txt[-2:]
+            try:
+                dt = datetime.fromisoformat(txt)
+            except Exception:
+                for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                            "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        break
+                    except Exception:
+                        continue
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _severity_from_level(level: int) -> str:
+    if level >= 12:
+        return "critical"
+    if level >= 8:
+        return "high"
+    if level >= 4:
+        return "medium"
+    return "low"
+
+
+# keyword → threat_type, checked against rule.groups + description
+_THREAT_RULES = [
+    ("ssh_bruteforce",        ("ssh", "sshd")),
+    ("vpn_bruteforce",        ("vpn", "openvpn", "ipsec")),
+    ("rdp_relay",             ("rdp", "remote desktop", "terminal")),
+    ("brute_force",           ("brute", "authentication_failed", "auth_failed",
+                               "multiple_auth", "invalid_login", "login_denied")),
+    ("privilege_escalation",  ("privilege", "sudo", "rootkit", "escalation")),
+    ("db_scan",               ("mysql", "postgres", "mongodb", "database", "sql")),
+    ("malware",               ("malware", "virus", "trojan", "ransom")),
+    ("web_attack",            ("web", "sql_injection", "xss", "attack")),
+    ("recon_scan",            ("scan", "nmap", "recon", "portscan")),
+    ("known_malicious",       ("blacklist", "known_bad", "threat_intel", "ioc")),
+    ("login_success",         ("authentication_success", "login_success", "session_opened")),
+]
+
+
+def _to_float(value) -> float:
     try:
-        resp = requests.post(
-            f"{API_BASE}/api/ingest/bulk", json={"logs": alerts}, timeout=60,
-            headers={"Content-Type": "application/json"},
-        )
-        if resp.status_code != 200:
-            print(f"  ✗ Backend returned {resp.status_code}: {resp.text[:200]}")
-            return False, 0
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _to_int(value) -> int:
+    try:
+        return int(float(value))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _threat_from_alert(flat: dict) -> str:
+    haystack = (_first(flat, "rule.groups") + " " +
+                _first(flat, "rule.description") + " " +
+                _first(flat, "rule.pci_dss")).lower()
+    for ttype, keywords in _THREAT_RULES:
+        if any(k in haystack for k in keywords):
+            return ttype
+    return "unknown"
+
+
+def map_to_row(raw_alert: dict):
+    """Map a raw Wazuh alert to a ClickHouse row (column order = INSERT_COLS)."""
+    flat = flatten_wazuh(raw_alert)
+    level = get_rule_level(raw_alert)
+
+    src_ip = _first(flat, "data.srcip", "data.src_ip", "srcip",
+                    "data.win.eventdata.ipAddress", "agent.ip")
+    if not src_ip:
+        return None
+
+    ts = _parse_ts(_first(flat, "@timestamp", "timestamp") or datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    return [
+        ts,                                                          # ts
+        now,                                                         # ingested_at
+        src_ip,                                                      # src_ip
+        _first(flat, "data.dstip", "data.dest_ip", "data.win.eventdata.destinationIp"),
+        _first(flat, "data.dstport", "data.dest_port", "data.win.eventdata.destinationPort"),
+        _threat_from_alert(flat),                                    # threat_type
+        _severity_from_level(level),                                 # severity
+        _first(flat, "rule.description")[:200],                      # rule
+        _first(flat, "rule.id"),                                     # rule_id
+        max(0, min(level, 255)),                                     # rule_level (UInt8)
+        _first(flat, "data.action"),                                 # action
+        _first(flat, "data.srccountry", "GeoLocation.country_name"), # country
+        _first(flat, "agent.name"),                                  # agent
+        _first(flat, "rule.mitre.id"),                               # mitre
+        _first(flat, "data.user", "data.win.eventdata.user", "data.dstuser", "data.srcuser"),
+        _first(flat, "data.http.http_user_agent"),                   # useragent
+        _first(flat, "data.alert.signature")[:200],                  # signature
+        # ── Phase 1: richer Wazuh signal ──
+        _first(flat, "rule.mitre.tactic"),                           # mitre_tactic
+        _first(flat, "rule.mitre.technique"),                        # mitre_technique
+        _first(flat, "rule.groups"),                                 # rule_groups
+        _to_int(_first(flat, "rule.firedtimes")),                    # rule_firedtimes
+        _first(flat, "rule.pci_dss"),                                # pci_dss
+        _first(flat, "rule.gdpr"),                                   # gdpr
+        _first(flat, "rule.hipaa"),                                  # hipaa
+        _first(flat, "rule.nist_800_53"),                            # nist
+        _first(flat, "data.win.eventdata.image", "data.process.name", "data.command")[:300],
+        _first(flat, "data.win.eventdata.parentImage", "data.parent.name")[:300],
+        _first(flat, "data.win.eventdata.commandLine", "data.win.eventdata.parentCommandLine")[:500],
+        _first(flat, "data.win.eventdata.logonType"),               # logon_type
+        _first(flat, "data.win.eventdata.targetUserName", "data.dstuser"),
+        _first(flat, "syscheck.path"),                               # sc_path
+        _first(flat, "syscheck.event"),                              # sc_event
+        _first(flat, "syscheck.sha256_after", "syscheck.sha256_before"),
+        _to_float(_first(flat, "GeoLocation.location.lat", "data.gps_location.lat")),
+        _to_float(_first(flat, "GeoLocation.location.lon", "data.gps_location.lon")),
+        _first(flat, "decoder.name"),                                # decoder
+        _first(flat, "location")[:300],                              # location
+        _first(flat, "full_log")[:2000],                             # full_log
+        json.dumps(raw_alert),                                       # raw (no truncation)
+    ]
+
+
+# ── backend triggers (non-blocking — run in daemon threads) ──────────────────
+
+_trigger_lock = threading.Lock()
+_active_triggers: set = set()
+
+
+def _run_in_bg(name: str, fn):
+    """Fire-and-forget: run fn() in a daemon thread. Skip if already running."""
+    with _trigger_lock:
+        if name in _active_triggers:
+            print(f"  ⏭ {name} already running — skipping")
+            return
+        _active_triggers.add(name)
+
+    def _wrap():
         try:
-            data = resp.json()
-            return True, int(data.get("saved", len(alerts)))
-        except Exception:
-            return True, len(alerts)
-    except requests.ConnectionError:
-        print(f"  ✗ Cannot connect to {API_BASE}")
-        return False, 0
-    except Exception as e:
-        print(f"  ✗ Batch error: {e}")
-        return False, 0
+            fn()
+        finally:
+            with _trigger_lock:
+                _active_triggers.discard(name)
+
+    t = threading.Thread(target=_wrap, name=name, daemon=True)
+    t.start()
 
 
 def trigger_ml_train():
-    try:
-        resp = requests.post(f"{ML_API_BASE}/api/ml/train", timeout=120)
-        data = resp.json()
-        print(f"  🧠 ML train: {data.get('status')} — {data.get('ip_count', '?')} IPs, "
-              f"{data.get('anomalies', '?')} anomalies")
-    except Exception as e:
-        print(f"  ⚠ ML train failed: {e}")
+    def _do():
+        try:
+            resp = requests.post(f"{ML_API_BASE}/api/ml/train", timeout=180)
+            data = resp.json()
+            print(f"  🧠 ML train: {data.get('status')} — {data.get('ip_count','?')} IPs, "
+                  f"{data.get('anomalies','?')} anomalies")
+        except Exception as e:
+            print(f"  ⚠ ML train failed: {e}")
+    _run_in_bg("ml-train", _do)
 
 
 def trigger_archive():
-    try:
-        resp = requests.post(f"{API_BASE}/api/archive/run", timeout=120)
-        data = resp.json()
-        print(f"  📦 Archive: {data.get('archived', '?')} events archived")
-    except Exception as e:
-        print(f"  ⚠ Archive failed: {e}")
+    def _do():
+        try:
+            resp = requests.post(f"{API_BASE}/api/archive/run", timeout=120)
+            print(f"  📦 Archive: {resp.json().get('archived','?')} events archived")
+        except Exception as e:
+            print(f"  ⚠ Archive failed: {e}")
+    _run_in_bg("archive", _do)
 
 
 def trigger_baseline_build():
-    try:
-        resp = requests.post(f"{API_BASE}/api/baseline/build-all", timeout=120)
-        data = resp.json()
-        print(f"  📊 Baselines: {data.get('baselines_built', '?')} built")
-    except Exception as e:
-        print(f"  ⚠ Baseline build failed: {e}")
+    def _do():
+        try:
+            resp = requests.post(f"{API_BASE}/api/baseline/build-all", timeout=300)
+            print(f"  📊 Baselines: {resp.json().get('baselines_built','?')} built")
+        except Exception as e:
+            print(f"  ⚠ Baseline build failed: {e}")
+    _run_in_bg("baseline-build", _do)
 
 
-def wait_for_backend(max_wait: int = 120):
-    print(f"[Watcher] Waiting for backend at {API_BASE} ...")
+def trigger_deviation_scan():
+    def _do():
+        try:
+            resp = requests.post(f"{API_BASE}/api/baseline/scan-deviations", timeout=300)
+            d = resp.json()
+            print(f"  🚨 Deviations: {d.get('deviations_written','?')} across "
+                  f"{d.get('ips_with_deviations','?')} IPs")
+        except Exception as e:
+            print(f"  ⚠ Deviation scan failed: {e}")
+    _run_in_bg("deviation-scan", _do)
+
+
+def wait_for_clickhouse(max_wait: int = 120):
+    print(f"[Watcher] Waiting for ClickHouse at {CH_HOST}:{CH_PORT} ...")
     start = time.time()
     while time.time() - start < max_wait:
-        try:
-            resp = requests.get(f"{API_BASE}/api/health", timeout=5)
-            if resp.status_code == 200:
-                print(f"[Watcher] Backend ready ✓")
-                return
-        except Exception:
-            pass
+        if get_ch():
+            return
         time.sleep(3)
-    print(f"[Watcher] Backend not reachable after {max_wait}s — starting anyway")
+    print(f"[Watcher] ClickHouse not reachable after {max_wait}s — starting anyway (will spool)")
 
 
-# ── main loop ────────────────────────────────────────────────────────────────
+# ── main loop ──────────────────────────────────────────────────────────────────
 
 def tail_alerts():
     state = load_offset()
     is_first_run = state["byte_offset"] == 0
 
     if is_first_run:
-        print(f"[Watcher] FIRST RUN — will ingest entire alerts.json history")
-        print(f"[Watcher] Rate limiting DISABLED for first run (full speed)")
+        print("[Watcher] FIRST RUN — ingesting entire alerts.json history (no rate limit)")
     else:
         print(f"[Watcher] Resuming from offset {state['byte_offset']:,} "
-              f"({state['lines_read']:,} lines, {state['total_ingested']:,} ingested)")
+              f"({state['total_ingested']:,} ingested)")
 
-    # Wait for file to exist
     if not ALERTS_PATH.exists():
         print(f"[Watcher] Waiting for {ALERTS_PATH} ...")
         while not ALERTS_PATH.exists():
             time.sleep(INTERVAL)
-        print(f"[Watcher] File found ✓")
+        print("[Watcher] File found ✓")
 
     session_ingested = 0
     since_last_train = 0
     since_last_archive = 0
-    consecutive_errors = 0
     last_progress_ts = time.time()
 
     while True:
+        # Always try to drain the spool first (ClickHouse may have recovered)
+        replay_spool()
+
         try:
             file_size = ALERTS_PATH.stat().st_size
         except Exception:
             time.sleep(INTERVAL)
             continue
 
-        # File rotation detection (Wazuh rotates daily)
         if file_size < state["byte_offset"]:
-            print(f"[Watcher] File rotated — resetting offset")
+            print("[Watcher] File rotated — resetting offset")
             state["byte_offset"] = 0
             save_offset(state)
             last_progress_ts = time.time()
 
         if file_size > state["byte_offset"] and time.time() - last_progress_ts > STALE_SECONDS:
-            print(f"[Watcher] Stale offset for {STALE_SECONDS}s while file has unread data — exiting for Docker restart")
+            print(f"[Watcher] Stale {STALE_SECONDS}s with unread data — exiting for Docker restart")
             sys.exit(2)
 
         if file_size == state["byte_offset"]:
             if is_first_run and session_ingested > 0:
-                # We've caught up — first run is done
-                print(f"\n[Watcher] ═══ FIRST RUN COMPLETE ═══")
-                print(f"[Watcher] Ingested {session_ingested:,} historical alerts")
-                print(f"[Watcher] Building baselines + training ML model...")
+                print(f"\n[Watcher] ═══ FIRST RUN COMPLETE — {session_ingested:,} alerts ═══")
                 trigger_baseline_build()
                 trigger_ml_train()
                 trigger_archive()
@@ -278,121 +534,94 @@ def tail_alerts():
             time.sleep(INTERVAL)
             continue
 
-        # ── Read a CHUNK of lines (not the entire file) ─────────────────
-        chunk_kept = 0
-        chunk_dropped = 0
-        chunk_rate_limited = 0
-        chunk_lines = 0
-        chunk_errors = 0
-        new_alerts_batch = []
+        chunk_kept = chunk_dropped = chunk_rate_limited = chunk_lines = 0
+        batch = []
         last_good_offset = state["byte_offset"]
+
+        def flush(rows, advance_to) -> bool:
+            """Store rows; on success advance offset + counters. Returns ok."""
+            nonlocal session_ingested, since_last_train, since_last_archive
+            if not rows:
+                return True
+            if store_batch(rows):
+                state["byte_offset"] = advance_to
+                state["lines_read"] += len(rows)
+                state["total_ingested"] += len(rows)
+                session_ingested += len(rows)
+                since_last_train += len(rows)
+                since_last_archive += len(rows)
+                save_offset(state)
+                return True
+            return False
 
         try:
             with open(ALERTS_PATH, "r", encoding="utf-8", errors="replace") as f:
                 f.seek(state["byte_offset"])
-
                 for _ in range(CHUNK_LINES):
                     line = f.readline()
-                    if not line:
-                        break  # EOF
-                    if not line.endswith("\n"):
-                        break  # incomplete line, wait for next cycle
-
+                    if not line or not line.endswith("\n"):
+                        break  # EOF or incomplete line
                     last_good_offset = f.tell()
                     chunk_lines += 1
                     line = line.strip()
                     if not line:
                         continue
-
                     try:
                         raw_alert = json.loads(line)
                     except json.JSONDecodeError:
-                        chunk_errors += 1
                         continue
 
-                    # ── Smart filtering ──
                     decision = should_ingest(raw_alert)
                     if decision == "drop":
                         chunk_dropped += 1
                         continue
-
-                    # Rate limit: SKIP during first run, APPLY after
                     if not is_first_run and not check_rate_limit():
                         chunk_rate_limited += 1
                         continue
 
-                    if decision == "sample":
-                        filter_stats["sampled"] += 1
-                    else:
-                        filter_stats["kept"] += 1
-
-                    mapped = map_wazuh_alert(raw_alert)
-                    new_alerts_batch.append(mapped)
+                    row = map_to_row(raw_alert)
+                    if row is None:
+                        chunk_dropped += 1
+                        continue
+                    filter_stats["sampled" if decision == "sample" else "kept"] += 1
+                    batch.append(row)
                     chunk_kept += 1
 
-                    # Send in batches
-                    if len(new_alerts_batch) >= BATCH_SIZE:
-                        sent, saved = send_batch(new_alerts_batch)
-                        if sent:
-                            state["byte_offset"] = last_good_offset
-                            state["lines_read"] += len(new_alerts_batch)
-                            state["total_ingested"] += saved
-                            session_ingested += saved
-                            since_last_train += saved
-                            since_last_archive += saved
-                            save_offset(state)
+                    if len(batch) >= BATCH_SIZE:
+                        if flush(batch, last_good_offset):
                             last_progress_ts = time.time()
-                            consecutive_errors = 0
+                            batch = []
                         else:
-                            consecutive_errors += 1
-                            if consecutive_errors >= 5:
-                                print(f"  ✗ 5 consecutive send failures — waiting 30s")
-                                time.sleep(30)
-                                consecutive_errors = 0
-                            break  # Stop reading, retry from saved offset
-                        new_alerts_batch = []
-
+                            print("  ✗ Could not store/spool batch — waiting 15s")
+                            time.sleep(15)
+                            batch = []
+                            break
         except Exception as e:
             print(f"  ✗ Read error: {e}")
             time.sleep(INTERVAL)
             continue
 
-        # Send remaining batch
-        if new_alerts_batch:
-            sent, saved = send_batch(new_alerts_batch)
-            if sent:
-                state["byte_offset"] = last_good_offset
-                state["lines_read"] += len(new_alerts_batch)
-                state["total_ingested"] += saved
-                session_ingested += saved
-                since_last_train += saved
-                since_last_archive += saved
-                save_offset(state)
+        if batch:
+            if flush(batch, last_good_offset):
                 last_progress_ts = time.time()
-                consecutive_errors = 0
-            else:
-                consecutive_errors += 1
         elif chunk_lines > 0:
-            # Even if nothing was kept (all filtered), advance the offset
+            # everything filtered out — still advance past the read lines
             state["byte_offset"] = last_good_offset
             save_offset(state)
             last_progress_ts = time.time()
 
-        # Log progress
         if chunk_lines > 0:
             ts = datetime.now().strftime("%H:%M:%S")
-            pct_done = ""
-            if file_size > 0:
-                pct_done = f" | {state['byte_offset']/file_size*100:.1f}% of file"
-            rate_msg = f", {chunk_rate_limited} rate-limited" if chunk_rate_limited > 0 else ""
-            print(f"  [{ts}] Chunk: {chunk_lines:,} lines → {chunk_kept} kept, "
-                  f"{chunk_dropped:,} dropped{rate_msg} "
-                  f"(total ingested: {state['total_ingested']:,}{pct_done})")
+            pct = f" | {state['byte_offset']/file_size*100:.1f}% of file" if file_size else ""
+            rl = f", {chunk_rate_limited} rate-limited" if chunk_rate_limited else ""
+            print(f"  [{ts}] {chunk_lines:,} lines → {chunk_kept} kept, "
+                  f"{chunk_dropped:,} dropped{rl} "
+                  f"(total: {state['total_ingested']:,}{pct})")
 
-        # Auto-triggers
         if since_last_train >= TRAIN_THRESHOLD:
             print(f"[Watcher] Triggering ML train ({since_last_train:,} new)...")
-            trigger_baseline_build()
+            trigger_deviation_scan()    # detect novelty vs the PRIOR baseline first
+            trigger_baseline_build()    # then refresh baselines to absorb new data
             trigger_ml_train()
             since_last_train = 0
 
@@ -401,27 +630,19 @@ def tail_alerts():
             trigger_archive()
             since_last_archive = 0
 
-        # During first run, don't sleep between chunks — go fast
-        if is_first_run:
-            time.sleep(0.1)  # tiny pause to not hog CPU
-        else:
-            time.sleep(INTERVAL)
+        time.sleep(0.1 if is_first_run else INTERVAL)
 
 
 if __name__ == "__main__":
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║   CyberSentinel — Wazuh alerts.json Streamer v2        ║")
+    print("║   CyberSentinel — Wazuh alerts.json Streamer v3        ║")
+    print("║   Sink: ClickHouse (direct, batched, spooled)         ║")
     print("╚══════════════════════════════════════════════════════════╝")
     print(f"  File       : {ALERTS_PATH}")
-    print(f"  Backend    : {API_BASE}")
-    print(f"  ML Engine  : {ML_API_BASE}")
-    print(f"  Interval   : {INTERVAL}s | Batch: {BATCH_SIZE} | Chunk: {CHUNK_LINES:,} lines")
-    print(f"  ── Smart Filter ──")
-    print(f"  Drop       : level <{MIN_LEVEL} (noise)")
-    print(f"  Sample     : level {MIN_LEVEL}-{SAMPLE_BELOW-1} (1 in {SAMPLE_RATE})")
-    print(f"  Keep all   : level {SAMPLE_BELOW}+")
-    print(f"  Rate limit : {MAX_PER_MINUTE}/min (DISABLED during first run)" if MAX_PER_MINUTE > 0 else "  Rate limit : unlimited")
+    print(f"  ClickHouse : {CH_HOST}:{CH_PORT} → {CH_TABLE}")
+    print(f"  Backend    : {API_BASE} (triggers only)")
+    print(f"  Batch      : {BATCH_SIZE} | Chunk: {CHUNK_LINES:,} lines | Spool: {SPOOL_DIR}")
+    print(f"  Filter     : drop <{MIN_LEVEL}, sample {MIN_LEVEL}-{SAMPLE_BELOW-1} (1/{SAMPLE_RATE}), keep {SAMPLE_BELOW}+")
     print()
-
-    wait_for_backend()
+    wait_for_clickhouse()
     tail_alerts()

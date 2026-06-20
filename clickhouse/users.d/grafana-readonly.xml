@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Read-only ClickHouse user for Grafana.
+     readonly=2  -> can run SELECT and set session settings, but CANNOT
+                    INSERT / ALTER / DROP / TRUNCATE.
+     allow_ddl=0 -> no schema changes.
+     So even with full Grafana access, nobody can damage the logs. -->
+<clickhouse>
+    <profiles>
+        <readonly_profile>
+            <readonly>2</readonly>
+            <allow_ddl>0</allow_ddl>
+        </readonly_profile>
+    </profiles>
+    <users>
+        <grafana_ro>
+            <password>GrafanaRead@2026!</password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>readonly_profile</profile>
+            <quota>default</quota>
+        </grafana_ro>
+    </users>
+</clickhouse>

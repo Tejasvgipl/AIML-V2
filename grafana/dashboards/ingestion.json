@@ -1,0 +1,192 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "time": { "from": "now-90d", "to": "now" },
+  "refresh": "10s",
+  "timezone": "browser",
+  "title": "CyberSentinel — Logs Explorer",
+  "uid": "cs-ingestion",
+  "schemaVersion": 39,
+  "tags": ["cybersentinel", "clickhouse"],
+  "templating": {
+    "list": [
+      {
+        "name": "severity",
+        "label": "Severity",
+        "type": "custom",
+        "query": "critical,high,medium,low",
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "current": { "text": "All", "value": "$__all" },
+        "options": [
+          { "text": "All", "value": "$__all", "selected": true },
+          { "text": "critical", "value": "critical", "selected": false },
+          { "text": "high", "value": "high", "selected": false },
+          { "text": "medium", "value": "medium", "selected": false },
+          { "text": "low", "value": "low", "selected": false }
+        ]
+      },
+      {
+        "name": "threat",
+        "label": "Threat type",
+        "type": "custom",
+        "query": "ssh_bruteforce,vpn_bruteforce,rdp_relay,brute_force,privilege_escalation,db_scan,malware,web_attack,recon_scan,known_malicious,login_success,unknown",
+        "multi": true,
+        "includeAll": true,
+        "allValue": null,
+        "current": { "text": "All", "value": "$__all" },
+        "options": [
+          { "text": "All", "value": "$__all", "selected": true }
+        ]
+      },
+      {
+        "name": "search",
+        "label": "Search (IP / rule / threat)",
+        "type": "textbox",
+        "query": "",
+        "current": { "text": "", "value": "" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Logs (filtered)",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 0,
+          "rawSql": "SELECT count() AS c FROM cybersentinel.logs WHERE $__timeFilter(ts) AND severity IN (${severity:singlequote}) AND threat_type IN (${threat:singlequote}) AND (rule ILIKE '%${search}%' OR src_ip ILIKE '%${search}%' OR threat_type ILIKE '%${search}%')"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Critical",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "red" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 0,
+          "rawSql": "SELECT count() AS c FROM cybersentinel.logs WHERE severity='critical' AND $__timeFilter(ts) AND (rule ILIKE '%${search}%' OR src_ip ILIKE '%${search}%')"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Unique source IPs",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 0,
+          "rawSql": "SELECT uniqExact(src_ip) AS c FROM cybersentinel.logs WHERE $__timeFilter(ts) AND severity IN (${severity:singlequote}) AND threat_type IN (${threat:singlequote})"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Seconds since last log",
+      "description": "Climbs if live logs stop arriving.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "yellow", "value": 120 }, { "color": "red", "value": 600 }
+        ] } }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 0,
+          "rawSql": "SELECT ifNull(dateDiff('second', max(ts), now()), -1) AS s FROM cybersentinel.logs"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Log timeline (events over time)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 1, "stacking": { "mode": "normal" } },
+          "color": { "mode": "palette-classic" }
+        }, "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 1,
+          "rawSql": "SELECT $__timeInterval(ts) AS time, severity, count() AS events FROM cybersentinel.logs WHERE $__timeFilter(ts) AND severity IN (${severity:singlequote}) AND threat_type IN (${threat:singlequote}) AND (rule ILIKE '%${search}%' OR src_ip ILIKE '%${search}%' OR threat_type ILIKE '%${search}%') GROUP BY time, severity ORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Logs",
+      "gridPos": { "h": 20, "w": 24, "x": 0, "y": 12 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "fieldConfig": {
+        "defaults": { "custom": { "filterable": true, "align": "auto" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "severity" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              { "id": "mappings", "value": [ { "type": "value", "options": {
+                "critical": { "color": "red", "index": 0 },
+                "high": { "color": "orange", "index": 1 },
+                "medium": { "color": "yellow", "index": 2 },
+                "low": { "color": "green", "index": 3 } } } ] }
+            ] },
+          { "matcher": { "id": "byName", "options": "ts" },
+            "properties": [ { "id": "custom.width", "value": 190 } ] }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "clickhouse" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 0,
+          "rawSql": "SELECT ts, src_ip, dst_ip, dst_port, threat_type, severity, rule_level, country, agent, rule FROM cybersentinel.logs WHERE $__timeFilter(ts) AND severity IN (${severity:singlequote}) AND threat_type IN (${threat:singlequote}) AND (rule ILIKE '%${search}%' OR src_ip ILIKE '%${search}%' OR threat_type ILIKE '%${search}%') ORDER BY ts DESC LIMIT 1000"
+        }
+      ]
+    }
+  ]
+}

@@ -1,20 +1,31 @@
 """
 CyberSentinel Backend — FastAPI v2.2
-Handles: log ingestion, IP trail, threat intel, stats, 24 behavioural baselines,
-         hot/cold archive storage, incremental baseline updates,
-         OpenSearch persistent store with ILM
+Handles: log ingestion, IP trail, threat intel, stats, behavioural baselines,
+         ATT&CK kill-chain, UEBA, incident correlation.
 """
-import os, json, time, statistics, gzip, logging, asyncio, threading, html, textwrap
+import os, json, time, statistics, logging, asyncio, html, textwrap
 from collections import deque, OrderedDict
+import threading
 try:
-    import opensearch_client as osc
+    import clickhouse_client as osc   # ClickHouse is the log store (mirrors old osc API)
 except Exception:
     osc = None  # type: ignore
+try:
+    import threat_intel as ti         # ATT&CK knowledge base + grounding retrieval
+except Exception:
+    ti = None  # type: ignore
+try:
+    import ueba as ub                  # User & Entity Behaviour Analytics
+except Exception:
+    ub = None  # type: ignore
+try:
+    import incidents as inc            # alert -> incident correlation + narrative
+except Exception:
+    inc = None  # type: ignore
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 import pandas as pd
-import redis.asyncio as aioredis
 import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,43 +33,39 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 logger = logging.getLogger("cybersentinel.backend")
 
+# ── Network topology store (uploaded Excel/CSV) ────────────────────────────
+_TOPO_FILE = Path("/app/data/network_topology.json")
+_TOPO_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+def _load_topology() -> dict[str, dict]:
+    """Returns {ip: {hostname, device_type, floor, department, switch_name, switch_port, vlan, owner, ...}}"""
+    try:
+        if _TOPO_FILE.exists():
+            return json.loads(_TOPO_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_topology(data: dict):
+    _TOPO_FILE.write_text(json.dumps(data, indent=2))
+
+_topology: dict[str, dict] = _load_topology()
+
 app = FastAPI(title="CyberSentinel API", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-REDIS_HOST    = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT    = int(os.getenv("REDIS_PORT", 6379))
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "demo")
 AI_API_KEY  = os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", ""))
 AI_MODEL    = os.getenv("AI_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
 AI_BASE_URL = os.getenv("AI_BASE_URL", os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"))
-TRAIL_TTL     = 60 * 60 * 24 * 30
 BASELINE_TTL  = 60 * 60 * 24 * 90
-ALERT_TTL     = 60 * 60 * 24 * 7
 MIN_EVENTS_FOR_BASELINE = 10
 VOLUME_SPIKE_MULTIPLIER = 3
 
-# ── Hot/Cold storage config ───────────────────────────────────────────────────
-ARCHIVE_DIR = Path(os.getenv("ARCHIVE_DIR", "/app/archive"))
-ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-TRAIL_RETAIN = int(os.getenv("TRAIL_RETAIN", 200))   # events to keep in Redis per IP
-
-# ── OpenSearch config ─────────────────────────────────────────────────────────
-OPENSEARCH_ENABLED = os.getenv("OPENSEARCH_ENABLED", "false").lower() in ("true", "1", "yes")
-OPENSEARCH_HOST    = os.getenv("OPENSEARCH_HOST", "localhost")
-OPENSEARCH_PORT    = int(os.getenv("OPENSEARCH_PORT", 9200))
-OPENSEARCH_USER    = os.getenv("OPENSEARCH_USER", "admin")
-OPENSEARCH_PASS    = os.getenv("OPENSEARCH_PASS", "admin")
-OS_INDEX_ALIAS     = "cybersentinel-logs"           # rollover write alias
-OS_BULK_SIZE       = int(os.getenv("OS_BULK_SIZE", 200))
-OS_FLUSH_INTERVAL  = float(os.getenv("OS_FLUSH_INTERVAL", 5.0))  # seconds
-
-_redis: Optional[aioredis.Redis] = None
-
-async def get_redis() -> aioredis.Redis:
-    global _redis
-    if _redis is None:
-        _redis = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-    return _redis
+# ── Log store (ClickHouse) ────────────────────────────────────────────────────
+# STORE_ENABLED gates all log-derived reads (trail, stats, hot-ips, baselines,
+# ML features). The `osc` module is now the ClickHouse client.
+STORE_ENABLED = bool(osc and getattr(osc, "CLICKHOUSE_ENABLED", False))
 
 # ── In-process recent-events LRU cache ───────────────────────────────────────
 # Keeps last RECENT_PER_IP events per IP in Python process memory (NOT Redis).
@@ -89,102 +96,25 @@ def _get_recent(ip: str, limit: int = 50) -> list[tuple[float, dict]]:
     items = list(dq)
     return items[-limit:]
 
-# ── OpenSearch client & bulk buffer ───────────────────────────────────────────
+# ── In-process ephemeral state ────────────────────────────────────────────
+_daily_counts: dict[str, dict] = {}                 # ip -> {day: count}  (volume spike)
+_ipcnt: dict[str, int] = {}                         # ip -> events seen   (rebuild trigger)
+_intel_cache: "OrderedDict[str, tuple]" = OrderedDict()   # ip -> (expiry_epoch, data)
 
-_os_client = None
-_os_buffer: list[dict] = []
-_os_lock = threading.Lock()
-_os_flush_task: Optional[asyncio.Task] = None
-
-def get_opensearch():
-    """Lazy singleton for the OpenSearch client."""
-    global _os_client
-    if _os_client is not None:
-        return _os_client
-    if not OPENSEARCH_ENABLED:
+def _intel_get(ip: str):
+    v = _intel_cache.get(ip)
+    if not v:
         return None
-    try:
-        from opensearchpy import OpenSearch
-        _os_client = OpenSearch(
-            hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
-            http_auth=(OPENSEARCH_USER, OPENSEARCH_PASS),
-            use_ssl=True,
-            verify_certs=False,
-            ssl_show_warn=False,
-            timeout=30,
-        )
-        info = _os_client.info()
-        ver = info.get("version", {}).get("number", "?")
-        logger.info(f"OpenSearch connected: v{ver} at {OPENSEARCH_HOST}:{OPENSEARCH_PORT}")
-        return _os_client
-    except Exception as e:
-        logger.warning(f"OpenSearch connection failed: {e} — continuing with Redis only")
-        _os_client = None
+    if v[0] < time.time():
+        _intel_cache.pop(ip, None)
         return None
+    return v[1]
 
+def _intel_set(ip: str, data: dict, ttl: int = 900):
+    if len(_intel_cache) > 5000:
+        _intel_cache.popitem(last=False)
+    _intel_cache[ip] = (time.time() + ttl, data)
 
-def _os_queue_doc(doc: dict) -> None:
-    """Add a document to the bulk buffer. Thread-safe."""
-    if not OPENSEARCH_ENABLED:
-        return
-    with _os_lock:
-        _os_buffer.append(doc)
-        if len(_os_buffer) >= OS_BULK_SIZE:
-            _flush_os_buffer_sync()
-
-
-def _flush_os_buffer_sync() -> None:
-    """Flush the OpenSearch bulk buffer (called under _os_lock)."""
-    global _os_buffer
-    if not _os_buffer:
-        return
-    client = get_opensearch()
-    if client is None:
-        _os_buffer.clear()
-        return
-    docs_to_flush = _os_buffer[:]
-    _os_buffer = []
-
-    bulk_body = []
-    for doc in docs_to_flush:
-        bulk_body.append({"index": {"_index": OS_INDEX_ALIAS}})
-        bulk_body.append(doc)
-    try:
-        resp = client.bulk(body=bulk_body, refresh=False)
-        errors = resp.get("errors", False)
-        if errors:
-            failed = sum(1 for item in resp.get("items", []) if item.get("index", {}).get("error"))
-            logger.warning(f"OpenSearch bulk: {len(docs_to_flush)} docs, {failed} errors")
-        else:
-            logger.debug(f"OpenSearch bulk: {len(docs_to_flush)} docs indexed")
-    except Exception as e:
-        logger.error(f"OpenSearch bulk flush failed: {e}")
-
-
-async def _os_periodic_flush() -> None:
-    """Background task that flushes OpenSearch buffer every OS_FLUSH_INTERVAL seconds."""
-    while True:
-        await asyncio.sleep(OS_FLUSH_INTERVAL)
-        with _os_lock:
-            _flush_os_buffer_sync()
-
-
-@app.on_event("startup")
-async def _start_os_flusher():
-    global _os_flush_task
-    if OPENSEARCH_ENABLED:
-        get_opensearch()  # warm up connection
-        _os_flush_task = asyncio.create_task(_os_periodic_flush())
-        logger.info(f"OpenSearch bulk flusher started (interval={OS_FLUSH_INTERVAL}s, batch={OS_BULK_SIZE})")
-
-
-@app.on_event("shutdown")
-async def _stop_os_flusher():
-    if _os_flush_task:
-        _os_flush_task.cancel()
-    # Final flush
-    with _os_lock:
-        _flush_os_buffer_sync()
 
 async def ask_groq(prompt: str, max_tokens: int = 700) -> str:
     if not AI_API_KEY:
@@ -259,34 +189,66 @@ def extract_src_ip(row: dict) -> Optional[str]:
     return None
 
 def classify_event(row: dict) -> dict:
-    rule_desc   = str(row.get("rule.description",""))
-    raw_level    = str(row.get("data.level", row.get("rule.level",""))).lower()
-    severity     = SEVERITY_MAP.get(raw_level, "low")
+    """Classify an alert into a threat_type using the rich Wazuh signal
+    (rule.groups + MITRE + description), not just the description string.
+    Success vs failure is decided first so a successful SSH/VPN/RDP auth is
+    never mislabelled as a brute-force of that protocol."""
+    raw_level = str(row.get("data.level", row.get("rule.level", ""))).lower()
+    severity  = SEVERITY_MAP.get(raw_level, "low")
     if raw_level.isdigit():
         lvl = int(raw_level)
         severity = "critical" if lvl >= 12 else "high" if lvl >= 8 else "medium" if lvl >= 4 else "low"
-    threat_type = "unknown"
 
-    if "Login failed" in rule_desc or "login fail" in rule_desc.lower():
-        threat_type, severity = "brute_force", "high"
-    elif "SSH" in rule_desc and ("brute" in rule_desc.lower() or "non-existent" in rule_desc.lower()):
-        threat_type, severity = "ssh_bruteforce", "high"
-    elif "RDP" in rule_desc:
-        threat_type, severity = "rdp_relay", "critical"
-    elif "PostgreSQL" in rule_desc or "MySQL" in rule_desc or "mySQL" in rule_desc:
-        threat_type, severity = "db_scan", "medium"
-    elif "VPN" in rule_desc and "fail" in rule_desc.lower():
-        threat_type, severity = "vpn_bruteforce", "high"
-    elif "Dshield" in rule_desc or "Spamhaus" in rule_desc:
-        threat_type, severity = "known_malicious", "critical"
-    elif "Blocked URL" in rule_desc:
-        threat_type, severity = "policy_violation", "low"
-    elif "privilege" in rule_desc.lower():
-        threat_type, severity = "privilege_escalation", "critical"
-    elif "login" in rule_desc.lower() and "success" in rule_desc.lower():
-        threat_type, severity = "login_success", "low"
+    hay = " ".join(str(row.get(k, "")) for k in (
+        "rule.groups", "rule.description", "rule.mitre.tactic",
+        "rule.mitre.technique", "rule.pci_dss", "data.action",
+    )).lower()
 
-    return {"threat_type": threat_type, "severity": severity}
+    has = lambda *kw: any(k in hay for k in kw)
+    is_ssh = has("ssh", "sshd")
+    is_vpn = has("vpn", "openvpn", "ipsec")
+    is_rdp = has("rdp", "remote desktop", "terminal")
+
+    # 1) Successful authentication wins over protocol keywords.
+    if has("authentication_success", "login_success", "session_opened", "logged in"):
+        return {"threat_type": "login_success", "severity": severity if severity != "low" else "low"}
+
+    # 2) Authentication failures / brute force, specialised by protocol.
+    if has("brute", "authentication_failed", "auth_failed", "multiple_auth",
+           "invalid_login", "login_denied", "login failed", "failed password",
+           "non-existent", "invalid user"):
+        if is_ssh:
+            return {"threat_type": "ssh_bruteforce", "severity": max(severity, "high", key=_sev_rank)}
+        if is_vpn:
+            return {"threat_type": "vpn_bruteforce", "severity": max(severity, "high", key=_sev_rank)}
+        if is_rdp:
+            return {"threat_type": "rdp_relay", "severity": max(severity, "high", key=_sev_rank)}
+        return {"threat_type": "brute_force", "severity": max(severity, "high", key=_sev_rank)}
+
+    # 3) Other intents.
+    if is_rdp:
+        return {"threat_type": "rdp_relay", "severity": max(severity, "high", key=_sev_rank)}
+    if has("privilege", "sudo", "rootkit", "escalation"):
+        return {"threat_type": "privilege_escalation", "severity": max(severity, "high", key=_sev_rank)}
+    if has("mysql", "postgres", "postgresql", "mongodb", "database", " sql "):
+        return {"threat_type": "db_scan", "severity": severity}
+    if has("malware", "virus", "trojan", "ransom"):
+        return {"threat_type": "malware", "severity": max(severity, "high", key=_sev_rank)}
+    if has("sql_injection", "xss", "web_attack", "web attack"):
+        return {"threat_type": "web_attack", "severity": max(severity, "high", key=_sev_rank)}
+    if has("scan", "nmap", "recon", "portscan"):
+        return {"threat_type": "recon_scan", "severity": severity}
+    if has("blacklist", "known_bad", "threat_intel", "ioc", "dshield", "spamhaus"):
+        return {"threat_type": "known_malicious", "severity": max(severity, "critical", key=_sev_rank)}
+    if has("blocked url"):
+        return {"threat_type": "policy_violation", "severity": "low"}
+
+    return {"threat_type": "unknown", "severity": severity}
+
+
+_SEV_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+def _sev_rank(s: str) -> int:
+    return _SEV_RANK.get(s, 0)
 
 def is_internal(ip: str) -> bool:
     return any(ip.startswith(r) for r in INTERNAL_RANGES)
@@ -297,14 +259,14 @@ def get_subnet24(ip: str) -> str:
 
 # ── baseline builder ──────────────────────────────────────────────────────────
 
-async def build_baseline(r: aioredis.Redis, ip: str):
+async def build_baseline(ip: str):
     """
     Build a behavioural baseline for an IP.
     Source of truth is OpenSearch (full history).
     Falls back to the in-process recent-events cache when OpenSearch is disabled.
     """
     # --- source: OpenSearch (preferred) ---
-    if OPENSEARCH_ENABLED and osc:
+    if STORE_ENABLED and osc:
         events = osc.get_ip_events(ip, limit=5000)  # up to last 5k events
     else:
         # Fallback: use in-process cache
@@ -382,16 +344,16 @@ async def build_baseline(r: aioredis.Redis, ip: str):
         "daily_counts":     daily_counts,
     }
 
-    await r.set(f"baseline:{ip}", json.dumps(baseline))
+    if STORE_ENABLED and osc:
+        osc.save_baseline(ip, baseline)
 
 # ── deviation detector ────────────────────────────────────────────────────────
 
-async def detect_deviations(r: aioredis.Redis, ip: str, event: dict, ts: float) -> list:
-    raw = await r.get(f"baseline:{ip}")
-    if not raw:
+async def detect_deviations(ip: str, event: dict, ts: float) -> list:
+    b = osc.get_baseline(ip) if (STORE_ENABLED and osc) else None
+    if not b:
         return []
 
-    b      = json.loads(raw)
     alerts = []
 
     def alert(atype, message, severity="high", details=None):
@@ -478,7 +440,9 @@ async def detect_deviations(r: aioredis.Redis, ip: str, event: dict, ts: float) 
     # 9. VOLUME SPIKE
     try:
         day_key   = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-        today_cnt = await r.hincrby(f"daily:{ip}", day_key, 1)
+        d = _daily_counts.setdefault(ip, {})
+        d[day_key] = d.get(day_key, 0) + 1
+        today_cnt = d[day_key]
         avg_daily = b.get("avg_daily_events", 0)
         if avg_daily > 5 and today_cnt > avg_daily * VOLUME_SPIKE_MULTIPLIER:
             alerts.append(alert("volume_spike",
@@ -540,23 +504,16 @@ async def detect_deviations(r: aioredis.Redis, ip: str, event: dict, ts: float) 
     return alerts
 
 
-async def save_alerts(r: aioredis.Redis, ip: str, alerts: list):
+async def save_alerts(ip: str, alerts: list):
     if not alerts:
         return
-    pipe = r.pipeline()
-    for a in alerts:
-        key = f"alert:{ip}:{a['type']}"
-        pipe.set(key, json.dumps(a))
-        pipe.incr("stat:total_alerts")
-        pipe.incr(f"stat:alert_type:{a['type']}")
-        if a["severity"] == "critical":
-            pipe.sadd("critical_alerts", ip)
-    await pipe.execute()
+    if STORE_ENABLED and osc:
+        osc.save_deviations(ip, alerts)   # one row per (ip,type), newest wins
 
 
 # ── ingestion ─────────────────────────────────────────────────────────────────
 
-async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
+async def ingest_log_row(row: dict) -> bool:
     src_ip = extract_src_ip(row)
     if not src_ip:
         return False
@@ -590,51 +547,87 @@ async def ingest_log_row(r: aioredis.Redis, row: dict) -> bool:
     # ── Update in-process recent-events LRU cache (for deviation detection) ─
     _push_recent(src_ip, score, event)
 
-    # ── Redis: thin aggregates only — NO trail, NO ipstat per-IP ─────────
-    pipe = r.pipeline()
-    pipe.incr("stat:total_logs")
-    pipe.incr(f"stat:threat:{classification['threat_type']}")
-    pipe.incr(f"ipcnt:{src_ip}")            # lightweight per-IP event counter
-    if classification["severity"] in ("critical", "high"):
-        pipe.sadd("hot_ips", src_ip)
-    for subnet in KNOWN_BAD_SUBNETS:
-        if src_ip.startswith(subnet):
-            pipe.sadd("blocklist:auto", src_ip)
-            break
-    results = await pipe.execute()
-
-    # ── OpenSearch: primary log store ─────────────────────────────────────
-    if OPENSEARCH_ENABLED:
-        os_doc = {
-            "@timestamp":  ts,
-            "ingested_at": datetime.now(timezone.utc).isoformat(),
-            "src_ip":      src_ip,
-            "dst_ip":      dst_ip_val,
-            "dst_port":    dst_port_val,
-            "threat_type": classification["threat_type"],
-            "severity":    classification["severity"],
-            "rule":        str(row.get("rule.description",""))[:120],
-            "rule_id":     str(row.get("rule.id","")),
-            "action":      str(row.get("data.action","")),
-            "country":     str(row.get("data.srccountry","")),
-            "agent":       str(row.get("agent.name","")),
-            "mitre":       str(row.get("rule.mitre.id","")),
-            "username":    str(row.get("data.user", row.get("data.win.eventdata.user",""))),
-            "useragent":   str(row.get("data.http.http_user_agent","")),
-            "signature":   str(row.get("data.alert.signature",""))[:100],
-        }
-        _os_queue_doc(os_doc)
+    # ── ClickHouse: persistent log store (CSV / manual ingest path) ───────
+    # The Wazuh watcher writes to ClickHouse directly; this covers logs that
+    # arrive via the backend's CSV / single-log endpoints.
+    if STORE_ENABLED and osc:
+        try:
+            ch_ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            ch_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+        try:
+            lvl = int(float(row.get("rule.level", 0) or 0))
+        except (ValueError, TypeError):
+            lvl = 0
+        def _rget(*keys, default=""):
+            for k in keys:
+                v = row.get(k)
+                if v not in (None, "", "None"):
+                    return str(v)
+            return default
+        def _rfloat(*keys):
+            try:
+                return float(_rget(*keys, default="0") or 0)
+            except (ValueError, TypeError):
+                return 0.0
+        def _rint(*keys):
+            try:
+                return int(float(_rget(*keys, default="0") or 0))
+            except (ValueError, TypeError):
+                return 0
+        ch_row = [
+            ch_ts,                                            # ts
+            datetime.now(timezone.utc).replace(tzinfo=None),  # ingested_at
+            src_ip,
+            dst_ip_val,
+            dst_port_val,
+            classification["threat_type"],
+            classification["severity"],
+            str(row.get("rule.description", ""))[:200],
+            str(row.get("rule.id", "")),
+            max(0, min(lvl, 255)),
+            str(row.get("data.action", "")),
+            str(row.get("data.srccountry", "")),
+            str(row.get("agent.name", "")),
+            str(row.get("rule.mitre.id", "")),
+            str(row.get("data.user", row.get("data.win.eventdata.user", ""))),
+            str(row.get("data.http.http_user_agent", "")),
+            str(row.get("data.alert.signature", ""))[:200],
+            # ── Phase 1: richer Wazuh signal ──
+            _rget("rule.mitre.tactic"),
+            _rget("rule.mitre.technique"),
+            _rget("rule.groups"),
+            _rint("rule.firedtimes"),
+            _rget("rule.pci_dss"),
+            _rget("rule.gdpr"),
+            _rget("rule.hipaa"),
+            _rget("rule.nist_800_53"),
+            _rget("data.win.eventdata.image", "data.process.name", "data.command")[:300],
+            _rget("data.win.eventdata.parentImage", "data.parent.name")[:300],
+            _rget("data.win.eventdata.commandLine", "data.win.eventdata.parentCommandLine")[:500],
+            _rget("data.win.eventdata.logonType"),
+            _rget("data.win.eventdata.targetUserName", "data.dstuser"),
+            _rget("syscheck.path"),
+            _rget("syscheck.event"),
+            _rget("syscheck.sha256_after", "syscheck.sha256_before"),
+            _rfloat("GeoLocation.location.lat", "data.gps_location.lat"),
+            _rfloat("GeoLocation.location.lon", "data.gps_location.lon"),
+            _rget("decoder.name"),
+            _rget("location")[:300],
+            _rget("full_log")[:2000],
+            "",   # raw JSON catch-all (only the watcher has the full alert object)
+        ]
+        osc.insert_logs([ch_row])
 
     # ── Baseline deviation check ──────────────────────────────────────────
-    alerts = await detect_deviations(r, src_ip, event, score)
+    alerts = await detect_deviations(src_ip, event, score)
     if alerts:
-        await save_alerts(r, src_ip, alerts)
+        await save_alerts(src_ip, alerts)
 
-    # ── Rebuild baseline every 100 events per IP ──────────────────────────
-    # ipcnt result is the 3rd pipeline result (index 2)
-    ipcnt_val = results[2] if len(results) > 2 else 0
-    if ipcnt_val and int(ipcnt_val) % 100 == 0:
-        await build_baseline(r, src_ip)
+    # ── Rebuild baseline every 100 events per IP (in-process counter) ─────
+    _ipcnt[src_ip] = _ipcnt.get(src_ip, 0) + 1
+    if _ipcnt[src_ip] % 100 == 0:
+        await build_baseline(src_ip)
 
     return True
 
@@ -647,17 +640,15 @@ async def ingest_csv(background_tasks: BackgroundTasks, file: UploadFile = File(
     rows = df.to_dict(orient="records")
 
     async def process():
-        r = await get_redis()
         for row in rows:
-            await ingest_log_row(r, row)
-        # Build baselines for all IPs seen in OpenSearch after CSV ingest
-        if OPENSEARCH_ENABLED and osc:
+            await ingest_log_row(row)
+        # Build baselines for all IPs seen after CSV ingest
+        if STORE_ENABLED and osc:
             for ip in osc.get_all_unique_ips():
-                await build_baseline(r, ip)
+                await build_baseline(ip)
         else:
-            # Fallback: build from in-process cache
             for ip in list(_recent.keys()):
-                await build_baseline(r, ip)
+                await build_baseline(ip)
 
     background_tasks.add_task(process)
     return {"status":"ingesting","rows":len(rows)}
@@ -672,11 +663,10 @@ async def ingest_bulk(request: Request):
         logs = body["logs"]
     else:
         raise HTTPException(400, "Expected a list or {logs: [...]}")
-    r = await get_redis()
     saved = 0
     skipped = 0
     for log in logs:
-        if await ingest_log_row(r, log):
+        if await ingest_log_row(log):
             saved += 1
         else:
             skipped += 1
@@ -685,8 +675,7 @@ async def ingest_bulk(request: Request):
 
 @app.post("/api/ingest/log")
 async def ingest_single(log: dict):
-    r = await get_redis()
-    await ingest_log_row(r, log)
+    await ingest_log_row(log)
     return {"status":"ok"}
 
 
@@ -695,7 +684,7 @@ async def ingest_single(log: dict):
 @app.get("/api/trail/{ip}")
 async def get_trail(ip: str, limit: int = 100):
     """Recent trail for an IP. Reads from OpenSearch when enabled."""
-    if OPENSEARCH_ENABLED and osc:
+    if STORE_ENABLED and osc:
         events = osc.get_ip_events_desc(ip, limit=limit)
         total  = osc.get_ip_total_count(ip)
         threat_counts = osc.get_ip_threat_counts(ip)
@@ -708,9 +697,8 @@ async def get_trail(ip: str, limit: int = 100):
 
 @app.get("/api/trail/{ip}/summary")
 async def trail_summary(ip: str):
-    """IP summary: threat types, severities, first/last seen — from OpenSearch."""
-    r = await get_redis()
-    if OPENSEARCH_ENABLED and osc:
+    """IP summary: threat types, severities, first/last seen."""
+    if STORE_ENABLED and osc:
         total = osc.get_ip_total_count(ip)
         if total == 0:
             return {"ip": ip, "found": False}
@@ -725,12 +713,11 @@ async def trail_summary(ip: str):
             "last_seen":    last_seen,
             "threat_types": threat_types,
             "severities":   severities,
-            "is_hot":       await r.sismember("hot_ips", ip),
-            "is_blocked":   await r.sismember("blocklist:auto", ip),
-            "source":       "opensearch",
+            "is_hot":       bool(severities.get("critical") or severities.get("high")),
+            "source":       "clickhouse",
         }
 
-    # Fallback when OpenSearch is disabled — use in-process cache
+    # Fallback: use in-process cache
     recent = _get_recent(ip, limit=RECENT_PER_IP)
     if not recent:
         return {"ip": ip, "found": False}
@@ -751,180 +738,133 @@ async def trail_summary(ip: str):
         "last_seen":    datetime.fromtimestamp(last_ts,  tz=timezone.utc).isoformat(),
         "threat_types": threat_types,
         "severities":   severities,
-        "is_hot":       await r.sismember("hot_ips", ip),
-        "is_blocked":   await r.sismember("blocklist:auto", ip),
+        "is_hot":       bool(severities.get("critical") or severities.get("high")),
     }
 
 
-async def rebuild_runtime_indexes(r: aioredis.Redis) -> dict:
-    """Rebuild non-source-of-truth sets if Redis TTLs or old containers dropped them."""
-    trail_keys = await r.keys("trail:*")
-    hot_ips = set()
-    auto_block = set()
-
-    for key in trail_keys:
-        ip = key.replace("trail:","")
-        if any(ip.startswith(subnet) for subnet in KNOWN_BAD_SUBNETS):
-            auto_block.add(ip)
-
-        raw_events = await r.zrange(key, 0, -1)
-        for item in raw_events:
-            try:
-                event = json.loads(item)
-            except Exception:
-                continue
-            if event.get("severity") in ("critical","high"):
-                hot_ips.add(ip)
-                break
-
-    critical_ips = set()
-    alert_keys = await r.keys("alert:*")
-    for key in alert_keys:
-        val = await r.get(key)
-        if not val:
-            continue
-        try:
-            alert = json.loads(val)
-        except Exception:
-            continue
-        if alert.get("severity") == "critical" and alert.get("ip"):
-            critical_ips.add(alert["ip"])
-
-    pipe = r.pipeline()
-    pipe.delete("hot_ips", "critical_alerts", "blocklist:auto")
-    for ip in hot_ips:
-        pipe.sadd("hot_ips", ip)
-    for ip in critical_ips:
-        pipe.sadd("critical_alerts", ip)
-    for ip in auto_block:
-        pipe.sadd("blocklist:auto", ip)
-    baseline_keys = await r.keys("baseline:*")
-    daily_keys = await r.keys("daily:*")
-    ipcnt_keys = await r.keys("ipcnt:*")
-    for key in alert_keys + baseline_keys + daily_keys + ipcnt_keys:
-        pipe.persist(key)
-    await pipe.execute()
-
-    return {
-        "hot_ips": len(hot_ips),
-        "critical_ips": len(critical_ips),
-        "auto_blocked": len(auto_block),
-    }
+async def rebuild_runtime_indexes() -> dict:
+    """No-op since the move to ClickHouse: hot/critical are computed on read from ClickHouse (FINAL)."""
+    return {"hot_ips": 0, "critical_ips": 0, "auto_blocked": 0, "source": "clickhouse"}
 
 
 # ── baselines ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/baseline/{ip}")
 async def get_baseline(ip: str):
-    r   = await get_redis()
-    raw = await r.get(f"baseline:{ip}")
-    if not raw:
+    b = osc.get_baseline(ip) if (STORE_ENABLED and osc) else None
+    if not b:
         return {"ip":ip,"found":False,"message":"No baseline yet — needs 10+ events"}
-    return {"ip":ip,"found":True,"baseline":json.loads(raw)}
+    return {"ip":ip,"found":True,"baseline":b}
 
 
 @app.post("/api/baseline/{ip}/build")
 async def force_build_baseline(ip: str):
-    r = await get_redis()
-    await build_baseline(r, ip)
-    raw = await r.get(f"baseline:{ip}")
-    if raw:
-        return {"status":"built","ip":ip,"baseline":json.loads(raw)}
+    await build_baseline(ip)
+    b = osc.get_baseline(ip) if (STORE_ENABLED and osc) else None
+    if b:
+        return {"status":"built","ip":ip,"baseline":b}
     return {"status":"not_enough_data","ip":ip}
 
 
 @app.post("/api/baseline/build-all")
 async def build_all_baselines():
-    r = await get_redis()
-    if OPENSEARCH_ENABLED and osc:
-        ips = osc.get_all_unique_ips()
-    else:
-        cnt_keys = await r.keys("ipcnt:*")
-        ips = [k.replace("ipcnt:", "") for k in cnt_keys]
+    ips = osc.get_all_unique_ips() if (STORE_ENABLED and osc) else list(_ipcnt.keys())
     for ip in ips:
-        await build_baseline(r, ip)
+        await build_baseline(ip)
     return {"status": "done", "baselines_built": len(ips)}
+
+
+@app.post("/api/baseline/scan-deviations")
+async def scan_deviations(events_per_ip: int = 100, max_ips: int = 500):
+    """Re-run baseline-deviation detection — only for IPs active in the last 24h."""
+    if not (STORE_ENABLED and osc):
+        return {"status": "disabled"}
+    # Only scan IPs seen recently — avoids looping all historical IPs
+    client = osc.get_client()
+    active_ips: list[str] = []
+    if client:
+        try:
+            res = client.query(
+                "SELECT DISTINCT src_ip FROM cybersentinel.logs "
+                "WHERE ts > now() - INTERVAL 24 HOUR LIMIT {n:UInt32}",
+                parameters={"n": max_ips}
+            )
+            active_ips = [r[0] for r in res.result_rows if r[0]]
+        except Exception:
+            active_ips = osc.get_all_baseline_ips()[:max_ips]
+    else:
+        active_ips = osc.get_all_baseline_ips()[:max_ips]
+
+    ips_with_devs = 0
+    total = 0
+    for ip in active_ips:
+        baseline = osc.get_baseline(ip)
+        if not baseline:
+            continue
+        events = osc.get_ip_events(ip, limit=events_per_ip, days=1)  # last 24h only
+        collected: dict[str, dict] = {}
+        for ev in events:
+            ts = ev.get("_ts") or 0.0
+            try:
+                for a in await detect_deviations(ip, ev, ts):
+                    collected[a["type"]] = a
+            except Exception:
+                continue
+        if collected:
+            await save_alerts(ip, list(collected.values()))
+            ips_with_devs += 1
+            total += len(collected)
+    return {"status": "done", "ips_scanned": len(active_ips),
+            "ips_with_deviations": ips_with_devs, "deviations_written": total}
 
 
 # ── alerts ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/alerts")
 async def get_alerts(severity: str = None, limit: int = 100):
-    r    = await get_redis()
-    keys = await r.keys("alert:*")
-    alerts = []
-    for key in keys[:500]:
-        val = await r.get(key)
-        if val:
-            try:
-                a = json.loads(val)
-                if severity and a.get("severity") != severity:
-                    continue
-                alerts.append(a)
-            except Exception:
-                pass
+    alerts = osc.get_deviations(severity=severity, limit=500) if (STORE_ENABLED and osc) else []
     alerts.sort(key=lambda x: x.get("ts",""), reverse=True)
     return {"alerts":alerts[:limit],"total":len(alerts)}
 
 
 @app.get("/api/alerts/{ip}")
 async def get_ip_alerts(ip: str):
-    r    = await get_redis()
-    keys = await r.keys(f"alert:{ip}:*")
-    alerts = []
-    for key in keys:
-        val = await r.get(key)
-        if val:
-            try:
-                alerts.append(json.loads(val))
-            except Exception:
-                pass
+    alerts = osc.get_deviations(ip=ip, limit=200) if (STORE_ENABLED and osc) else []
     alerts.sort(key=lambda x: x.get("ts",""), reverse=True)
     return {"ip":ip,"alerts":alerts,"total":len(alerts)}
 
 
 # ── AI explanations ──────────────────────────────────────────────────────────
 
-async def collect_ip_context(r: aioredis.Redis, ip: str) -> dict:
-    # Pull recent events from OpenSearch for AI explanations
-    if OPENSEARCH_ENABLED and osc:
+async def collect_ip_context(ip: str) -> dict:
+    # Pull recent events + state from ClickHouse for AI explanations
+    if STORE_ENABLED and osc:
         events = osc.get_ip_events_desc(ip, limit=40)
+        alerts = osc.get_deviations(ip=ip, limit=200)   # server-side IP filter
+        baseline = osc.get_baseline(ip) or {}
     else:
         events = [e for _, e in _get_recent(ip, limit=40)]
-
-    alert_keys = await r.keys(f"alert:{ip}:*")
-    alerts = []
-    for key in alert_keys:
-        val = await r.get(key)
-        if val:
-            try:
-                alerts.append(json.loads(val))
-            except Exception:
-                pass
+        alerts = []
+        baseline = {}
     alerts.sort(key=lambda x: x.get("ts",""), reverse=True)
 
-    bsl_raw = await r.get(f"baseline:{ip}")
-    ml_raw = await r.get(f"ml:score:{ip}")
-    # Use ipcnt counter for event count; full stats come from OpenSearch
-    ipcnt = await r.get(f"ipcnt:{ip}")
     return {
         "events": events,
         "alerts": alerts,
-        "baseline": json.loads(bsl_raw) if bsl_raw else {},
-        "ml": json.loads(ml_raw) if ml_raw else {},
-        "stats": {"total": ipcnt or "0"},
+        "baseline": baseline,
+        "ml": {},          # ML scores now live in ml-engine, not the backend store
+        "stats": {"total": str(_ipcnt.get(ip, 0))},
     }
 
 
 @app.get("/api/explain/alert/{ip}/{alert_type}")
 async def explain_alert(ip: str, alert_type: str):
-    r = await get_redis()
-    alert_raw = await r.get(f"alert:{ip}:{alert_type}")
-    if not alert_raw:
+    devs = osc.get_deviations(limit=500) if (STORE_ENABLED and osc) else []
+    alert = next((a for a in devs if a.get("ip") == ip and a.get("type") == alert_type), None)
+    if not alert:
         raise HTTPException(404, "Alert not found")
 
-    alert = json.loads(alert_raw)
-    ctx = await collect_ip_context(r, ip)
+    ctx = await collect_ip_context(ip)
     b = ctx["baseline"]
 
     prompt = f"""You are a senior SOC analyst at a bank.
@@ -968,12 +908,19 @@ Be specific to this IP and these values. Do not give generic textbook text."""
 
 @app.get("/api/explain/ml/{ip}")
 async def explain_ml_score(ip: str):
-    r = await get_redis()
-    ctx = await collect_ip_context(r, ip)
-    ml = ctx["ml"]
-    if not ml:
-        raise HTTPException(404, "No ML score found. Run /api/ml/train or score this IP first.")
+    # Fetch ML score directly from ml-engine (scores are not stored in backend)
+    ml = {}
+    try:
+        async with httpx.AsyncClient(timeout=15) as hc:
+            r = await hc.get(f"http://ml-engine:8001/api/ml/score/{ip}")
+            if r.status_code == 200:
+                ml = r.json()
+    except Exception:
+        pass
+    if not ml or ml.get("risk_score") is None:
+        raise HTTPException(404, "No ML score found. Score this IP on the ML Anomaly page first.")
 
+    ctx = await collect_ip_context(ip)
     b = ctx["baseline"]
     prompt = f"""You are a senior SOC analyst who understands ML but explains it simply.
 
@@ -1038,8 +985,7 @@ Be specific to the actual values. Do not be generic."""
 
 @app.get("/api/explain/{ip}")
 async def explain_ip(ip: str):
-    r = await get_redis()
-    ctx = await collect_ip_context(r, ip)
+    ctx = await collect_ip_context(ip)
     b = ctx["baseline"]
     ml = ctx["ml"]
 
@@ -1116,93 +1062,14 @@ def _report_window(timeframe: str) -> tuple[int, datetime, datetime]:
     return days, end - timedelta(days=days), end
 
 
-async def _report_from_opensearch(days: int, r: aioredis.Redis) -> dict:
-    client = get_opensearch()
-    if not client:
-        return {}
-    query = {"bool": {"filter": [{"range": {"@timestamp": {"gte": f"now-{days}d"}}}]}}
-    try:
-        resp = client.search(
-            index="cybersentinel-logs-*",
-            body={
-                "size": 0,
-                "query": query,
-                "aggs": {
-                    "threats": {"terms": {"field": "threat_type", "size": 12}},
-                    "severities": {"terms": {"field": "severity", "size": 8}},
-                    "top_ips": {
-                        "terms": {"field": "src_ip", "size": 10},
-                        "aggs": {
-                            "threats": {"terms": {"field": "threat_type", "size": 5}},
-                            "severities": {"terms": {"field": "severity", "size": 5}},
-                            "ports": {"terms": {"field": "dst_port", "size": 5}},
-                            "last_seen": {"max": {"field": "@timestamp"}},
-                            "samples": {
-                                "top_hits": {
-                                    "size": 3,
-                                    "sort": [{"@timestamp": {"order": "desc"}}],
-                                    "_source": ["@timestamp", "rule", "threat_type", "severity", "dst_ip", "dst_port", "agent", "username"],
-                                }
-                            },
-                        },
-                    },
-                    "agents": {"terms": {"field": "agent", "size": 8}},
-                },
-            },
-        )
-    except Exception as e:
-        logger.warning(f"OpenSearch report aggregation failed: {e}")
-        return {}
-
-    total = resp.get("hits", {}).get("total", {}).get("value", 0)
-    aggs = resp.get("aggregations", {})
-    top_ips = []
-    for bucket in aggs.get("top_ips", {}).get("buckets", []):
-        ip = bucket.get("key")
-        threat_counts = {b["key"]: b["doc_count"] for b in bucket.get("threats", {}).get("buckets", [])}
-        severity_counts = {b["key"]: b["doc_count"] for b in bucket.get("severities", {}).get("buckets", [])}
-        ports = [str(b["key"]) for b in bucket.get("ports", {}).get("buckets", []) if b.get("key") not in ("", None)]
-        samples = [h.get("_source", {}) for h in bucket.get("samples", {}).get("hits", {}).get("hits", [])]
-        ml_raw = await r.get(f"ml:score:{ip}") if ip else None
-        try:
-            ml_score = json.loads(ml_raw) if ml_raw else {}
-        except Exception:
-            ml_score = {}
-        alerts = await get_ip_alerts(ip) if ip else {"alerts": []}
-        top_ips.append({
-            "ip": ip,
-            "events": int(bucket.get("doc_count", 0)),
-            "driver": _primary_driver(threat_counts),
-            "threat_counts": threat_counts,
-            "severity_counts": severity_counts,
-            "top_ports": ports,
-            "last_seen": bucket.get("last_seen", {}).get("value_as_string"),
-            "samples": samples,
-            "risk_score": ml_score.get("risk_score"),
-            "is_anomaly": ml_score.get("is_anomaly"),
-            "alert_count": len(alerts.get("alerts", [])),
-        })
-
-    return {
-        "source": "opensearch",
-        "total_logs": total,
-        "threat_counts": {b["key"]: b["doc_count"] for b in aggs.get("threats", {}).get("buckets", [])},
-        "severity_counts": {b["key"]: b["doc_count"] for b in aggs.get("severities", {}).get("buckets", [])},
-        "top_agents": {b["key"]: b["doc_count"] for b in aggs.get("agents", {}).get("buckets", [])},
-        "top_ips": top_ips,
-    }
-
-
-async def _report_from_redis(r: aioredis.Redis) -> dict:
+async def _report_from_store() -> dict:
+    """Build the report payload entirely from ClickHouse (logs + state)."""
     stats = await get_stats()
     top_ips = []
     for ip in list(stats.get("hot_ips", []))[:10]:
         summary = await trail_summary(ip)
-        ml_raw = await r.get(f"ml:score:{ip}")
-        try:
-            ml_score = json.loads(ml_raw) if ml_raw else {}
-        except Exception:
-            ml_score = {}
+        alerts = osc.get_deviations(limit=500) if (STORE_ENABLED and osc) else []
+        ip_alerts = [a for a in alerts if a.get("ip") == ip]
         top_ips.append({
             "ip": ip,
             "events": summary.get("total", 0),
@@ -1212,15 +1079,19 @@ async def _report_from_redis(r: aioredis.Redis) -> dict:
             "top_ports": [],
             "last_seen": summary.get("last_seen"),
             "samples": [],
-            "risk_score": ml_score.get("risk_score"),
-            "is_anomaly": ml_score.get("is_anomaly"),
-            "alert_count": 0,
+            "risk_score": None,
+            "is_anomaly": bool(summary.get("is_hot")),
+            "alert_count": len(ip_alerts),
         })
+    severity_counts = {}
+    for item in top_ips:
+        for sev, cnt in (item.get("severity_counts") or {}).items():
+            severity_counts[sev] = severity_counts.get(sev, 0) + int(cnt or 0)
     return {
-        "source": "redis",
+        "source": "clickhouse",
         "total_logs": stats.get("total_logs", 0),
         "threat_counts": stats.get("threat_counts", {}),
-        "severity_counts": {},
+        "severity_counts": severity_counts,
         "top_agents": {},
         "top_ips": top_ips,
     }
@@ -1281,6 +1152,19 @@ def _render_security_report(timeframe: str, start: datetime, end: datetime, data
             lines.append(f"| `{item['ip']}` | {_human_count(item['events'])} | {item['driver']} | {sev} | {risk_text} | {action} |")
     else:
         lines.append("- No high-signal IPs were available for this period.")
+
+    incidents = controls.get("incidents", [])
+    if incidents:
+        lines.extend(["", "## Correlated Incidents (Triage Queue)"])
+        for i in incidents:
+            ents = i["entities"]
+            scope = (f"{i['ip_count']} hosts in {i['subnet']}" if i["type"] == "campaign"
+                     else f"host {ents['ips'][0]}")
+            users = f" — identities: {', '.join(ents['users'])}" if ents.get("users") else ""
+            chain = " → ".join(i.get("tactics", [])) or "single stage"
+            lines.append(f"- **[P{i['priority']} / {i['severity']}] {scope}{users}**")
+            lines.append(f"  - Kill chain: {chain}")
+            lines.append(f"  - {i['narrative']}")
 
     lines.extend(["", "## Detection And Baseline Findings"])
     alert_counts = controls.get("alert_type_counts", {})
@@ -1381,18 +1265,13 @@ def _render_report_pdf(report: str) -> bytes:
 
 async def _generate_report_payload(timeframe: str) -> dict:
     days, start, end = _report_window(timeframe)
-    r = await get_redis()
-    data = await _report_from_opensearch(days, r) if OPENSEARCH_ENABLED else {}
-    if not data:
-        data = await _report_from_redis(r)
-    blocklist_auto = await r.smembers("blocklist:auto")
-    blocklist_manual = await r.smembers("blocklist:manual")
+    data = await _report_from_store()
     stats = await get_stats()
     controls = {
-        "auto_blocked": len(blocklist_auto),
-        "manual_blocked": len(blocklist_manual),
         "alert_type_counts": stats.get("alert_type_counts", {}),
     }
+    incidents = await _gather_incidents()
+    controls["incidents"] = incidents[:8]
     report = _render_security_report(timeframe, start, end, data, controls)
     report_links = {
         fmt: f"/api/reports/generate?timeframe={timeframe}&format={fmt}"
@@ -1410,6 +1289,7 @@ async def _generate_report_payload(timeframe: str) -> dict:
             "total_logs": data.get("total_logs", 0),
             "top_threats": dict(_top_items(data.get("threat_counts", {}), 6)),
             "top_ips": data.get("top_ips", [])[:8],
+            "top_incidents": incidents[:5],
             "auto_blocked": controls["auto_blocked"],
             "manual_blocked": controls["manual_blocked"],
         },
@@ -1452,40 +1332,24 @@ async def generate_smart_report(timeframe: str = "weekly"):
 
 @app.get("/api/stats")
 async def get_stats():
-    r = await get_redis()
-    pipe = r.pipeline()
-    pipe.get("stat:total_logs")
-    pipe.smembers("hot_ips")
-    pipe.smembers("blocklist:auto")
-    pipe.keys("trail:*")
-    pipe.get("stat:total_alerts")
-    pipe.smembers("critical_alerts")
-    results = await pipe.execute()
-    total, hot_ips, blocklist, trail_keys, total_alerts, critical_ips = results
-
-    if trail_keys and (not hot_ips or not blocklist or (int(total_alerts or 0) > 0 and not critical_ips)):
-        await rebuild_runtime_indexes(r)
-        hot_ips = await r.smembers("hot_ips")
-        blocklist = await r.smembers("blocklist:auto")
-        critical_ips = await r.smembers("critical_alerts")
-
-    threat_keys = await r.keys("stat:threat:*")
-    threat_counts = {}
-    for key in threat_keys:
-        val = await r.get(key)
-        threat_counts[key.replace("stat:threat:","")] = int(val or 0)
-
-    alert_keys = await r.keys("stat:alert_type:*")
-    alert_counts = {}
-    for key in alert_keys:
-        val = await r.get(key)
-        alert_counts[key.replace("stat:alert_type:","")] = int(val or 0)
+    # ── Everything now reads from ClickHouse (logs + state) ──
+    if STORE_ENABLED and osc:
+        total_logs    = osc.get_total_doc_count()
+        unique_ips    = osc.get_unique_ip_count()
+        threat_counts = osc.get_global_threat_counts()
+        hot_ips       = osc.get_hot_ips_from_os(size=100)
+        total_alerts  = osc.get_deviation_total()
+        critical_ips  = osc.get_critical_ips()
+        alert_counts  = osc.get_alert_type_counts()
+    else:
+        total_logs = unique_ips = total_alerts = 0
+        threat_counts, alert_counts = {}, {}
+        hot_ips, critical_ips = [], []
 
     return {
-        "total_logs":       int(total or 0),
-        "unique_ips":       len(trail_keys),
+        "total_logs":       total_logs,
+        "unique_ips":       unique_ips,
         "hot_ips":          list(hot_ips or []),
-        "blocklist":        list(blocklist or []),
         "threat_counts":    threat_counts,
         "total_alerts":     int(total_alerts or 0),
         "critical_ips":     list(critical_ips or []),
@@ -1496,16 +1360,9 @@ async def get_stats():
 
 @app.get("/api/hot-ips")
 async def get_hot_ips():
-    r   = await get_redis()
-    hot = await r.smembers("hot_ips")
-    if not hot:
-        await rebuild_runtime_indexes(r)
-        hot = await r.smembers("hot_ips")
-    result = []
-    for ip in list(hot)[:50]:
-        summary = await trail_summary(ip)
-        result.append(summary)
-    result.sort(key=lambda x: x.get("total",0), reverse=True)
+    hot = osc.get_hot_ips_from_os(size=50) if (STORE_ENABLED and osc) else []
+    result = [await trail_summary(ip) for ip in hot]
+    result.sort(key=lambda x: x.get("total", 0), reverse=True)
     return result
 
 
@@ -1513,15 +1370,13 @@ async def get_hot_ips():
 
 @app.get("/api/intel/{ip}")
 async def get_intel(ip: str):
-    r      = await get_redis()
-    cached = await r.get(f"intel:{ip}")
+    cached = _intel_get(ip)
     if cached:
-        return json.loads(cached)
+        return cached
 
     result = {
         "ip":           ip,
         "is_known_bad": any(ip.startswith(s) for s in KNOWN_BAD_SUBNETS),
-        "in_blocklist": await r.sismember("blocklist:auto", ip),
         "abuseipdb":    None,
         "source":       "local",
     }
@@ -1548,545 +1403,1028 @@ async def get_intel(ip: str):
         except Exception:
             pass
 
-    await r.setex(f"intel:{ip}", 900, json.dumps(result))
+    _intel_set(ip, result, ttl=900)
     return result
 
 
-# ── blocklist ─────────────────────────────────────────────────────────────────
+# ── ATT&CK kill-chain + grounded threat intel (Phase 2) ────────────────────────
 
-@app.get("/api/blocklist")
-async def get_blocklist():
-    r   = await get_redis()
-    ips = await r.smembers("blocklist:auto")
-    man = await r.smembers("blocklist:manual")
-    return {"count":len(ips)+len(man),"ips":list(ips|man)}
-
-
-@app.post("/api/blocklist/add")
-async def add_to_blocklist(payload: dict):
-    ip = payload.get("ip")
-    if not ip:
-        raise HTTPException(400,"ip required")
-    r = await get_redis()
-    await r.sadd("blocklist:manual", ip)
-    return {"status":"blocked","ip":ip}
+def _dedupe_mitigations(mits: list[dict]) -> list[dict]:
+    """De-duplicate mitigation entries by id, preserving first-seen order."""
+    seen, out = set(), []
+    for m in mits:
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            out.append(m)
+    return out
 
 
-@app.delete("/api/blocklist/{ip}")
-async def remove_from_blocklist(ip: str):
-    r = await get_redis()
-    await r.srem("blocklist:auto", ip)
-    await r.srem("blocklist:manual", ip)
-    return {"status":"unblocked","ip":ip}
+def _event_tactic(ev: dict) -> tuple[str, str, str]:
+    """Resolve (tactic, technique_id, technique_name) for an event, preferring the
+    Wazuh-supplied ATT&CK fields and falling back to the classifier threat_type."""
+    tt = ev.get("threat_type", "")
+    mitre = ev.get("mitre", "")
+    entries = ti.retrieve_for_alert(threat_type=tt, mitre_id=mitre,
+                                    keywords=ev.get("rule_groups", ""), limit=1) if ti else []
+    if entries:
+        e = entries[0]
+        # Prefer the alert's own tactic label if present and known.
+        tactic = ev.get("mitre_tactic") or e["tactic"]
+        return tactic, e["technique_id"], e["name"]
+    return (ev.get("mitre_tactic", "") or "Unknown"), (mitre or ""), (ev.get("mitre_technique", "") or "")
+
+
+@app.get("/api/killchain/{ip}")
+async def kill_chain(ip: str):
+    """Lay an entity's activity out along the ATT&CK kill chain, ordered by tactic
+    stage, with first/last seen and event counts per stage."""
+    if not (STORE_ENABLED and osc):
+        return {"ip": ip, "stages": [], "source": "disabled"}
+    events = osc.get_ip_events(ip, limit=5000)
+    if not events:
+        return {"ip": ip, "stages": [], "max_stage": None, "total_events": 0}
+
+    stages: dict[str, dict] = {}
+    for ev in events:
+        tactic, tid, tname = _event_tactic(ev)
+        key = tactic
+        s = stages.get(key)
+        ts = ev.get("@timestamp", "")
+        if not s:
+            s = stages[key] = {
+                "tactic": tactic,
+                "rank": ti.tactic_rank(tactic) if ti else 99,
+                "events": 0,
+                "techniques": {},
+                "first_seen": ts,
+                "last_seen": ts,
+                "severities": {},
+            }
+        s["events"] += 1
+        if tid:
+            s["techniques"][tid] = {"id": tid, "name": tname,
+                                    "count": s["techniques"].get(tid, {}).get("count", 0) + 1}
+        if ts and ts < s["first_seen"]:
+            s["first_seen"] = ts
+        if ts and ts > s["last_seen"]:
+            s["last_seen"] = ts
+        sev = ev.get("severity", "low")
+        s["severities"][sev] = s["severities"].get(sev, 0) + 1
+
+    ordered = sorted(stages.values(), key=lambda x: (x["rank"], x["first_seen"]))
+    for s in ordered:
+        s["techniques"] = sorted(s["techniques"].values(), key=lambda t: t["count"], reverse=True)
+
+    deepest = max(ordered, key=lambda x: x["rank"]) if ordered else None
+    progression = [s["tactic"] for s in ordered]
+
+    # ── Network traversal path (prepended before ATT&CK stages) ──────────
+    # Reconstructed from event fields: dst_ip, dst_port, action, agent, country
+    def _subnet_label(dst: str) -> str:
+        """Map destination IP to a network segment / floor label."""
+        if not dst:
+            return None
+        p = dst.split(".")
+        if len(p) < 2:
+            return None
+        first, second = p[0], p[1] if p[1].isdigit() else "0"
+        if first == "10":
+            seg = int(second)
+            if seg == 0:   return "Server Farm / Core Network"
+            if seg == 1:   return "Floor 1"
+            if seg == 2:   return "Floor 2"
+            if seg == 3:   return "Floor 3"
+            if seg == 200: return "Management Network"
+            return f"Internal Segment (10.{second}.x.x)"
+        if first in ("172", "192"):
+            return "Internal Network"
+        return None   # external — no routing hop to show
+
+    timestamps = sorted([e.get("@timestamp","") for e in events if e.get("@timestamp")])
+    first_ts = timestamps[0] if timestamps else ""
+    last_ts  = timestamps[-1] if timestamps else ""
+
+    dst_ips   = [e.get("dst_ip","")   for e in events if e.get("dst_ip")]
+    dst_ports = [e.get("dst_port","") for e in events if e.get("dst_port")]
+    actions   = [e.get("action","").lower() for e in events if e.get("action","").strip()]
+
+    allowed_cnt = sum(1 for a in actions if a in ("allow","allowed","accept","accepted","permit","permitted","pass"))
+    blocked_cnt = sum(1 for a in actions if a in ("deny","denied","drop","dropped","block","blocked","reject","rejected"))
+
+    # Unique dst_ips → pick the most common internal one for routing label
+    from collections import Counter
+    dst_counter = Counter(d for d in dst_ips if d)
+    top_dst = dst_counter.most_common(1)[0][0] if dst_counter else ""
+    segment = _subnet_label(top_dst)
+
+    network_path = []
+
+    # Stage 1: TCP Connection / network entry
+    if dst_ips or dst_ports:
+        port_list = ", ".join(sorted({str(p) for p in dst_ports if p})[:5])
+        network_path.append({
+            "stage": "TCP Connection",
+            "type": "network",
+            "detail": f"Source {ip} opened connections to {len(set(dst_ips))} destination(s)"
+                      + (f" on port(s) {port_list}" if port_list else ""),
+            "first_seen": first_ts,
+            "last_seen":  last_ts,
+            "events": len(events),
+            "status": "established",
+        })
+
+    # Stage 2: Firewall
+    if actions:
+        if blocked_cnt > 0 and allowed_cnt == 0:
+            fw_status = "blocked"
+            fw_detail = f"All {blocked_cnt} connection(s) blocked by firewall"
+        elif blocked_cnt > 0:
+            fw_status = "partial"
+            fw_detail = f"{allowed_cnt} allowed, {blocked_cnt} blocked by firewall"
+        else:
+            fw_status = "allowed"
+            fw_detail = f"{allowed_cnt} connection(s) passed through firewall"
+        network_path.append({
+            "stage": "Firewall",
+            "type": "network",
+            "detail": fw_detail,
+            "first_seen": first_ts,
+            "last_seen":  last_ts,
+            "events": len(actions),
+            "status": fw_status,
+        })
+    else:
+        # No explicit action field — Wazuh IDS still observed it
+        network_path.append({
+            "stage": "Firewall / IDS",
+            "type": "network",
+            "detail": "Traffic observed by IDS — no explicit allow/deny recorded",
+            "first_seen": first_ts,
+            "last_seen":  last_ts,
+            "events": len(events),
+            "status": "observed",
+        })
+
+    # Topology enrichment — look up destination IPs in uploaded Excel data
+    def _topo(dst_ip: str) -> dict:
+        return _topology.get(dst_ip, {})
+
+    # Stage 3: Router / Switch → floor (enriched from topology if available)
+    if segment or top_dst:
+        topo_dst = _topo(top_dst)
+        switch   = topo_dst.get("switch_name") or topo_dst.get("switch") or ""
+        vlan     = topo_dst.get("vlan") or ""
+        floor_t  = topo_dst.get("floor") or ""
+        dept     = topo_dst.get("department") or topo_dst.get("dept") or ""
+        seg_label = floor_t or segment or "Internal Network"
+        stage_label = f"Router / Switch → {seg_label}"
+        detail_parts = [f"Traffic routed to {top_dst}"]
+        if len(set(dst_ips)) > 1:
+            detail_parts.append(f"and {len(set(dst_ips))-1} other host(s)")
+        if switch:
+            detail_parts.append(f"via switch {switch}")
+        if vlan:
+            detail_parts.append(f"VLAN {vlan}")
+        if dept:
+            detail_parts.append(f"({dept})")
+        network_path.append({
+            "stage": stage_label,
+            "type": "network",
+            "detail": " ".join(detail_parts),
+            "first_seen": first_ts,
+            "last_seen":  last_ts,
+            "events": len(dst_ips),
+            "status": "routed",
+            "topology": topo_dst or None,
+        })
+
+    # Stage 4: Endpoint reached (enriched from topology if available)
+    if top_dst:
+        agents   = list({e.get("agent","") for e in events if e.get("agent","")})
+        agent_str = agents[0] if len(agents) == 1 else f"{len(agents)} hosts"
+        topo_dst = _topo(top_dst)
+        hostname = topo_dst.get("hostname") or topo_dst.get("device_name") or topo_dst.get("name") or agent_str
+        dev_type = topo_dst.get("device_type") or topo_dst.get("type") or ""
+        owner    = topo_dst.get("owner") or topo_dst.get("user") or topo_dst.get("assigned_to") or ""
+        port_info = topo_dst.get("switch_port") or topo_dst.get("port") or ""
+        detail_parts = [f"{hostname} ({top_dst})"]
+        if dev_type:
+            detail_parts.append(f"· {dev_type}")
+        if owner:
+            detail_parts.append(f"· Owner: {owner}")
+        if port_info:
+            detail_parts.append(f"· Port: {port_info}")
+        network_path.append({
+            "stage": "Endpoint",
+            "type": "network",
+            "detail": " ".join(detail_parts),
+            "first_seen": first_ts,
+            "last_seen":  last_ts,
+            "events": len(events),
+            "status": "reached",
+            "topology": topo_dst or None,
+        })
+
+    # ── Event correlation ──────────────────────────────────────────────────
+    from datetime import datetime, timezone
+    import math
+
+    def _parse_ts(s):
+        try:
+            s = str(s).replace("Z", "+00:00")
+            return datetime.fromisoformat(s)
+        except Exception:
+            return None
+
+    # 1. Attack waves — group events into 1-hour buckets, label each bucket
+    bucket_map: dict[str, dict] = {}
+    for ev in events:
+        dt = _parse_ts(ev.get("@timestamp",""))
+        if not dt:
+            continue
+        bucket = dt.strftime("%Y-%m-%d %H:00")
+        b = bucket_map.setdefault(bucket, {"time": bucket, "count": 0, "tactics": set(), "severities": set()})
+        b["count"] += 1
+        tac = ev.get("mitre_tactic") or ""
+        if tac:
+            b["tactics"].add(tac)
+        b["severities"].add(ev.get("severity","low"))
+
+    attack_waves = []
+    for b in sorted(bucket_map.values(), key=lambda x: x["time"]):
+        peak_sev = next((s for s in ("critical","high","medium","low") if s in b["severities"]), "low")
+        attack_waves.append({
+            "time": b["time"],
+            "events": b["count"],
+            "tactics": sorted(b["tactics"]),
+            "peak_severity": peak_sev,
+        })
+
+    # 2. Targeted accounts
+    acct_counter: dict[str, int] = {}
+    for ev in events:
+        for field in ("username", "target_user"):
+            v = (ev.get(field) or "").strip()
+            if v:
+                acct_counter[v] = acct_counter.get(v, 0) + 1
+    targeted_accounts = [{"account": k, "hits": v} for k, v in
+                         sorted(acct_counter.items(), key=lambda x: -x[1])[:10]]
+
+    # 3. Service / port sequence — top ports with first-seen time
+    port_first: dict[str, str] = {}
+    port_count: dict[str, int] = {}
+    for ev in sorted(events, key=lambda e: e.get("@timestamp","")):
+        p = str(ev.get("dst_port","")).strip()
+        if p:
+            port_count[p] = port_count.get(p, 0) + 1
+            if p not in port_first:
+                port_first[p] = ev.get("@timestamp","")
+    service_labels = {
+        "22":"SSH","23":"Telnet","25":"SMTP","53":"DNS","80":"HTTP","135":"RPC",
+        "139":"NetBIOS","389":"LDAP","443":"HTTPS","445":"SMB","1433":"MSSQL",
+        "1521":"Oracle","3306":"MySQL","3389":"RDP","5985":"WinRM","5986":"WinRM-S",
+        "8080":"HTTP-Alt","8443":"HTTPS-Alt",
+    }
+    port_sequence = sorted(
+        [{"port": p, "service": service_labels.get(p, ""), "count": port_count[p],
+          "first_seen": port_first[p]} for p in port_count],
+        key=lambda x: x["first_seen"]
+    )[:15]
+
+    # 4. Technique chain — ordered by first occurrence
+    tech_first: dict[str, dict] = {}
+    for ev in sorted(events, key=lambda e: e.get("@timestamp","")):
+        tid = ev.get("mitre","") or ""
+        tname = ev.get("mitre_technique","") or ""
+        tac   = ev.get("mitre_tactic","") or ""
+        if tid and tid not in tech_first:
+            tech_first[tid] = {"id": tid, "name": tname, "tactic": tac,
+                                "first_seen": ev.get("@timestamp",""), "count": 0}
+        if tid:
+            tech_first[tid]["count"] += 1
+    technique_chain = sorted(tech_first.values(), key=lambda x: x["first_seen"])
+
+    # 5. Top rules fired
+    rule_counter: dict[str, dict] = {}
+    for ev in events:
+        rule = (ev.get("rule") or "").strip()
+        rid  = (ev.get("rule_id") or "").strip()
+        sev  = ev.get("severity","low")
+        if rule:
+            key = rid or rule[:60]
+            r = rule_counter.setdefault(key, {"rule": rule, "rule_id": rid, "count": 0, "severity": sev})
+            r["count"] += 1
+    top_rules = sorted(rule_counter.values(), key=lambda x: -x["count"])[:8]
+
+    # 6. Related IPs — same /24 subnet with any activity
+    subnet = ".".join(ip.split(".")[:3]) if ip.count(".") == 3 else None
+    related_ips: list[dict] = []
+    if subnet and STORE_ENABLED and osc:
+        try:
+            hot = osc.get_top_ips(limit=50)
+            for h in hot:
+                hip = h.get("ip","")
+                if hip != ip and hip.startswith(subnet + "."):
+                    related_ips.append({"ip": hip, "events": h.get("count", 0)})
+        except Exception:
+            pass
+    related_ips = related_ips[:6]
+
+    # 7. Event velocity — events per hour, peak activity hour
+    if bucket_map:
+        peak_bucket = max(bucket_map.values(), key=lambda b: b["count"])
+        total_hours = max(len(bucket_map), 1)
+        avg_per_hour = round(len(events) / total_hours, 1)
+    else:
+        peak_bucket = None
+        avg_per_hour = 0
+    velocity = {
+        "avg_per_hour": avg_per_hour,
+        "peak_hour": peak_bucket["time"] if peak_bucket else None,
+        "peak_count": peak_bucket["count"] if peak_bucket else 0,
+        "total_hours_active": len(bucket_map),
+    }
+
+    correlation = {
+        "attack_waves": attack_waves,
+        "targeted_accounts": targeted_accounts,
+        "port_sequence": port_sequence,
+        "technique_chain": technique_chain,
+        "top_rules": top_rules,
+        "related_ips": related_ips,
+        "velocity": velocity,
+    }
+
+    return {
+        "ip": ip,
+        "total_events": len(events),
+        "network_path": network_path,
+        "stages": ordered,
+        "progression": progression,
+        "max_stage": deepest["tactic"] if deepest else None,
+        "reached_impact": bool(deepest and deepest["rank"] >= ti.TACTIC_ORDER.index("Lateral Movement")) if ti else False,
+        "correlation": correlation,
+    }
+
+
+@app.get("/api/attack/techniques")
+async def list_techniques():
+    """List the whole ATT&CK knowledge base (the corpus the RAG layer retrieves from)."""
+    if not ti:
+        return {"techniques": [], "count": 0}
+    techs = sorted(ti.KB.values(), key=lambda e: ti.tactic_rank(e["tactic"]))
+    return {"techniques": techs, "count": len(techs),
+            "tactic_order": ti.TACTIC_ORDER}
+
+
+@app.get("/api/intel/technique/{tid}")
+async def get_technique(tid: str):
+    """Return the ATT&CK knowledge-base entry for a technique id (e.g. T1110)."""
+    entry = ti.lookup_technique(tid) if ti else None
+    if not entry:
+        raise HTTPException(404, f"No knowledge-base entry for {tid}")
+    return entry
+
+
+@app.get("/api/explain/grounded/{ip}")
+async def explain_grounded(ip: str):
+    """AI explanation grounded in the ATT&CK knowledge base — cites techniques and
+    real-world mitigations ('how the world solves this'). Works without an AI key
+    by returning the deterministic grounded brief."""
+    if not (STORE_ENABLED and osc):
+        raise HTTPException(503, "Store disabled")
+
+    chain = await kill_chain(ip)
+    events = osc.get_ip_events_desc(ip, limit=40)
+    threat_counts = osc.get_ip_threat_counts(ip)
+
+    # Retrieve KB entries for every technique seen across the chain.
+    seen_ids: list[str] = []
+    for s in chain.get("stages", []):
+        for t in s.get("techniques", []):
+            if t["id"] not in seen_ids:
+                seen_ids.append(t["id"])
+    entries = [ti.lookup_technique(i) for i in seen_ids if ti and ti.lookup_technique(i)]
+    if not entries and ti:
+        top_tt = max(threat_counts, key=threat_counts.get) if threat_counts else ""
+        entries = ti.retrieve_for_alert(threat_type=top_tt, limit=3)
+    grounding = ti.format_grounding(entries) if ti else ""
+
+    # Deterministic brief (always available, even without an LLM).
+    brief = {
+        "ip": ip,
+        "kill_chain": chain.get("progression", []),
+        "max_stage": chain.get("max_stage"),
+        "techniques": [{"id": e["technique_id"], "name": e["name"], "tactic": e["tactic"]} for e in entries],
+        "recommended_mitigations": _dedupe_mitigations(
+            [{"id": m["id"], "name": m["name"], "detail": m["detail"]}
+             for e in entries for m in e.get("mitigations", [])])[:8],
+        "world_response": [e["world_response"] for e in entries],
+        "references": [r for e in entries for r in e.get("references", [])],
+    }
+
+    if not AI_API_KEY:
+        return {**brief, "explanation": "AI key not configured — showing grounded knowledge-base brief.",
+                "model": "deterministic", "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    prompt = f"""You are a senior SOC analyst at a bank. Explain this IP's activity and what to do,
+using ONLY the evidence and the ATT&CK knowledge below. Cite technique IDs (e.g. T1110) and
+mitigation IDs (e.g. M1032) you rely on. Be specific to these values; do not invent facts.
+
+IP: {ip}
+Observed kill chain (ordered): {' -> '.join(chain.get('progression', [])) or 'single stage'}
+Deepest stage reached: {chain.get('max_stage')}
+Threat-type counts: {json.dumps(threat_counts)}
+Recent events (newest first):
+{json.dumps(events[:12], indent=2, default=str)}
+
+ATT&CK knowledge base (grounding — cite these):
+{grounding}
+
+Write four short sections with these exact headings:
+WHAT IS HAPPENING:
+WHERE IT IS ON THE KILL CHAIN:
+HOW THE WORLD HANDLES THIS:
+RECOMMENDED ACTIONS (with mitigation IDs):"""
+
+    return {
+        **brief,
+        "explanation": await ask_groq(prompt, max_tokens=850),
+        "model": AI_MODEL,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ── UEBA: user & host entities (Phase 3) ───────────────────────────────────────
+
+def _entity_profile(field: str, value: str) -> dict:
+    """Shared profile builder for a user or host entity."""
+    events = osc.get_entity_events(field, value, limit=5000) if (STORE_ENABLED and osc) else []
+    if not events:
+        return {"entity": value, "field": field, "found": False, "total_events": 0}
+
+    countries, hosts, src_ips, threats, severities = {}, {}, {}, {}, {}
+    for ev in events:
+        for bucket, key in ((countries, ev.get("country")), (hosts, ev.get("agent")),
+                            (src_ips, ev.get("src_ip")), (threats, ev.get("threat_type")),
+                            (severities, ev.get("severity"))):
+            k = (key or "").strip()
+            if k:
+                bucket[k] = bucket.get(k, 0) + 1
+
+    hist_countries = set(countries.keys()) if field == "username" else None
+    ato = ub.detect_account_takeover(events, historical_countries=set()) if ub else []
+    travel = ub.detect_impossible_travel(events) if ub else []
+
+    return {
+        "entity": value,
+        "field": field,
+        "found": True,
+        "total_events": len(events),
+        "countries": dict(sorted(countries.items(), key=lambda x: -x[1])[:10]),
+        "hosts": dict(sorted(hosts.items(), key=lambda x: -x[1])[:10]),
+        "src_ips": dict(sorted(src_ips.items(), key=lambda x: -x[1])[:10]),
+        "threat_types": threats,
+        "severities": severities,
+        "first_seen": events[0].get("@timestamp"),
+        "last_seen": events[-1].get("@timestamp"),
+        "account_takeover": ato,
+        "impossible_travel": travel,
+        "risk_flags": [f["type"] for f in ato] + [f["type"] for f in travel],
+    }
+
+
+@app.get("/api/entity/user/{user}")
+async def entity_user(user: str):
+    return _entity_profile("username", user)
+
+
+@app.get("/api/entity/host/{host}")
+async def entity_host(host: str):
+    return _entity_profile("agent", host)
+
+
+@app.get("/api/entities/users")
+async def list_user_entities(limit: int = 100):
+    """Top users with peer-group outlier flags merged in."""
+    if not (STORE_ENABLED and osc):
+        return {"users": [], "peer_outliers": []}
+    rows = osc.get_entity_aggregates("username", limit=max(limit, 200))
+    outliers = {o["entity"]: o for o in (ub.peer_outliers(rows) if ub else [])}
+    users = []
+    for r in rows[:limit]:
+        o = outliers.get(r["entity"])
+        users.append({**r, "peer_outlier": bool(o),
+                      "max_z": o["max_z"] if o else None,
+                      "drivers": o["drivers"] if o else []})
+    return {"users": users, "peer_outliers": list(outliers.values())[:50],
+            "population": len(rows)}
+
+
+@app.get("/api/entities/hosts")
+async def list_host_entities(limit: int = 100):
+    if not (STORE_ENABLED and osc):
+        return {"hosts": [], "peer_outliers": []}
+    rows = osc.get_entity_aggregates("agent", limit=max(limit, 200))
+    outliers = {o["entity"]: o for o in (ub.peer_outliers(rows) if ub else [])}
+    hosts = []
+    for r in rows[:limit]:
+        o = outliers.get(r["entity"])
+        hosts.append({**r, "peer_outlier": bool(o),
+                      "max_z": o["max_z"] if o else None,
+                      "drivers": o["drivers"] if o else []})
+    return {"hosts": hosts, "peer_outliers": list(outliers.values())[:50],
+            "population": len(rows)}
+
+
+@app.get("/api/ueba/account-takeover")
+async def ueba_account_takeover(days: int = 0):
+    """Sweep recent auth activity for suspected account-takeover across all users."""
+    if not (STORE_ENABLED and osc):
+        return {"findings": [], "total": 0}
+    events = osc.get_recent_login_events(limit=20000, days=days)
+    by_user: dict[str, list] = {}
+    for ev in events:
+        u = (ev.get("username") or "").strip()
+        if u:
+            by_user.setdefault(u, []).append(ev)
+
+    findings = []
+    for user, evs in by_user.items():
+        for f in (ub.detect_account_takeover(evs, historical_countries=set()) if ub else []):
+            findings.append({**f, "username": user})
+    findings.sort(key=lambda x: (x["severity"] != "critical", x.get("ts", "")), reverse=False)
+    return {"findings": findings, "total": len(findings), "users_scanned": len(by_user)}
+
+
+@app.get("/api/ueba/impossible-travel")
+async def ueba_impossible_travel(days: int = 0):
+    """Sweep for impossible-travel across users with geo data."""
+    if not (STORE_ENABLED and osc):
+        return {"findings": [], "total": 0}
+    events = osc.get_recent_login_events(limit=20000, days=days)
+    by_user: dict[str, list] = {}
+    for ev in events:
+        u = (ev.get("username") or "").strip()
+        if u:
+            by_user.setdefault(u, []).append(ev)
+    findings = []
+    for user, evs in by_user.items():
+        for f in (ub.detect_impossible_travel(evs) if ub else []):
+            findings.append({**f, "username": user})
+    return {"findings": findings, "total": len(findings), "users_scanned": len(by_user)}
+
+
+@app.get("/api/ueba/peer-outliers")
+async def ueba_peer_outliers(field: str = "username", limit: int = 500):
+    """Entities deviating sharply from their peer group (population z-score)."""
+    if not (STORE_ENABLED and osc):
+        return {"outliers": [], "population": 0}
+    fld = field if field in ("username", "agent") else "username"
+    rows = osc.get_entity_aggregates(fld, limit=limit)
+    return {"field": fld, "population": len(rows),
+            "outliers": ub.peer_outliers(rows) if ub else []}
+
+
+# ── Incident correlation + triage queue (Phase 4) ──────────────────────────────
+
+async def _signal_for_ip(ip: str, risk: int, ueba_by_ip: dict) -> Optional[dict]:
+    """Build a correlation signal for one IP from its kill chain + UEBA links."""
+    chain = await kill_chain(ip)
+    if not chain.get("stages"):
+        return None
+    techniques, severity_counts = {}, {}
+    first_seen = chain["stages"][0]["first_seen"]
+    last_seen = chain["stages"][0]["last_seen"]
+    for s in chain["stages"]:
+        for t in s.get("techniques", []):
+            techniques[t["id"]] = {"id": t["id"], "name": t["name"]}
+        for sev, n in (s.get("severities") or {}).items():
+            severity_counts[sev] = severity_counts.get(sev, 0) + n
+        first_seen = min(first_seen, s["first_seen"])
+        last_seen = max(last_seen, s["last_seen"])
+    return {
+        "ip": ip,
+        "risk": int(risk or 0),
+        "max_stage": chain.get("max_stage"),
+        "stage_rank": ti.tactic_rank(chain.get("max_stage") or "") if ti else 99,
+        "progression": chain.get("progression", []),
+        "techniques": list(techniques.values()),
+        "severity_counts": severity_counts,
+        "total_events": chain.get("total_events", 0),
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "reached_lateral": bool(chain.get("reached_impact")),
+        "ueba": ueba_by_ip.get(ip, []),
+    }
+
+
+async def _gather_incidents(max_ips: int = 60) -> list[dict]:
+    if not (STORE_ENABLED and osc and inc):
+        return []
+
+    # 1) UEBA findings, indexed by the IP(s) they touch.
+    ueba_by_ip: dict[str, list] = {}
+    ato = await ueba_account_takeover()
+    for f in ato.get("findings", []):
+        if f.get("src_ip"):
+            ueba_by_ip.setdefault(f["src_ip"], []).append(f)
+    travel = await ueba_impossible_travel()
+    for f in travel.get("findings", []):
+        for side in ("from", "to"):
+            ip = (f.get(side) or {}).get("ip")
+            if ip:
+                ueba_by_ip.setdefault(ip, []).append(f)
+
+    # 2) Candidate IPs: risk-scored + hot + any IP carrying a UEBA finding.
+    candidates: dict[str, int] = {}
+    for s in osc.get_all_ml_scores(limit=max_ips):
+        candidates[s["ip"]] = max(candidates.get(s["ip"], 0), s.get("risk_score", 0))
+    for ip in osc.get_hot_ips_from_os(size=max_ips):
+        candidates.setdefault(ip, 0)
+    for ip in ueba_by_ip:
+        candidates.setdefault(ip, 0)
+
+    # 3) Build signals, keeping only the ones worth a SOC's attention.
+    signals = []
+    for ip, risk in list(candidates.items())[: max_ips * 2]:
+        sig = await _signal_for_ip(ip, risk, ueba_by_ip)
+        if not sig:
+            continue
+        interesting = (sig["risk"] >= 50 or len(sig["progression"]) >= 2 or sig["ueba"]
+                       or sig["severity_counts"].get("critical") or sig["severity_counts"].get("high"))
+        if interesting:
+            signals.append(sig)
+
+    return inc.correlate(signals)
+
+
+@app.get("/api/incidents")
+async def list_incidents(limit: int = 25):
+    """Correlated incident triage queue, highest priority first."""
+    incidents = await _gather_incidents()
+    return {
+        "incidents": incidents[:limit],
+        "total": len(incidents),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/incidents/{ip}/narrative")
+async def incident_narrative(ip: str):
+    """AI narrative for the incident containing this IP, grounded in ATT&CK.
+    Falls back to the deterministic narrative when no AI key is set."""
+    incidents = await _gather_incidents()
+    incident = next((i for i in incidents if ip in i["entities"]["ips"]), None)
+    if not incident:
+        # Build a one-IP incident on demand.
+        sig = await _signal_for_ip(ip, 0, {})
+        if not sig or not inc:
+            raise HTTPException(404, "No incident for this IP")
+        incident = inc.correlate([sig])[0]
+
+    entries = [ti.lookup_technique(t["id"]) for t in incident["techniques"]] if ti else []
+    entries = [e for e in entries if e]
+    grounding = ti.format_grounding(entries) if ti else ""
+    mitigations = _dedupe_mitigations(
+        [{"id": m["id"], "name": m["name"], "detail": m["detail"]}
+         for e in entries for m in e.get("mitigations", [])])[:10]
+
+    base = {
+        "incident": incident,
+        "recommended_mitigations": mitigations,
+        "world_response": [e["world_response"] for e in entries],
+        "references": [r for e in entries for r in e.get("references", [])],
+    }
+
+    if not AI_API_KEY:
+        return {**base, "ai_narrative": incident["narrative"],
+                "model": "deterministic", "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    prompt = f"""You are a SOC incident lead at a bank. Write a concise incident report from the
+facts below. Use ONLY these facts and the ATT&CK knowledge; cite technique IDs (T####) and
+mitigation IDs (M####). Do not invent details.
+
+INCIDENT FACTS:
+{json.dumps({k: incident[k] for k in ('type','subnet','entities','tactics','max_stage','severity','risk','total_events','first_seen','last_seen','reached_lateral')}, indent=2, default=str)}
+UEBA findings: {json.dumps(incident.get('ueba_findings', []), indent=2, default=str)}
+
+ATT&CK knowledge (grounding):
+{grounding}
+
+Write these sections with exact headings:
+SUMMARY:
+KILL CHAIN & SCOPE:
+IDENTITY / FRAUD RISK:
+HOW THE WORLD HANDLES THIS:
+RECOMMENDED ACTIONS (with mitigation IDs):
+PRIORITY JUSTIFICATION:"""
+
+    return {
+        **base,
+        "ai_narrative": await ask_groq(prompt, max_tokens=900),
+        "model": AI_MODEL,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── search + health ───────────────────────────────────────────────────────────
 
+@app.get("/api/logs")
+async def get_logs(minutes: int = 0, start: str = "", end: str = "",
+                   severity: str = "", min_level: int = 0, limit: int = 500):
+    """Recent raw logs from ClickHouse with time + severity filters (UI Logs page)."""
+    if not (STORE_ENABLED and osc):
+        return {"logs": [], "count": 0, "source": "disabled"}
+    sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
+    logs = osc.get_recent_logs(minutes=minutes, start=start, end=end,
+                               severities=sevs, min_level=min_level, limit=min(limit, 5000))
+    return {"logs": logs, "count": len(logs), "source": "clickhouse"}
+
+
 @app.get("/api/search")
 async def search_ip(q: str):
-    r    = await get_redis()
-    keys = await r.keys(f"trail:{q}*")
-    ips  = [k.replace("trail:","") for k in keys[:20]]
+    ips = osc.search_ips_by_prefix(q, limit=20) if (STORE_ENABLED and osc) else []
     return [await trail_summary(ip) for ip in ips]
+
+
+# ── Network Topology endpoints ─────────────────────────────────────────────
+
+@app.post("/api/network/topology/upload")
+async def upload_topology(file: UploadFile = File(...)):
+    """Upload Excel (.xlsx) or CSV with network topology.
+    Must have an 'ip' column. All other columns stored as-is per IP."""
+    global _topology
+    content = await file.read()
+    fname = (file.filename or "").lower()
+    try:
+        import io
+        if fname.endswith(".csv"):
+            import csv as _csv
+            reader = _csv.DictReader(io.StringIO(content.decode("utf-8-sig")))
+            rows = list(reader)
+        elif fname.endswith(".xlsx") or fname.endswith(".xls"):
+            import pandas as _pd
+            df = _pd.read_excel(io.BytesIO(content), dtype=str)
+            df = df.fillna("")
+            rows = df.to_dict(orient="records")
+        else:
+            raise HTTPException(400, "Only .xlsx or .csv files are supported")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}")
+
+    # Normalise column names: lowercase + strip
+    normalised = []
+    for row in rows:
+        normalised.append({k.strip().lower().replace(" ","_"): str(v).strip() for k, v in row.items()})
+
+    # Find IP column (accept 'ip', 'ip_address', 'ip address', 'src_ip', 'address')
+    ip_col = None
+    for candidate in ("ip", "ip_address", "ip address", "src_ip", "address", "ipaddress"):
+        if any(candidate in r for r in normalised):
+            ip_col = candidate
+            break
+    if not ip_col:
+        raise HTTPException(400, "No IP column found. Add a column named 'ip' or 'ip_address'.")
+
+    topo: dict[str, dict] = {}
+    for row in normalised:
+        ip_val = row.get(ip_col, "").strip()
+        if not ip_val:
+            continue
+        entry = {k: v for k, v in row.items() if k != ip_col and v}
+        topo[ip_val] = entry
+
+    _topology = topo
+    _save_topology(topo)
+    return {"loaded": len(topo), "columns": list(normalised[0].keys()) if normalised else [], "sample": list(topo.items())[:3]}
+
+
+@app.get("/api/network/topology")
+async def get_topology():
+    return {"entries": len(_topology), "data": _topology}
+
+
+@app.delete("/api/network/topology")
+async def clear_topology():
+    global _topology
+    _topology = {}
+    _save_topology({})
+    return {"cleared": True}
+
+
+@app.get("/api/network/topology/{ip}")
+async def lookup_topology(ip: str):
+    entry = _topology.get(ip)
+    if not entry:
+        raise HTTPException(404, f"No topology entry for {ip}")
+    return {"ip": ip, **entry}
+
+
+_NL_SCHEMA = """
+Tables in database: cybersentinel
+
+1. cybersentinel.logs — ALL security events/alerts (main table)
+   - ts: DateTime64 — event timestamp (use for ALL time filtering)
+   - src_ip: String — source/attacker IP address
+   - dst_ip: String — destination IP address
+   - dst_port: String — destination port number (stored as String)
+   - threat_type: String — brute_force | port_scan | malware | phishing | lateral_movement | etc
+   - severity: String — low | medium | high | critical
+   - rule: String — detection rule description
+   - rule_level: UInt8 — severity 1-15 (>=12 means critical)
+   - action: String — allow | block | drop
+   - country: String — country name of src_ip (e.g. 'India', 'China', 'Russia', 'United States')
+   - agent: String — internal endpoint hostname that generated the alert
+   - mitre_tactic: String — ATT&CK tactic (e.g. 'Initial Access', 'Lateral Movement', 'Exfiltration')
+   - mitre_technique: String — ATT&CK technique name
+   - username: String — user account involved
+   - target_user: String — account being targeted/attacked
+   - rule_groups: String — Wazuh rule categories
+
+2. cybersentinel.agg_ip_daily — pre-aggregated daily counts per IP (fast for summaries)
+   - day: Date, src_ip, threat_type, severity, events: UInt64
+
+3. cybersentinel.ml_scores — ML risk scores per IP (use FINAL to deduplicate)
+   - ip, risk_score: UInt8 (0-100), anomaly_score: Float64, is_anomaly: UInt8(0|1), scored_at: DateTime64
+
+4. cybersentinel.baselines — behavioral baseline per IP (use FINAL)
+   - ip, built_at: DateTime64, data: String (JSON blob)
+
+5. cybersentinel.deviations — behavioral deviation alerts (use FINAL)
+   - ip, type: String, severity: String, message: String, ts: DateTime64
+
+6. cybersentinel.blocklist — blocked IPs (use FINAL, active=1 means currently blocked)
+   - ip, kind: String (auto|manual), active: UInt8, added_at: DateTime64
+"""
+
+
+@app.post("/api/nl/query")
+async def nl_query(payload: dict):
+    question = payload.get("question", "").strip()
+    if not question:
+        raise HTTPException(400, "Question required")
+
+    prompt = f"""You are a ClickHouse SQL expert for a bank's cybersecurity SIEM system.
+
+Convert the analyst's natural language question into a valid ClickHouse SELECT query.
+
+Schema:
+{_NL_SCHEMA}
+
+Rules:
+- Return ONLY the raw SQL query. No markdown, no backticks, no explanation, no comments.
+- Only SELECT statements. Absolutely no INSERT/UPDATE/DELETE/DROP/CREATE/ALTER.
+- Default time window: last 24 hours (ts > now() - INTERVAL 24 HOUR) unless the user specifies otherwise.
+- For row-level results always add LIMIT 200 at the end; omit LIMIT for COUNT/GROUP BY aggregates.
+- External IPs: country NOT IN ('India', '') AND src_ip NOT LIKE '10.%' AND src_ip NOT LIKE '192.168.%'
+- Readable timestamps: formatDateTime(ts, '%Y-%m-%d %H:%i:%S') AS time
+- Tables needing FINAL: ml_scores, baselines, deviations, blocklist
+- Brute force filter: threat_type ILIKE '%brute%'
+
+Analyst question: {question}
+
+SQL:"""
+
+    raw = await ask_groq(prompt, max_tokens=500)
+    sql = raw.strip()
+    for tag in ["```sql", "```SQL", "```"]:
+        if sql.startswith(tag):
+            sql = sql[len(tag):]
+            break
+    if sql.endswith("```"):
+        sql = sql[:-3]
+    sql = sql.strip()
+
+    if not sql.upper().lstrip().startswith("SELECT"):
+        raise HTTPException(400, "Safety check failed: only SELECT queries are allowed")
+
+    client = osc.get_client() if osc else None
+    if not client:
+        raise HTTPException(503, "ClickHouse not available")
+
+    import time as _time
+    t0 = _time.time()
+    try:
+        res = client.query(sql)
+        elapsed = round((_time.time() - t0) * 1000)
+        cols = list(res.column_names)
+        rows = []
+        for row in res.result_rows:
+            rows.append([
+                v.isoformat() if isinstance(v, datetime) else
+                str(v) if not isinstance(v, (int, float, bool, type(None))) else v
+                for v in row
+            ])
+        return {"sql": sql, "columns": cols, "rows": rows[:200],
+                "row_count": len(res.result_rows), "elapsed_ms": elapsed}
+    except Exception as e:
+        raise HTTPException(500, f"Query execution failed: {str(e)}")
+
+
+@app.get("/api/resilience")
+async def get_resilience():
+    def qval(sql: str, default: int = 0) -> int:
+        if not (STORE_ENABLED and osc):
+            return default
+        c = osc.get_client()
+        if not c:
+            return default
+        try:
+            res = c.query(sql)
+            if res.result_rows:
+                v = res.result_rows[0][0]
+                return int(v) if v is not None else default
+        except Exception:
+            pass
+        return default
+
+    active_ips   = qval("SELECT count(DISTINCT src_ip) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY")
+    baselined    = qval("SELECT count(DISTINCT ip) FROM cybersentinel.baselines FINAL")
+    ml_scored    = qval("SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL")
+    critical_thr = qval("SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL WHERE risk_score >= 70")
+    blocked      = qval("SELECT count(DISTINCT ip) FROM cybersentinel.blocklist FINAL WHERE active = 1")
+    deviations   = qval("SELECT count(DISTINCT ip) FROM cybersentinel.deviations WHERE ts > now() - INTERVAL 7 DAY")
+    events_7d    = qval("SELECT count(*) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY")
+
+    safe_active = max(active_ips, 1)
+
+    ml_pct  = min(100, round(ml_scored / safe_active * 100))
+    ml_pts  = round(ml_pct * 0.25)
+
+    bl_pct  = min(100, round(baselined / safe_active * 100))
+    bl_pts  = round(bl_pct * 0.25)
+
+    pressure_pts = max(0, 25 - critical_thr * 3)
+    pressure_pct = round(pressure_pts / 25 * 100)
+
+    total_flagged = max(critical_thr + deviations, 1)
+    resp_pct = min(100, round(blocked / total_flagged * 100))
+    resp_pts = round(resp_pct * 0.25)
+
+    total = ml_pts + bl_pts + pressure_pts + resp_pts
+    grade = "A" if total >= 80 else "B" if total >= 65 else "C" if total >= 50 else "D" if total >= 35 else "F"
+
+    return {
+        "score": total,
+        "grade": grade,
+        "active_ips": active_ips,
+        "events_7d": events_7d,
+        "components": {
+            "ml_coverage":     {"label": "ML Coverage",         "score": ml_pts,       "max": 25, "pct": ml_pct,       "detail": f"{ml_scored} of {active_ips} active IPs scored"},
+            "baseline_depth":  {"label": "Baseline Depth",      "score": bl_pts,       "max": 25, "pct": bl_pct,       "detail": f"{baselined} of {active_ips} IPs baselined"},
+            "threat_pressure": {"label": "Low Threat Pressure", "score": pressure_pts, "max": 25, "pct": pressure_pct, "detail": f"{critical_thr} critical threats active"},
+            "response_rate":   {"label": "Response Rate",       "score": resp_pts,     "max": 25, "pct": resp_pct,     "detail": f"{blocked} blocked of {total_flagged} flagged"},
+        },
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/api/health")
 async def health():
-    os_status = "disabled"
-    if OPENSEARCH_ENABLED:
-        client = get_opensearch()
-        if client:
+    ch_status = "disabled"
+    ch_docs = None
+    if STORE_ENABLED and osc:
+        if osc.get_client():
+            ch_status = "connected"
             try:
-                client.ping()
-                os_status = "connected"
+                ch_docs = osc.get_total_doc_count()
             except Exception:
-                os_status = "error"
+                ch_docs = None
         else:
-            os_status = "connection_failed"
+            ch_status = "connection_failed"
     return {
         "status": "ok",
         "version": "2.2.0",
         "ai": "configured" if AI_API_KEY else "missing",
-        "archive_dir": str(ARCHIVE_DIR),
-        "trail_retain": TRAIL_RETAIN,
-        "opensearch": os_status,
+        "clickhouse": ch_status,
+        "clickhouse_docs": ch_docs,
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
 
-# ── OpenSearch query endpoints ────────────────────────────────────────────────
-
-@app.get("/api/trail/{ip}/full")
-async def get_trail_full(ip: str, limit: int = 10000, days: int = 0):
-    """Full IP trail from OpenSearch — complete history, not limited by Redis TRAIL_RETAIN."""
-    if not OPENSEARCH_ENABLED:
-        # Fallback: return Redis trail
-        return await get_trail(ip, limit=limit)
-
-    client = get_opensearch()
-    if not client:
-        return await get_trail(ip, limit=limit)
-
-    query: dict = {
-        "bool": {
-            "must": [{"term": {"src_ip": ip}}]
-        }
-    }
-    if days > 0:
-        query["bool"]["filter"] = [
-            {"range": {"@timestamp": {"gte": f"now-{days}d"}}}
-        ]
-
-    try:
-        resp = client.search(
-            index="cybersentinel-logs-*",
-            body={
-                "query": query,
-                "sort": [{"@timestamp": {"order": "desc"}}],
-                "size": min(limit, 10000),
-            },
-        )
-        hits = resp.get("hits", {})
-        total = hits.get("total", {}).get("value", 0)
-        events = [hit["_source"] for hit in hits.get("hits", [])]
-
-        # Use lightweight ipcnt counter instead of removed ipstat
-        r = await get_redis()
-        ipcnt = await r.get(f"ipcnt:{ip}")
-
-        return {
-            "ip": ip,
-            "source": "opensearch",
-            "total": total,
-            "returned": len(events),
-            "events": events,
-            "stats": {"total": ipcnt or "0"},
-        }
-    except Exception as e:
-        logger.error(f"OpenSearch query failed for {ip}: {e}")
-        return await get_trail(ip, limit=limit)
 
 
-@app.get("/api/opensearch/stats")
-async def opensearch_stats():
-    """OpenSearch index health, doc counts, and ILM phase info."""
-    if not OPENSEARCH_ENABLED:
-        return {"status": "disabled"}
-
-    client = get_opensearch()
-    if not client:
-        return {"status": "connection_failed"}
-
-    try:
-        cat = client.cat.indices(index="cybersentinel-logs-*", format="json")
-        indices = []
-        total_docs = 0
-        total_size = ""
-        for idx in cat:
-            doc_count = int(idx.get("docs.count", 0))
-            total_docs += doc_count
-            indices.append({
-                "index": idx.get("index"),
-                "docs": doc_count,
-                "size": idx.get("store.size", "?"),
-                "health": idx.get("health", "?"),
-                "status": idx.get("status", "?"),
-            })
-            total_size = idx.get("store.size", total_size)
-
-        # Check alias
-        alias_targets = []
-        try:
-            alias_info = client.indices.get_alias(name=OS_INDEX_ALIAS)
-            alias_targets = list(alias_info.keys())
-        except Exception:
-            pass
-
-        # Pending buffer size
-        with _os_lock:
-            pending = len(_os_buffer)
-
-        return {
-            "status": "connected",
-            "total_docs": total_docs,
-            "indices": indices,
-            "write_alias": OS_INDEX_ALIAS,
-            "alias_targets": alias_targets,
-            "pending_buffer": pending,
-            "bulk_size": OS_BULK_SIZE,
-            "flush_interval": OS_FLUSH_INTERVAL,
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-
-@app.post("/api/opensearch/flush")
-async def opensearch_flush():
-    """Manually flush the OpenSearch bulk buffer."""
-    if not OPENSEARCH_ENABLED:
-        return {"status": "disabled"}
-    with _os_lock:
-        count = len(_os_buffer)
-        _flush_os_buffer_sync()
-    return {"status": "flushed", "docs_flushed": count}
-
-
-@app.get("/api/search/advanced")
-async def advanced_search(
-    q: str = "",
-    src_ip: str = "",
-    threat_type: str = "",
-    severity: str = "",
-    days: int = 7,
-    limit: int = 200,
-):
-    """Advanced search across OpenSearch with filters."""
-    if not OPENSEARCH_ENABLED:
-        # Fallback to basic Redis search
-        if src_ip:
-            return await search_ip(src_ip)
-        return {"error": "OpenSearch not enabled", "events": []}
-
-    client = get_opensearch()
-    if not client:
-        return {"error": "OpenSearch connection failed", "events": []}
-
-    must_clauses = []
-    if q:
-        must_clauses.append({"multi_match": {"query": q, "fields": ["rule", "signature", "username", "agent"]}})
-    if src_ip:
-        must_clauses.append({"term": {"src_ip": src_ip}})
-    if threat_type:
-        must_clauses.append({"term": {"threat_type": threat_type}})
-    if severity:
-        must_clauses.append({"term": {"severity": severity}})
-
-    if not must_clauses:
-        must_clauses.append({"match_all": {}})
-
-    try:
-        resp = client.search(
-            index="cybersentinel-logs-*",
-            body={
-                "query": {
-                    "bool": {
-                        "must": must_clauses,
-                        "filter": [{"range": {"@timestamp": {"gte": f"now-{days}d"}}}],
-                    }
-                },
-                "sort": [{"@timestamp": {"order": "desc"}}],
-                "size": min(limit, 10000),
-            },
-        )
-        hits = resp.get("hits", {})
-        total = hits.get("total", {}).get("value", 0)
-        events = [hit["_source"] for hit in hits.get("hits", [])]
-        return {"total": total, "returned": len(events), "events": events, "source": "opensearch"}
-    except Exception as e:
-        return {"error": str(e), "events": []}
-
-
-# ── hot/cold archive system ──────────────────────────────────────────────────
-#
-# Hot  = Redis (last TRAIL_RETAIN events per IP + baselines + stats + scores)
-# Cold = Disk  (compressed .jsonl.gz archives — ALL raw logs preserved)
-#
-# Flow: archive old events → compress to disk → trim Redis → baselines remain
-
-async def archive_ip_trail(r: aioredis.Redis, ip: str) -> dict:
-    """
-    Archive events beyond TRAIL_RETAIN for a single IP.
-    Returns count of archived and trimmed events.
-    """
-    total = await r.zcard(f"trail:{ip}")
-    if total <= TRAIL_RETAIN:
-        return {"ip": ip, "archived": 0, "trimmed": 0, "kept": total}
-
-    # Number of old events to archive
-    trim_count = total - TRAIL_RETAIN
-
-    # Read old events (the ones we'll archive then remove)
-    old_events = await r.zrange(f"trail:{ip}", 0, trim_count - 1, withscores=True)
-
-    if not old_events:
-        return {"ip": ip, "archived": 0, "trimmed": 0, "kept": total}
-
-    # Build baseline from ALL data BEFORE trimming (so we don't lose knowledge)
-    await build_baseline(r, ip)
-
-    # Archive to compressed daily file
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    archive_file = ARCHIVE_DIR / f"{today}.jsonl.gz"
-
-    archived = 0
-    with gzip.open(archive_file, "at", encoding="utf-8") as f:
-        for item, score in old_events:
-            try:
-                event = json.loads(item)
-                archive_record = {
-                    "ip": ip,
-                    "score": score,
-                    "event": event,
-                    "archived_at": datetime.now(timezone.utc).isoformat(),
-                }
-                f.write(json.dumps(archive_record) + "\n")
-                archived += 1
-            except Exception:
-                pass
-
-    # Trim old events from Redis (keep only the newest TRAIL_RETAIN)
-    await r.zremrangebyrank(f"trail:{ip}", 0, trim_count - 1)
-
-    return {"ip": ip, "archived": archived, "trimmed": trim_count, "kept": TRAIL_RETAIN}
-
-
-@app.post("/api/archive/run")
-async def run_archive(background_tasks: BackgroundTasks):
-    """
-    Archive and trim ALL IP trails. Keeps last TRAIL_RETAIN events in Redis,
-    compresses older ones to disk. Baselines are rebuilt before trimming so
-    no knowledge is lost.
-    """
-    r = await get_redis()
-    keys = await r.keys("trail:*")
-
-    results = {
-        "total_ips": len(keys),
-        "archived": 0,
-        "trimmed": 0,
-        "ips_trimmed": 0,
-    }
-
-    for key in keys:
-        ip = key.replace("trail:", "")
-        result = await archive_ip_trail(r, ip)
-        results["archived"] += result["archived"]
-        results["trimmed"] += result["trimmed"]
-        if result["trimmed"] > 0:
-            results["ips_trimmed"] += 1
-
-    results["status"] = "done"
-    results["archive_dir"] = str(ARCHIVE_DIR)
-    results["trail_retain"] = TRAIL_RETAIN
-    return results
-
-
-@app.post("/api/archive/ip/{ip}")
-async def archive_single_ip(ip: str):
-    """Archive and trim trail for a single IP."""
-    r = await get_redis()
-    exists = await r.exists(f"trail:{ip}")
-    if not exists:
-        raise HTTPException(404, f"No trail found for {ip}")
-    result = await archive_ip_trail(r, ip)
-    return result
-
-
-@app.get("/api/archive/list")
-async def list_archives():
-    """List all archive files with sizes."""
-    archives = []
-    if ARCHIVE_DIR.exists():
-        for f in sorted(ARCHIVE_DIR.glob("*.jsonl.gz"), reverse=True):
-            stat = f.stat()
-            archives.append({
-                "filename": f.name,
-                "date": f.stem,
-                "size_bytes": stat.st_size,
-                "size_mb": round(stat.st_size / (1024 * 1024), 2),
-                "created": datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
-            })
-    total_bytes = sum(a["size_bytes"] for a in archives)
-    return {
-        "archives": archives,
-        "total_files": len(archives),
-        "total_size_mb": round(total_bytes / (1024 * 1024), 2),
-    }
-
-
-@app.get("/api/archive/search/{ip}")
-async def search_archive(ip: str, date: str = None, limit: int = 100):
-    """
-    Search archived logs for a specific IP. Optionally filter by date.
-    Returns old events that have been trimmed from Redis but preserved on disk.
-    """
-    results = []
-    files = sorted(ARCHIVE_DIR.glob("*.jsonl.gz"), reverse=True)
-
-    if date:
-        files = [f for f in files if f.stem == date]
-
-    for archive_file in files:
-        try:
-            with gzip.open(archive_file, "rt", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                        if record.get("ip") == ip:
-                            results.append(record)
-                            if len(results) >= limit:
-                                break
-                    except Exception:
-                        continue
-        except Exception:
-            continue
-        if len(results) >= limit:
-            break
-
-    return {
-        "ip": ip,
-        "archived_events": results,
-        "total": len(results),
-        "source": "cold_archive",
-    }
-
-
-# ── incremental baseline update ──────────────────────────────────────────────
-#
-# Instead of rebuilding from scratch every time, merge new event stats into
-# the existing baseline. This way baselines "remember" old data even after
-# raw events are trimmed from Redis.
-
-async def update_baseline_incremental(r: aioredis.Redis, ip: str, events: list):
-    """
-    Merge new events into an existing baseline without needing the full trail.
-    If no baseline exists, falls back to build_baseline().
-    """
-    raw = await r.get(f"baseline:{ip}")
-    if not raw:
-        # No existing baseline — need full build
-        await build_baseline(r, ip)
-        return
-
-    b = json.loads(raw)
-
-    for e in events:
-        b["event_count"] = b.get("event_count", 0) + 1
-
-        # Merge port
-        p = str(e.get("dst_port", "")).strip()
-        if p and p not in ("", "None", "nan"):
-            ports = b.get("usual_ports", {})
-            ports[p] = ports.get(p, 0) + 1
-            b["usual_ports"] = ports
-
-        # Merge dst IP
-        dip = str(e.get("dst_ip", "")).strip()
-        if dip and dip not in ("", "None", "nan"):
-            dst_ips = b.get("usual_dst_ips", {})
-            dst_ips[dip] = dst_ips.get(dip, 0) + 1
-            b["usual_dst_ips"] = dst_ips
-
-            sn = get_subnet24(dip)
-            if sn:
-                subnets = b.get("usual_subnets", {})
-                subnets[sn] = subnets.get(sn, 0) + 1
-                b["usual_subnets"] = subnets
-
-        # Merge country
-        c = str(e.get("country", "")).strip()
-        if c and c not in ("", "None", "nan"):
-            countries = b.get("usual_countries", {})
-            countries[c] = countries.get(c, 0) + 1
-            b["usual_countries"] = countries
-
-        # Merge hour / weekday
-        ts_str = e.get("ts", "")
-        try:
-            if ts_str:
-                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            else:
-                dt = datetime.now(timezone.utc)
-            h = str(dt.hour)
-            wd = str(dt.weekday())
-            hours = b.get("usual_hours", {})
-            hours[h] = hours.get(h, 0) + 1
-            b["usual_hours"] = hours
-            weekdays = b.get("usual_weekdays", {})
-            weekdays[wd] = weekdays.get(wd, 0) + 1
-            b["usual_weekdays"] = weekdays
-
-            day = dt.strftime("%Y-%m-%d")
-            daily = b.get("daily_counts", {})
-            daily[day] = daily.get(day, 0) + 1
-            b["daily_counts"] = daily
-        except Exception:
-            pass
-
-        # Merge threat type
-        tt = str(e.get("threat_type", "unknown"))
-        rule_groups = b.get("usual_rule_groups", {})
-        rule_groups[tt] = rule_groups.get(tt, 0) + 1
-        b["usual_rule_groups"] = rule_groups
-
-        # Merge severity into running average
-        sev_score = {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(e.get("severity", "low"), 1)
-        old_avg = b.get("avg_severity_score", 1.0)
-        old_count = b.get("event_count", 1) - 1  # before this increment
-        if old_count > 0:
-            b["avg_severity_score"] = round((old_avg * old_count + sev_score) / (old_count + 1), 3)
-
-        # Merge success/failure counts
-        if e.get("threat_type") == "login_success":
-            b["total_successes"] = b.get("total_successes", 0) + 1
-        elif e.get("threat_type") in ("brute_force", "ssh_bruteforce", "vpn_bruteforce"):
-            b["total_failures"] = b.get("total_failures", 0) + 1
-
-    # Recalculate avg daily
-    daily = b.get("daily_counts", {})
-    if daily:
-        b["avg_daily_events"] = round(sum(daily.values()) / len(daily), 2)
-
-    b["built_at"] = datetime.now(timezone.utc).isoformat()
-    await r.set(f"baseline:{ip}", json.dumps(b))
 
 
 # ── storage stats ────────────────────────────────────────────────────────────
 
 @app.get("/api/storage/stats")
 async def storage_stats():
-    """Get current storage usage across Redis (hot) and disk archive (cold)."""
-    r = await get_redis()
-
-    # Redis stats
-    trail_keys = await r.keys("trail:*")
-    total_trail_events = 0
-    ip_trail_sizes = {}
-    for key in trail_keys:
-        ip = key.replace("trail:", "")
-        count = await r.zcard(key)
-        total_trail_events += count
-        ip_trail_sizes[ip] = count
-
-    baseline_keys = await r.keys("baseline:*")
-    alert_keys = await r.keys("alert:*")
-    ml_keys = await r.keys("ml:score:*")
-
-    # Disk archive stats
-    archive_files = list(ARCHIVE_DIR.glob("*.jsonl.gz")) if ARCHIVE_DIR.exists() else []
-    archive_total_bytes = sum(f.stat().st_size for f in archive_files)
-
-    # IPs with trails over retention limit
-    ips_needing_trim = {ip: size for ip, size in ip_trail_sizes.items() if size > TRAIL_RETAIN}
+    """Storage usage from ClickHouse (logs + state) — single source of truth."""
+    if not (STORE_ENABLED and osc):
+        return {"source": "disabled"}
 
     return {
-        "redis_hot": {
-            "trail_ips": len(trail_keys),
-            "trail_events": total_trail_events,
-            "baselines": len(baseline_keys),
-            "alerts": len(alert_keys),
-            "ml_scores": len(ml_keys),
-            "trail_retain_limit": TRAIL_RETAIN,
-            "ips_over_limit": len(ips_needing_trim),
-            "top_oversized": dict(sorted(ips_needing_trim.items(), key=lambda x: x[1], reverse=True)[:10]),
+        "source": "clickhouse",
+        "clickhouse": {
+            "total_logs":   osc.get_total_doc_count(),
+            "unique_ips":   osc.get_unique_ip_count(),
+            "baselines":    osc.count_baselines(),
+            "deviations":   osc.get_deviation_total(),
+            "retention":    "partition TTL (logs 90d, deviations 60d)",
         },
-        "disk_cold": {
-            "archive_files": len(archive_files),
-            "total_size_mb": round(archive_total_bytes / (1024 * 1024), 2),
-            "archive_dir": str(ARCHIVE_DIR),
-        },
-        "recommendation": "run POST /api/archive/run" if ips_needing_trim else "storage is healthy",
+        "recommendation": "storage is healthy — ClickHouse TTL manages retention automatically",
     }

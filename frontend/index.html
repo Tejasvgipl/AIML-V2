@@ -1845,49 +1845,191 @@
       }
     }
   </style>
-  <link rel="stylesheet" href="enhance.css">
+  <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
+  <link rel="stylesheet" href="theme.css?v=8">
 </head>
 
 <body>
+  <!-- ── Sign-in gate ─────────────────────────────────────────────────── -->
+  <div id="login-screen">
+    <div class="login-brand">
+      <div class="login-logo">
+        <!-- Drop your logo as frontend/logo.png to replace this mark -->
+        <img src="logo.png" alt="logo" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='logo.svg'}else{this.style.display='none';this.nextElementSibling.style.display='block'}">
+        <svg style="display:none" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/><path d="M9 12l2 2 4-4"/>
+        </svg>
+      </div>
+      <h1>CyberSentinel<br>SOC Platform</h1>
+      <p>AI-driven threat intelligence and behavioural analytics — live log ingestion, anomaly detection, and analyst tooling in one console.</p>
+      <div class="login-feats">
+        <div class="login-feat"><span class="dot"></span>Real-time log ingestion at scale</div>
+        <div class="login-feat"><span class="dot"></span>Behavioural baselines &amp; anomaly ML</div>
+        <div class="login-feat"><span class="dot"></span>AI-assisted investigation</div>
+      </div>
+      <div class="login-brandfoot">
+        <div class="lf-mark">
+          <img src="logo.png" alt="" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='logo.svg'}else{this.style.display='none';this.nextElementSibling.style.display='block'}">
+          <svg style="display:none" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <div class="lf-txt">
+          <div class="lf-title">CyberSentinel</div>
+          <div class="lf-sub">AI&nbsp;·&nbsp;ML&nbsp;Driven Threat Intelligence</div>
+        </div>
+      </div>
+    </div>
+    <div class="login-form-wrap">
+      <form class="login-card" onsubmit="return doLogin(event)">
+        <div class="eyebrow">Welcome back</div>
+        <h2>Sign in</h2>
+        <div class="sub">Enter your credentials to access the console.</div>
+        <div class="field">
+          <label>Username</label>
+          <input id="login-user" autocomplete="username" placeholder="admin" required>
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input id="login-pass" type="password" autocomplete="current-password" placeholder="••••••••" required>
+        </div>
+        <button class="login-btn" type="submit">Sign in →</button>
+        <div class="login-error" id="login-error">Invalid username or password</div>
+        <div class="login-foot">CyberSentinel · Secure SOC Console</div>
+      </form>
+    </div>
+  </div>
+  <script>
+    // ── JWT auth gate ─────────────────────────────────────────────────────────
+    const AUTH = '/api/auth';
+
+    function _authToken() { return localStorage.getItem('cs_token') || ''; }
+    function _authRole()  { return localStorage.getItem('cs_role')  || 'user'; }
+    function _authUser()  { return localStorage.getItem('cs_user')  || ''; }
+
+    function _applyAdminUI() {
+      var role = _authRole(), user = _authUser();
+      var el = document.getElementById('current-user-display');
+      if (el) el.textContent = user;
+      var badge = document.getElementById('current-user-badge');
+      if (badge) { badge.textContent = role === 'admin' ? 'Admin' : 'Analyst'; badge.style.color = role === 'admin' ? 'var(--warn)' : 'var(--ok)'; }
+      document.querySelectorAll('.admin-only').forEach(function(e) {
+        e.style.display = role === 'admin' ? '' : 'none';
+      });
+    }
+
+    // Optimistic restore: if token in localStorage, hide login immediately
+    (function() {
+      var t = _authToken();
+      if (t) {
+        var s = document.getElementById('login-screen');
+        if (s) s.classList.add('hidden');
+        // Validate token async; if expired, bounce back to login
+        fetch(AUTH + '/me', { headers: { 'Authorization': 'Bearer ' + t } })
+          .then(function(r) {
+            if (!r.ok) { localStorage.clear(); location.reload(); }
+            else { _applyAdminUI(); }
+          }).catch(function() {});
+      }
+    })();
+
+    async function doLogin(e) {
+      e.preventDefault();
+      var u = document.getElementById('login-user').value.trim();
+      var p = document.getElementById('login-pass').value;
+      var btn = document.querySelector('.login-btn');
+      var errEl = document.getElementById('login-error');
+      errEl.classList.remove('show');
+      btn.textContent = 'Signing in…'; btn.disabled = true;
+      try {
+        var r = await fetch(AUTH + '/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: u, password: p })
+        });
+        if (r.ok) {
+          var data = await r.json();
+          localStorage.setItem('cs_token', data.access_token);
+          localStorage.setItem('cs_role',  data.role);
+          localStorage.setItem('cs_user',  data.username);
+          document.getElementById('login-screen').classList.add('hidden');
+          _applyAdminUI();
+        } else {
+          errEl.classList.add('show');
+        }
+      } catch(err) {
+        errEl.classList.add('show');
+      }
+      btn.textContent = 'Sign in →'; btn.disabled = false;
+      return false;
+    }
+
+    async function csLogout() {
+      var t = _authToken();
+      if (t) {
+        try { await fetch(AUTH + '/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } }); } catch(e) {}
+      }
+      localStorage.removeItem('cs_token');
+      localStorage.removeItem('cs_role');
+      localStorage.removeItem('cs_user');
+      location.reload();
+    }
+  </script>
+
   <div class="shell">
     <aside class="sidebar">
       <div class="logo">
-        <div class="logo-title">CyberSentinel</div>
-        <div class="logo-sub">SOC Operations Console</div>
+        <div class="brand-mark">
+          <img src="logo.png" alt="" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='logo.svg'}else{this.style.display='none';this.nextElementSibling.style.display='block'}">
+          <svg style="display:none" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/><path d="M9 12l2 2 4-4"/>
+          </svg>
+        </div>
+        <div>
+          <div class="logo-title">CyberSentinel</div>
+          <div class="logo-sub">SOC Console</div>
+        </div>
       </div>
       <nav class="nav">
         <div class="ns">Monitor</div>
         <div class="ni active" onclick="nav('overview')"><span class="ndot nd-r"></span>Overview</div>
         <div class="ni" onclick="nav('trail')"><span class="ndot nd-w"></span>IP Trail</div>
-        <div class="ni" onclick="nav('livealerts')"><span class="ndot nd-r"></span>Live Alerts</div>
+        <div class="ni" onclick="nav('logs')"><span class="ndot nd-g"></span>Logs Explorer</div>
         <div class="ns">Baselines</div>
         <div class="ni" onclick="nav('deviations')"><span class="ndot nd-r"></span>Deviations</div>
         <div class="ni" onclick="nav('bslexplorer')"><span class="ndot nd-w"></span>Baseline Explorer</div>
         <div class="ns">AI Analysis</div>
-        <div class="ni" onclick="nav('aiinvestigate')"><span class="ndot" style="background:var(--ai)"></span>AI
-          Investigator</div>
+        <div class="ni" onclick="nav('aiinvestigate')"><span class="ndot" style="background:var(--ai)"></span>AI Investigator</div>
+        <div class="ni" onclick="nav('nlquery')"><span class="ndot" style="background:var(--ai)"></span>SOC Query</div>
         <div class="ns">Detection</div>
         <div class="ni" onclick="nav('ml')"><span class="ndot nd-g"></span>ML Anomaly</div>
-        <div class="ni" onclick="nav('mlintern')"><span class="ndot" style="background:var(--purple)"></span>ML Intern</div>
-        <div class="ni" onclick="nav('clusters')"><span class="ndot nd-w"></span>Subnet Clusters</div>
+        <div class="ns">Threat Intel</div>
+        <div class="ni" onclick="nav('incidents')"><span class="ndot nd-r"></span>Incidents</div>
+        <div class="ni" onclick="nav('ueba')"><span class="ndot" style="background:var(--ai)"></span>UEBA</div>
+        <div class="ni" onclick="nav('killchain')"><span class="ndot" style="background:var(--purple)"></span>Kill Chain</div>
         <div class="ns">Control</div>
-        <div class="ni" onclick="nav('blocklist')"><span class="ndot nd-r"></span>Blocklist</div>
         <div class="ni" onclick="nav('ingest')"><span class="ndot nd-g"></span>Ingest Logs</div>
         <div class="ns">Reporting</div>
         <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Reports</div>
+        <div class="ns admin-only" style="display:none">Admin</div>
+        <div class="ni admin-only" style="display:none" onclick="nav('users')"><span class="ndot" style="background:var(--warn)"></span>User Management</div>
+        <div class="ni admin-only" style="display:none" onclick="nav('auditlog')"><span class="ndot nd-w"></span>Login Audit</div>
       </nav>
       <div class="sfooter">
+        <div class="srow" style="flex-direction:column;align-items:flex-start;gap:2px;padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:6px">
+          <span style="font-size:10px;color:var(--muted)">Signed in as</span>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span id="current-user-display" style="font-size:12px;font-weight:600">—</span>
+            <span id="current-user-badge" style="font-size:10px;padding:1px 6px;border-radius:10px;background:rgba(255,255,255,.07)">—</span>
+          </div>
+        </div>
         <div class="srow"><span class="pulse"></span>Backend API</div>
         <div class="srow" id="ml-status"><span
             style="width:6px;height:6px;border-radius:50%;background:var(--muted);display:inline-block"></span> ML
           Engine</div>
-        <div class="srow" id="mlintern-status"><span
-            style="width:6px;height:6px;border-radius:50%;background:var(--muted);display:inline-block"></span> ML
-          Intern</div>
         <div class="srow" id="ai-status"><span
             style="width:6px;height:6px;border-radius:50%;background:var(--muted);display:inline-block"></span> AI
           Engine</div>
         <div style="font-size:10px;color:var(--muted);margin-top:6px" id="last-ref">—</div>
+        <button class="btn-logout" onclick="csLogout()">Sign out</button>
       </div>
     </aside>
     <main class="main">
@@ -1926,11 +2068,6 @@
             <div class="ops-chip-l">Critical Signals</div>
             <div class="ops-chip-v mv-d" id="ops-critical">—</div>
             <div class="ops-chip-s">IPs requiring attention</div>
-          </div>
-          <div class="ops-chip">
-            <div class="ops-chip-l">Controls Active</div>
-            <div class="ops-chip-v mv-w" id="ops-blocked">—</div>
-            <div class="ops-chip-s">blocked indicators</div>
           </div>
         </section>
         <section class="situation-board">
@@ -1972,13 +2109,6 @@
                 <div class="sig-fill warn" id="sig-alerts"></div>
               </div>
               <div class="sig-value" id="sig-alerts-v">0</div>
-            </div>
-            <div class="signal-row">
-              <div class="signal-name">Blocked</div>
-              <div class="sig-track">
-                <div class="sig-fill" id="sig-blocked"></div>
-              </div>
-              <div class="sig-value" id="sig-blocked-v">0</div>
             </div>
             <div class="signal-row">
               <div class="signal-name">Coverage</div>
@@ -2024,12 +2154,33 @@
             <div class="mval mv-d" id="m-crit">—</div>
             <div class="msub">P0 flagged</div>
           </div>
-          <div class="metric">
-            <div class="mlabel">Auto-blocked</div>
-            <div class="mval mv-w" id="m-blocked">—</div>
-            <div class="msub">bad subnets</div>
+        </div>
+        <!-- ── Cyber Resilience Score ─────────────────────────────────────── -->
+        <div class="card" style="margin-bottom:20px">
+          <div class="ch">
+            <span class="ct">Cyber Resilience Score</span>
+            <span style="font-size:11px;color:var(--muted)" id="res-computed"></span>
+          </div>
+          <div class="cb">
+            <div style="display:flex;align-items:center;gap:36px;flex-wrap:wrap">
+              <div style="text-align:center;min-width:110px">
+                <div id="res-ring" style="width:100px;height:100px;border-radius:50%;background:conic-gradient(var(--bg3) 360deg);display:flex;align-items:center;justify-content:center;margin:0 auto">
+                  <div style="width:78px;height:78px;border-radius:50%;background:var(--bg2);display:flex;flex-direction:column;align-items:center;justify-content:center">
+                    <div id="res-score" style="font-size:26px;font-weight:700;line-height:1;color:var(--muted)">—</div>
+                    <div style="font-size:10px;color:var(--muted)">/100</div>
+                  </div>
+                </div>
+                <div id="res-grade" style="margin-top:8px;font-size:24px;font-weight:700;color:var(--muted)">—</div>
+                <div style="font-size:11px;color:var(--muted)">Resilience Grade</div>
+              </div>
+              <div style="flex:1;min-width:240px" id="res-components">
+                <div style="color:var(--muted);font-size:12px">Loading resilience score…</div>
+              </div>
+            </div>
+            <div id="res-narrative" style="margin-top:12px;font-size:12px;color:var(--muted);border-top:1px solid var(--border);padding-top:10px"></div>
           </div>
         </div>
+
         <div class="cg2">
           <div class="cbox">
             <h3>Threat types</h3>
@@ -2067,8 +2218,8 @@
             <button class="btn pri" onclick="loadTrail()">Load trail</button>
             <button class="btn" onclick="loadIntel()">+ Intel</button>
             <button class="btn yel" onclick="loadBaseline()">Baseline</button>
+            <button class="btn" onclick="if(curIP)goKillChain(curIP)">Kill chain</button>
             <button class="btn ai" onclick="aiExplainIP()">AI analysis</button>
-            <button class="btn red" onclick="blockCurrent()">Block IP</button>
           </div>
         </div>
         <div id="trail-panel" style="display:none">
@@ -2076,7 +2227,6 @@
             <div class="ip-hdr">
               <div class="ip-big" id="t-ip">—</div>
               <span class="badge" id="t-sev-badge">—</span>
-              <span id="t-blocked-badge" style="display:none" class="badge blocked">Blocked</span>
             </div>
             <div class="ip-mg">
               <div class="ipm">
@@ -2121,62 +2271,66 @@
           </div>
         </div>
       </div>
-      <div id="page-livealerts" class="page">
-        <div style="display:flex;gap:10px;margin-bottom:16px">
-          <button class="btn" onclick="loadLiveAlerts()">↻ Refresh</button>
-          <span style="font-size:12px;color:var(--muted);align-self:center">Events from hot IPs</span>
+      <div id="page-logs" class="page">
+        <div class="logs-toolbar">
+          <div class="logs-ranges">
+            <button class="chip" onclick="setLogsRange(this,15)">Last 15 min</button>
+            <button class="chip" onclick="setLogsRange(this,60)">Last 1 hour</button>
+            <button class="chip" onclick="setLogsRange(this,1440)">Last 24 hours</button>
+            <button class="chip" onclick="setLogsRange(this,10080)">Last 7 days</button>
+            <button class="chip active" onclick="setLogsRange(this,0)">All time</button>
+          </div>
+          <div class="logs-custom">
+            <label>From</label><input type="datetime-local" id="logs-from">
+            <label>To</label><input type="datetime-local" id="logs-to">
+            <button class="btn" onclick="applyLogsCustom()">Apply range</button>
+          </div>
+          <div class="logs-sev">
+            <label>Min level</label>
+            <select id="logs-minlevel" onchange="loadLogs()">
+              <option value="0">All levels</option>
+              <option value="1">≥ 1</option>
+              <option value="4">≥ 4 (medium+)</option>
+              <option value="8">≥ 8 (high+)</option>
+              <option value="12">≥ 12 (critical)</option>
+            </select>
+            <button class="btn pri" onclick="loadLogs()">↻ Refresh</button>
+          </div>
         </div>
         <div class="card">
+          <div class="logs-count" id="logs-count">—</div>
           <table class="tbl">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Source IP</th>
-                <th>Threat</th>
-                <th>Rule</th>
-                <th>Severity</th>
-                <th>Dst IP</th>
+                <th>Time</th><th>Source IP</th><th>Threat</th>
+                <th>Severity</th><th>Lvl</th><th>Country</th><th>Rule</th>
               </tr>
             </thead>
-            <tbody id="live-tbody"></tbody>
+            <tbody id="logs-tbody"></tbody>
           </table>
         </div>
       </div>
       <div id="page-deviations" class="page">
-        <div class="term-panel">
-          <div class="term-title">What baseline deviation means</div>
-          <div class="term-grid">
-            <div class="term"><b>Baseline</b> is the normal behaviour learned for an IP: usual ports, hours, destination
-              networks, countries, event volume, and alert types.</div>
-            <div class="term"><b>Deviation</b> means the IP did something outside that normal pattern, like touching a
-              new subnet, using a new admin port, or creating a volume spike.</div>
-            <div class="term"><b>Why SOC cares</b>: deviations are early warning signals for brute force, lateral
-              movement, proxy rotation, or compromised accounts.</div>
+        <!-- severity summary tiles (click to filter) -->
+        <div class="dev-sevbar" id="dev-sevbar"></div>
+        <!-- toolbar -->
+        <div class="dev-toolbar">
+          <input id="dev-search" placeholder="Filter by IP or deviation type…" oninput="renderDeviations()">
+          <button class="btn" onclick="buildAllBaselines()">↻ Rebuild baselines</button>
+          <button class="btn pri" onclick="loadDeviations()">↻ Reload</button>
+          <span id="dev-status" class="muted" style="font-size:12px"></span>
+        </div>
+        <!-- two-column: affected IPs + alert feed -->
+        <div class="dev-layout">
+          <div class="card dev-ips-card">
+            <div class="ch"><span class="ct">Affected IPs</span><span id="dev-ip-count" class="muted" style="font-size:11px"></span></div>
+            <div id="dev-ip-list" class="dev-ip-list"></div>
           </div>
-        </div>
-        <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
-          <button class="btn pri" onclick="loadDeviations()">Load all deviations</button>
-          <button class="btn red" onclick="loadDeviations('critical')">Critical only</button>
-          <button class="btn yel" onclick="loadDeviations('high')">High only</button>
-          <button class="btn" onclick="buildAllBaselines()">↻ Rebuild all baselines</button>
-          <span id="dev-status" style="font-size:12px;color:var(--muted)"></span>
-        </div>
-        <div class="card" style="margin-bottom:16px">
-          <div class="ch"><span class="ct">IPs with deviations — click to trail</span><span id="dev-ip-count"
-              style="font-size:11px;color:var(--muted)"></span></div>
-          <div class="cb" id="dev-ip-chips" style="min-height:40px"></div>
-        </div>
-        <div class="card">
-          <div class="ch"><span class="ct">All deviation alerts</span><span id="dev-total"
-              style="font-size:11px;color:var(--muted)"></span></div>
-          <div style="max-height:520px;overflow-y:auto" id="dev-list">
-            <div class="empty">Click "Load all deviations" to see baseline alerts</div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="ch"><span class="ct">Deviation type breakdown</span></div>
-          <div class="cb">
-            <div style="height:220px"><canvas id="ch-devbar"></canvas></div>
+          <div class="card dev-feed-card">
+            <div class="ch"><span class="ct">Deviation alerts</span><span id="dev-total" class="muted" style="font-size:11px"></span></div>
+            <div id="dev-list" class="dev-list">
+              <div class="empty" style="padding:24px;text-align:center;color:var(--muted)">Loading deviations…</div>
+            </div>
           </div>
         </div>
       </div>
@@ -2277,6 +2431,108 @@
           <div id="ai-inv-body" class="ai-body"></div>
         </div>
       </div>
+      <div id="page-incidents" class="page">
+        <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+          <button class="btn pri" onclick="loadIncidents()">↻ Refresh triage queue</button>
+          <span style="font-size:12px;color:var(--muted);align-self:center">Correlated campaigns and host incidents — sorted by priority</span>
+        </div>
+        <div id="incidents-body"><div class="card"><div class="cb empty">Loading…</div></div></div>
+      </div>
+
+      <div id="page-ueba" class="page">
+        <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+          <button class="btn pri" onclick="loadUEBA()">↻ Run UEBA sweep</button>
+          <span style="font-size:12px;color:var(--muted);align-self:center">Account takeover · Impossible travel · Peer outliers</span>
+        </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="ch"><span class="ct">Account Takeover</span><span id="ueba-ato-count" style="font-size:11px;color:var(--muted)"></span></div>
+          <div id="ueba-ato-body" class="cb"><span style="color:var(--muted);font-size:12px">Click Refresh to run</span></div>
+        </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="ch"><span class="ct">Impossible Travel</span><span id="ueba-travel-count" style="font-size:11px;color:var(--muted)"></span></div>
+          <div id="ueba-travel-body" class="cb"><span style="color:var(--muted);font-size:12px">Click Refresh to run</span></div>
+        </div>
+        <div class="card">
+          <div class="ch"><span class="ct">Peer Outliers</span><span id="ueba-peer-count" style="font-size:11px;color:var(--muted)"></span></div>
+          <div id="ueba-peer-body" class="cb"><span style="color:var(--muted);font-size:12px">Click Refresh to run</span></div>
+        </div>
+      </div>
+
+      <div id="page-killchain" class="page">
+        <div class="card" style="margin-bottom:16px">
+          <div class="cb" style="display:flex;gap:10px">
+            <input id="kc-ip" placeholder="Enter IP address…"
+              style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
+            <button class="btn pri" onclick="loadKillChain()">Analyse kill chain</button>
+            <button class="btn ai" onclick="groundedAI()">Grounded AI brief</button>
+          </div>
+        </div>
+        <div id="kc-panel" style="display:none">
+          <div id="kc-summary-card" class="card" style="margin-bottom:16px"></div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="ch"><span class="ct" id="kc-title">Attack Timeline</span></div>
+            <div id="kc-stages"></div>
+          </div>
+          <div id="kc-correlation" style="display:none" class="card" style="margin-bottom:16px"></div>
+          <div id="kc-ai-panel" style="display:none" class="ai-panel">
+            <div class="ai-header">
+              <span class="ai-badge">AI</span>
+              <span class="ai-title">ATT&amp;CK Grounded Brief</span>
+              <span class="ai-model" id="kc-ai-model"></span>
+            </div>
+            <div class="ai-body" id="kc-ai-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── SOC Natural Language Query ─────────────────────────────────── -->
+      <div id="page-nlquery" class="page">
+        <div class="term-panel">
+          <div class="term-title">SOC Query — Ask in Plain English</div>
+          <div class="term-grid">
+            <div class="term"><b>No SQL needed:</b> Type any security question. AI converts it to ClickHouse SQL and runs it on your live data instantly.</div>
+            <div class="term"><b>Full data access:</b> Searches across all logs, ML scores, baselines, deviations, and blocklist in one place.</div>
+            <div class="term"><b>Export ready:</b> Download any result as CSV for tickets, reports, or further analysis.</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="ch"><span class="ct">Ask a security question</span></div>
+          <div class="cb">
+            <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap">
+              <span style="font-size:11px;color:var(--muted);align-self:center">Quick:</span>
+              <span class="badge medium" style="cursor:pointer;font-size:11px" onclick="nlSetQ('Show all brute force attacks from outside India in the last 6 hours')">Brute force outside India</span>
+              <span class="badge medium" style="cursor:pointer;font-size:11px" onclick="nlSetQ('Which IPs have the most events in the last 24 hours? Show top 20')">Top IPs today</span>
+              <span class="badge high" style="cursor:pointer;font-size:11px" onclick="nlSetQ('Show all lateral movement events in the last 24 hours')">Lateral movement</span>
+              <span class="badge high" style="cursor:pointer;font-size:11px" onclick="nlSetQ('Which accounts are being targeted most in the last 7 days?')">Targeted accounts</span>
+              <span class="badge critical" style="cursor:pointer;font-size:11px" onclick="nlSetQ('List IPs with ML risk score above 70 that are not in the blocklist')">High risk unblocked</span>
+              <span class="badge critical" style="cursor:pointer;font-size:11px" onclick="nlSetQ('Show all events in the last hour with severity critical or high')">Critical last hour</span>
+            </div>
+            <div style="display:flex;gap:10px">
+              <input id="nl-input" placeholder="e.g. Show me all SSH brute force from Russia in the last 12 hours…"
+                style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 14px;color:var(--text);font-size:13px;outline:none"
+                onkeydown="if(event.key==='Enter')runNLQuery()" />
+              <button class="btn ai" onclick="runNLQuery()" id="nl-run-btn">Run Query</button>
+            </div>
+          </div>
+        </div>
+        <div id="nl-sql-block" style="display:none;margin-bottom:12px">
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:12px 16px">
+            <div style="font-size:10px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:1px">Generated SQL <span id="nl-timing" style="color:var(--ok);text-transform:none;letter-spacing:0"></span></div>
+            <pre id="nl-sql-text" style="margin:0;font-size:12px;color:var(--accent);font-family:var(--mono);white-space:pre-wrap;word-break:break-all"></pre>
+          </div>
+        </div>
+        <div id="nl-results" style="display:none" class="card">
+          <div class="ch">
+            <span class="ct" id="nl-result-title">Results</span>
+            <button class="btn" style="font-size:11px;padding:3px 10px" onclick="nlExportCSV()">Export CSV</button>
+          </div>
+          <div class="cb" style="overflow-x:auto;max-height:500px;overflow-y:auto">
+            <div id="nl-table-wrap"></div>
+          </div>
+        </div>
+        <div id="nl-error" style="display:none;padding:12px 16px;background:rgba(255,59,48,.08);border:1px solid var(--danger);border-radius:6px;color:var(--danger);font-size:13px;margin-top:8px"></div>
+      </div>
+
       <div id="page-ml" class="page">
         <div class="term-panel">
           <div class="term-title">How to read ML anomaly scoring</div>
@@ -2306,6 +2562,10 @@
           <div class="ch"><span class="ct">IP Risk Score</span></div>
           <div class="cb" id="score-body"></div>
         </div>
+        <div id="ai-ml-panel" style="display:none" class="ai-panel" >
+          <div class="ai-header"><span class="ai-badge">AI</span><span class="ai-title" id="ai-ml-title">ML Explanation</span><span class="ai-model" id="ai-ml-model"></span></div>
+          <div class="ai-body" id="ai-ml-body"></div>
+        </div>
         <div class="card">
           <div class="ch"><span class="ct">Detected anomalies — Isolation Forest + Baseline boost</span></div>
           <table class="tbl">
@@ -2320,103 +2580,6 @@
             </thead>
             <tbody id="anom-tbody"></tbody>
           </table>
-        </div>
-      </div>
-      <div id="page-mlintern" class="page">
-        <div class="term-panel">
-          <div class="term-title">What ML Intern controls</div>
-          <div class="term-grid">
-            <div class="term"><b>Hybrid retraining</b> watches time, log volume, and drift, but creates a candidate only
-              when drift is strong or no model exists.</div>
-            <div class="term"><b>Candidate first</b> means ML Intern never deploys a model automatically. It trains,
-              evaluates, and waits for analyst approval.</div>
-            <div class="term"><b>Rollback</b> restores the previous approved model if the new model behaves badly.</div>
-          </div>
-        </div>
-        <section class="mlintern-hero">
-          <div class="mlintern-command">
-            <div class="ops-kicker">Model Governance</div>
-            <div class="ops-title" id="mi-posture">Checking ML Intern</div>
-            <div class="ops-copy" id="mi-summary">Scheduler, retraining triggers, candidate models, and approval state
-              will appear here.</div>
-            <div class="ops-tape">
-              <span id="mi-time-trigger">TIME —</span>
-              <span id="mi-data-trigger">DATA —</span>
-              <span id="mi-drift-trigger">DRIFT —</span>
-              <span id="mi-running">IDLE</span>
-            </div>
-          </div>
-          <div class="ops-chip">
-            <div class="ops-chip-l">New Logs</div>
-            <div class="ops-chip-v mv-a" id="mi-new-logs">—</div>
-            <div class="ops-chip-s" id="mi-new-logs-threshold">threshold —</div>
-          </div>
-          <div class="ops-chip">
-            <div class="ops-chip-l">Drift Score</div>
-            <div class="ops-chip-v mv-w" id="mi-drift">—</div>
-            <div class="ops-chip-s" id="mi-drift-threshold">threshold —</div>
-          </div>
-          <div class="ops-chip">
-            <div class="ops-chip-l">Candidate</div>
-            <div class="ops-chip-v mv-p" id="mi-candidate-count">—</div>
-            <div class="ops-chip-s">models waiting/reviewed</div>
-          </div>
-        </section>
-        <div class="mlintern-actions">
-          <button class="btn pri" onclick="loadMLIntern()">Refresh status</button>
-          <button class="btn yel" onclick="manualMLInternRetrain()">Manual retrain</button>
-          <button class="btn red" onclick="rollbackMLIntern()">Rollback active model</button>
-          <span id="mi-action-status" style="font-size:12px;color:var(--muted);align-self:center"></span>
-        </div>
-        <div class="cg2">
-          <div class="card">
-            <div class="ch"><span class="ct">Latest Candidate</span><span id="mi-candidate-state"
-                style="font-size:11px;color:var(--muted)">—</span></div>
-            <div class="cb" id="mi-candidate-body">
-              <div class="empty">No candidate model loaded yet</div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="ch"><span class="ct">Retraining Decision</span><span id="mi-check-time"
-                style="font-size:11px;color:var(--muted)">—</span></div>
-            <div class="cb" id="mi-trigger-body">
-              <div class="empty">No scheduler check loaded yet</div>
-            </div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="ch"><span class="ct">Model Registry</span><span id="mi-model-count"
-              style="font-size:11px;color:var(--muted)">—</span></div>
-          <div class="cb" id="mi-model-list">
-            <div class="empty">No model versions loaded yet</div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="ch"><span class="ct">Latest Training Report</span><span id="mi-report-state"
-              style="font-size:11px;color:var(--muted)">—</span></div>
-          <div class="cb" id="mi-report-body">
-            <div class="empty">No training report yet</div>
-          </div>
-        </div>
-      </div>
-      <div id="page-clusters" class="page">
-        <div style="margin-bottom:16px">
-          <button class="btn pri" onclick="loadClusters()">Analyse clusters</button>
-          <span style="font-size:12px;color:var(--muted);margin-left:12px">Finds coordinated groups by /24 subnet</span>
-        </div>
-        <div id="clusters-body"></div>
-      </div>
-      <div id="page-blocklist" class="page">
-        <div style="display:flex;gap:10px;margin-bottom:16px">
-          <input id="block-ip" placeholder="Manually block an IP…"
-            style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
-          <button class="btn red" onclick="manualBlock()">Block</button>
-          <button class="btn" onclick="loadBlocklist()">↻ Refresh</button>
-        </div>
-        <div class="card">
-          <div class="ch"><span class="ct">Active blocklist</span><span id="bl-count"
-              style="font-size:11px;color:var(--muted)"></span></div>
-          <div class="cb" id="bl-body"></div>
         </div>
       </div>
       <div id="page-ingest" class="page">
@@ -2457,7 +2620,7 @@
         <div class="term-panel">
           <div class="term-title">SOC Reports</div>
           <div class="term-grid">
-            <div class="term"><b>Evidence-based:</b> Reports are generated from OpenSearch, Redis counters, ML scores, baseline alerts, and blocklist state.</div>
+            <div class="term"><b>Evidence-based:</b> Reports are generated from ClickHouse logs, ML scores, and baseline deviation alerts.</div>
             <div class="term"><b>Precise:</b> The report lists which IP caused what activity, the dominant threat types, and the operational response.</div>
             <div class="term"><b>Export-ready:</b> Preview, edit, and download the report as PDF, JSON, or Markdown for handoff or incident notes.</div>
           </div>
@@ -2510,21 +2673,147 @@
           </div>
         </div>
       </div>
+
+      <!-- ── User Management (admin only) ──────────────────────────────────── -->
+      <div id="page-users" class="page">
+        <div style="display:grid;gap:18px;padding:0 4px">
+          <div class="card" style="background:var(--bg2)">
+            <div class="ch"><span class="ct">External Tools</span><span style="font-size:11px;color:var(--muted)">Admin access only</span></div>
+            <div class="cb" style="display:flex;gap:12px;flex-wrap:wrap">
+              <button class="btn" style="border-color:#f46800;color:#f46800" onclick="openGrafana()">📊 Grafana Dashboard ↗</button>
+              <span style="font-size:11px;color:var(--muted);align-self:center">Grafana: <code>admin / tejas@123</code></span>
+            </div>
+          </div>
+          <div class="card">
+            <div class="ch"><span class="ct">Network Topology</span><span style="font-size:11px;color:var(--muted)">Upload Excel/CSV to enrich Kill Chain with real device names, switches, floors, owners</span></div>
+            <div class="cb">
+              <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+                Required column: <code>ip</code> or <code>ip_address</code>. Optional: <code>hostname</code>, <code>device_type</code>, <code>floor</code>, <code>department</code>, <code>switch_name</code>, <code>switch_port</code>, <code>vlan</code>, <code>owner</code>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                <input type="file" id="topo-file" accept=".xlsx,.xls,.csv" style="display:none" onchange="uploadTopology(this)"/>
+                <button class="btn pri" onclick="document.getElementById('topo-file').click()">📂 Upload Excel / CSV</button>
+                <button class="btn" onclick="loadTopologyStatus()">↻ Status</button>
+                <button class="btn" style="color:var(--danger);border-color:var(--danger)" onclick="clearTopology()">🗑 Clear</button>
+              </div>
+              <div id="topo-status" style="margin-top:10px;font-size:12px;color:var(--muted)">Loading status…</div>
+              <div id="topo-preview" style="margin-top:10px"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
+              <span class="ct">Registered Users</span>
+              <button class="btn pri" onclick="loadUsers()">↻ Refresh</button>
+            </div>
+            <div class="cb">
+              <div id="users-list"><span style="color:var(--muted)">Loading…</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="ch"><span class="ct">Create New User</span></div>
+            <div class="cb">
+              <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end">
+                <div>
+                  <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Username</label>
+                  <input id="nu-user" class="inp" placeholder="username" style="width:100%">
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Password</label>
+                  <input id="nu-pass" class="inp" type="password" placeholder="min 6 chars" style="width:100%">
+                </div>
+                <div>
+                  <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Role</label>
+                  <select id="nu-role" class="inp" style="width:110px">
+                    <option value="user">Analyst</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+                <button class="btn pri" onclick="createUser()" style="margin-top:0">Create User</button>
+              </div>
+              <div id="nu-err" style="color:var(--danger);font-size:12px;margin-top:8px;display:none"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Login Audit Log (admin only) ──────────────────────────────────── -->
+      <div id="page-auditlog" class="page">
+        <div style="display:grid;gap:18px;padding:0 4px">
+          <div id="grafana-banner-audit"></div>
+          <div class="card">
+            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
+              <span class="ct">User Activity Summary</span>
+              <button class="btn" onclick="loadAuditLog()">↻ Refresh</button>
+            </div>
+            <div class="cb" id="audit-summary"><span style="color:var(--muted)">Loading…</span></div>
+          </div>
+          <div class="card">
+            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
+              <span class="ct">Login Event Log</span>
+              <div style="display:flex;gap:8px">
+                <input id="audit-filter-user" class="inp" placeholder="Filter by user…" style="width:160px;font-size:12px">
+                <button class="btn" onclick="filterAudit()">Filter</button>
+                <button class="btn" onclick="loadAuditLog()">All</button>
+              </div>
+            </div>
+            <div class="cb" id="audit-events"><span style="color:var(--muted)">Loading…</span></div>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
   <div class="toast-wrap" id="toast-wrap"></div>
   <script>
-    let API = '/api';
-    let ML = '/api/ml';
-    let INTERN = '/api/ml-intern';
+    const API = '/api';
+    const ML  = '/api/ml';
 
-    // Auto-detect if running outside the main Nginx gateway (e.g. Live Server, direct file, or direct frontend port)
-    if (window.location.protocol === 'file:' || ['3000', '3001', '5500', '8080', '18180'].includes(window.location.port)) {
-      const host = window.location.hostname || 'localhost';
-      API = `http://${host}:18110/api`;
-      ML = `http://${host}:18111/api/ml`;
-      INTERN = `http://${host}:18112`; // ml-intern runs on root paths internally
+    function openGrafana() {
+      window.open('/grafana/d/cs-ingestion/cybersentinel-logs-explorer', '_blank');
     }
+    async function openClickHousePlay(ip) {
+      const q = ip
+        ? `SELECT ts, src_ip, dst_ip, dst_port, threat_type, severity, rule_level, mitre_tactic, mitre_technique, country, agent, username, proc_cmdline, full_log FROM cybersentinel.logs WHERE src_ip = '${ip}' ORDER BY ts DESC LIMIT 500 FORMAT JSONCompact`
+        : `SELECT ts, src_ip, dst_ip, dst_port, threat_type, severity, rule_level, mitre_tactic, mitre_technique, country, agent, username, rule FROM cybersentinel.logs ORDER BY ts DESC LIMIT 500 FORMAT JSONCompact`;
+      const params = new URLSearchParams({ user: 'default', password: 'tejas@123', query: q });
+      let data;
+      try {
+        const r = await fetch(`/ch/?${params}`);
+        if (!r.ok) { toast('ClickHouse error ' + r.status, 'warn'); return; }
+        data = await r.json();
+      } catch(e) { toast('ClickHouse fetch failed: ' + e.message, 'warn'); return; }
+      const cols = data.meta.map(m => m.name);
+      const rows = data.data;
+      const sevColor = s => ({'critical':'#e53935','high':'#fb8c00','medium':'#fdd835','low':'#43a047'}[s]||'#aaa');
+      const esc = v => String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const thead = `<tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>`;
+      const tbody = rows.map(row => {
+        const cells = row.map((v,i) => {
+          const col = cols[i];
+          if (col==='severity') return `<td style="color:${sevColor(v)};font-weight:600">${esc(v)}</td>`;
+          if (col==='ts') return `<td style="white-space:nowrap">${esc(String(v).replace('T',' ').substring(0,19))}</td>`;
+          if (col==='full_log'||col==='proc_cmdline') return `<td style="max-width:400px;word-break:break-all;font-size:11px">${esc(v)}</td>`;
+          return `<td>${esc(v)}</td>`;
+        }).join('');
+        return `<tr>${cells}</tr>`;
+      }).join('');
+      const title = ip ? `Logs — ${ip}` : 'Raw Logs — cybersentinel.logs';
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>body{margin:0;background:#0d1117;color:#c9d1d9;font-family:monospace;font-size:12px}
+h2{padding:12px 16px;margin:0;background:#161b22;border-bottom:1px solid #30363d;font-size:14px;color:#58a6ff}
+.info{padding:6px 16px;background:#161b22;border-bottom:1px solid #30363d;font-size:11px;color:#8b949e}
+.wrap{overflow:auto;max-height:calc(100vh - 70px)}
+table{border-collapse:collapse;width:100%;min-width:max-content}
+th{background:#21262d;color:#58a6ff;padding:6px 10px;text-align:left;position:sticky;top:0;border-bottom:2px solid #30363d;white-space:nowrap}
+td{padding:5px 10px;border-bottom:1px solid #21262d;vertical-align:top}
+tr:hover td{background:#161b22}</style></head>
+<body><h2>${title}</h2>
+<div class="info">${rows.length} rows · ${cols.length} columns · newest first</div>
+<div class="wrap"><table><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>
+</body></html>`;
+      const w = window.open('', '_blank');
+      w.document.open(); w.document.write(html); w.document.close();
+    }
+
 
     let charts = {}, curIP = '';
 
@@ -2536,20 +2825,25 @@
         if (n.getAttribute('onclick') && n.getAttribute('onclick').includes("'" + name + "'")) n.classList.add('active');
       });
       const T = {
-        overview: 'Overview', trail: 'IP Trail', livealerts: 'Live Alerts',
+        overview: 'Overview', trail: 'IP Trail', logs: 'Logs Explorer',
         deviations: 'Baseline Deviations', bslexplorer: 'Baseline Explorer',
-        aiinvestigate: 'AI Investigator', ml: 'ML Anomaly', mlintern: 'ML Intern', clusters: 'Subnet Clusters',
-        blocklist: 'Blocklist', ingest: 'Ingest Logs', reports: 'Reports'
+        aiinvestigate: 'AI Investigator', nlquery: 'SOC Query', ml: 'ML Anomaly',
+        incidents: 'Incident Triage', ueba: 'UEBA — Users & Entities', killchain: 'ATT&CK Kill Chain',
+        ingest: 'Ingest Logs', reports: 'Reports',
+        users: 'User Management', auditlog: 'Login Audit Log'
       };
       document.getElementById('page-title').textContent = T[name] || name;
-      if (name === 'overview') refreshAll();
-      if (name === 'livealerts') loadLiveAlerts();
-      if (name === 'blocklist') loadBlocklist();
-      if (name === 'clusters') loadClusters();
+      document.body.dataset.page = name;
+      if (name === 'overview') { refreshAll(); loadResilience(); }
+      if (name === 'logs') loadLogs();
       if (name === 'ml') loadAnomalies();
-      if (name === 'mlintern') loadMLIntern();
       if (name === 'deviations') loadDeviations();
       if (name === 'reports') refreshReportEndpoints();
+      if (name === 'incidents') loadIncidents();
+      if (name === 'ueba') loadUEBA();
+      if (name === 'killchain') { /* loaded on-demand via goKillChain or manual input */ }
+      if (name === 'users') { loadUsers(); loadTopologyStatus(); }
+      if (name === 'auditlog') loadAuditLog();
     }
     function toast(msg, type = 'ok') {
       const w = document.getElementById('toast-wrap');
@@ -2557,24 +2851,58 @@
       el.className = 'toast ' + type; el.textContent = msg;
       w.appendChild(el); setTimeout(() => el.remove(), 3500);
     }
+    function _ah() {
+      const t = _authToken();
+      return t ? { 'Authorization': 'Bearer ' + t } : {};
+    }
     async function get(url) {
-      try { const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); }
-      catch (e) { toast('API: ' + e.message, 'err'); return null; }
+      try {
+        const r = await fetch(url, { headers: _ah() });
+        if (r.status === 401) { csLogout(); return null; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return await r.json();
+      } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
     async function post(url, body = null) {
       try {
-        const opts = { method: 'POST' };
-        if (body) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(body); }
-        const r = await fetch(url, opts); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json();
+        const opts = { method: 'POST', headers: { ..._ah() } };
+        if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+        const r = await fetch(url, opts);
+        if (r.status === 401) { csLogout(); return null; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return await r.json();
       } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
     async function postForm(url, fd) {
-      try { const r = await fetch(url, { method: 'POST', body: fd }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); }
-      catch (e) { toast('API: ' + e.message, 'err'); return null; }
+      try {
+        const r = await fetch(url, { method: 'POST', body: fd, headers: _ah() });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return await r.json();
+      } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
     async function del(url) {
-      try { const r = await fetch(url, { method: 'DELETE' }); return await r.json(); }
-      catch (e) { toast('API: ' + e.message, 'err'); return null; }
+      try {
+        const r = await fetch(url, { method: 'DELETE', headers: _ah() });
+        return await r.json();
+      } catch (e) { toast('API: ' + e.message, 'err'); return null; }
+    }
+    async function authPost(url, body = null) {
+      const t = _authToken();
+      try {
+        const opts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } };
+        if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+        const r = await fetch(url, opts);
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'HTTP ' + r.status); }
+        return await r.json();
+      } catch (e) { toast('Auth: ' + e.message, 'err'); return null; }
+    }
+    async function authDel(url) {
+      const t = _authToken();
+      try {
+        const r = await fetch(url, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + t } });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'HTTP ' + r.status); }
+        return await r.json();
+      } catch (e) { toast('Auth: ' + e.message, 'err'); return null; }
     }
     const COLORS = ['#f85149', '#e3b341', '#58a6ff', '#3fb950', '#bc8cff', '#f0883e', '#39d353', '#ffa657', '#79c0ff', '#d2a8ff'];
     function pie(id, counts) {
@@ -2658,18 +2986,15 @@
       const totalLogs = Number(s.total_logs || 0);
       const hotCount = (s.hot_ips || []).length;
       const criticalCount = (s.critical_ips || []).length;
-      const blockedCount = (s.blocklist || []).length;
       const alertCount = Number(s.total_alerts || 0);
-      const threatIndex = Math.max(0, Math.min(100, Math.round((criticalCount * 2.6) + (hotCount * .18) + (alertCount * .01) + (blockedCount * .16))));
+      const threatIndex = Math.max(0, Math.min(100, Math.round((criticalCount * 2.6) + (hotCount * .18) + (alertCount * .01))));
       document.getElementById('m-total').textContent = s.total_logs.toLocaleString();
       document.getElementById('m-ips').textContent = s.unique_ips.toLocaleString();
       document.getElementById('m-hot').textContent = hotCount;
       document.getElementById('m-balerts').textContent = alertCount;
       document.getElementById('m-crit').textContent = criticalCount;
-      document.getElementById('m-blocked').textContent = blockedCount;
       document.getElementById('ops-total').textContent = totalLogs.toLocaleString();
       document.getElementById('ops-critical').textContent = criticalCount;
-      document.getElementById('ops-blocked').textContent = blockedCount;
       document.getElementById('threat-index').textContent = threatIndex;
       document.getElementById('threat-dial').style.setProperty('--risk', threatIndex);
       document.getElementById('dial-hot').textContent = 'HOT ' + hotCount.toLocaleString();
@@ -2685,7 +3010,6 @@
       setSignal('sig-hot', hotCount, Math.max(50, hotCount));
       setSignal('sig-critical', criticalCount, Math.max(25, criticalCount));
       setSignal('sig-alerts', alertCount, Math.max(100, alertCount));
-      setSignal('sig-blocked', blockedCount, Math.max(50, blockedCount));
       const coverage = s.unique_ips ? Math.min(100, Math.round((hotCount / Math.max(s.unique_ips, 1)) * 100)) : 0;
       const covEl = document.getElementById('sig-coverage');
       const covValue = document.getElementById('sig-coverage-v');
@@ -2744,12 +3068,6 @@
           ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block"></span> ML ready'
           : '<span style="width:6px;height:6px;border-radius:50%;background:var(--warn);display:inline-block"></span> Not trained';
       }
-      const mih = await get(`${INTERN}/health`);
-      if (mih) {
-        document.getElementById('mlintern-status').innerHTML = mih.scheduler_running
-          ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--purple);display:inline-block"></span> Intern ready'
-          : '<span style="width:6px;height:6px;border-radius:50%;background:var(--warn);display:inline-block"></span> Intern idle';
-      }
     }
     function doSearch() { const q = document.getElementById('ip-search').value.trim(); if (!q) return; goTrail(q); }
     function goTrail(ip) { nav('trail'); document.getElementById('trail-input').value = ip; loadTrail(); }
@@ -2773,7 +3091,7 @@
       const sv = sum.severities ? Object.entries(sum.severities).sort((a, b) => b[1] - a[1])[0] : ['low', 0];
       const b = document.getElementById('t-sev-badge');
       b.className = 'badge ' + (sv ? sv[0] : 'low'); b.textContent = sv ? sv[0] : 'low';
-      document.getElementById('t-blocked-badge').style.display = sum.is_blocked ? 'inline-block' : 'none';
+
       document.getElementById('t-badges').innerHTML = Object.entries(sum.threat_types || {}).map(([k, v]) => `<span class="badge medium" style="margin-bottom:4px">${k.replace(/_/g, ' ')}: ${v}</span>`).join('');
       document.getElementById('ai-trail-panel').style.display = 'none';
       if (trail && trail.events) {
@@ -3007,7 +3325,7 @@
       if (!curIP) return;
       const d = await get(`${API}/intel/${curIP}`); if (!d) return;
       document.getElementById('intel-panel').style.display = 'block';
-      let h = `<b>IP:</b> ${d.ip} &nbsp;|&nbsp; <b>Known bad:</b> ${d.is_known_bad ? '<span style="color:var(--danger)">YES</span>' : 'No'} &nbsp;|&nbsp; <b>Blocked:</b> ${d.in_blocklist ? '<span style="color:var(--danger)">YES</span>' : 'No'}<br>`;
+      let h = `<b>IP:</b> ${d.ip} &nbsp;|&nbsp; <b>Known bad:</b> ${d.is_known_bad ? '<span style="color:var(--danger)">YES</span>' : 'No'}<br>`;
       if (d.abuseipdb) { const a = d.abuseipdb; h += `<b>AbuseIPDB:</b> <span style="color:${a.score > 50 ? 'var(--danger)' : a.score > 25 ? 'var(--warn)' : 'var(--ok)'}">${a.score}/100</span> &nbsp;|&nbsp; <b>Country:</b> ${a.country} &nbsp;|&nbsp; <b>ISP:</b> ${a.isp} &nbsp;|&nbsp; <b>Tor:</b> ${a.is_tor ? 'Yes' : 'No'}`; }
       else h += `<span style="color:var(--muted)">AbuseIPDB not configured</span>`;
       document.getElementById('intel-body').innerHTML = h;
@@ -3042,24 +3360,46 @@
       } else h = '<span style="color:var(--warn)">No baseline yet. Needs 10+ events. Use "Force rebuild" or wait for auto-build.</span>';
       document.getElementById('bsl-body').innerHTML = h;
     }
-    async function blockCurrent() { if (!curIP) return; await post(`${API}/blocklist/add`, { ip: curIP }); toast(curIP + ' blocked', 'ok'); }
-    async function loadLiveAlerts() {
-      const hot = await get(`${API}/hot-ips`); if (!hot) return;
-      const all = [];
-      for (const h of hot.slice(0, 15)) {
-        const t = await get(`${API}/trail/${h.ip}?limit=20`);
-        if (t && t.events) t.events.forEach(e => all.push({ ...e, _ip: h.ip }));
-      }
-      all.sort((a, b) => (b.ts || b['@timestamp'] || '').localeCompare(a.ts || a['@timestamp'] || ''));
-      document.getElementById('live-tbody').innerHTML = all.slice(0, 100).map(e => `<tr>
-    <td style="font-size:11px">${(e.ts || e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}</td>
-    <td style="color:var(--accent);cursor:pointer" onclick="goTrail('${e._ip}')">${e._ip}</td>
-    <td>${(e.threat_type || '').replace(/_/g, ' ')}</td>
-    <td style="font-size:11px;color:var(--muted);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(e.rule || '').substring(0, 55)}</td>
-    <td><span class="badge ${e.severity || 'low'}">${e.severity || 'low'}</span></td>
-    <td style="font-size:11px">${e.dst_ip || '—'}</td>
-  </tr>`).join('');
+    // ── Logs Explorer (time-range + severity filtered raw logs) ──────────
+    let logsRange = { mins: 0, from: '', to: '' };
+    function setLogsRange(btn, mins) {
+      document.querySelectorAll('#page-logs .logs-ranges .chip').forEach(c => c.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      logsRange = { mins, from: '', to: '' };
+      document.getElementById('logs-from').value = '';
+      document.getElementById('logs-to').value = '';
+      loadLogs();
     }
+    function applyLogsCustom() {
+      const f = document.getElementById('logs-from').value;
+      const t = document.getElementById('logs-to').value;
+      if (!f && !t) { toast('Pick a from/to date', 'warn'); return; }
+      document.querySelectorAll('#page-logs .logs-ranges .chip').forEach(c => c.classList.remove('active'));
+      logsRange = { mins: 0, from: f, to: t };
+      loadLogs();
+    }
+    async function loadLogs() {
+      const lvl = document.getElementById('logs-minlevel').value || 1;
+      let q = `${API}/logs?limit=1000&min_level=${lvl}`;
+      if (logsRange.mins) q += `&minutes=${logsRange.mins}`;
+      if (logsRange.from) q += `&start=${encodeURIComponent(logsRange.from)}`;
+      if (logsRange.to) q += `&end=${encodeURIComponent(logsRange.to)}`;
+      const r = await get(q);
+      if (!r) return;
+      document.getElementById('logs-count').textContent = `${r.count} log${r.count === 1 ? '' : 's'}`;
+      const rows = (r.logs || []).map(e => `<tr>
+        <td style="font-size:11px;white-space:nowrap">${(e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}</td>
+        <td style="color:var(--accent);cursor:pointer" onclick="goTrail('${e.src_ip}')">${e.src_ip || '—'}</td>
+        <td>${(e.threat_type || '').replace(/_/g, ' ')}</td>
+        <td><span class="badge ${e.severity || 'low'}">${e.severity || 'low'}</span></td>
+        <td style="text-align:center">${e.rule_level ?? ''}</td>
+        <td style="font-size:11px">${e.country || '—'}</td>
+        <td style="font-size:11px;color:var(--muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(e.rule || '').substring(0, 80)}</td>
+      </tr>`).join('');
+      document.getElementById('logs-tbody').innerHTML = rows ||
+        '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">No logs in this range</td></tr>';
+    }
+
     const WHY = {
       port_shift: {
         why: "This IP has a history of connecting to specific ports. It just connected to a port it has <b>never used before</b>. Attackers change ports when pivoting laterally — moving from one system to another after initial access.",
@@ -3240,39 +3580,79 @@
       box.innerHTML = `<div class="ai-inline"><b style="color:var(--ai)">AI:</b>${formatAIText(r.explanation)}</div>`;
       btn.textContent = 'Done';
     }
+    // ── Deviations (modern, severity-grouped, filterable) ────────────────
+    let devAlerts = [];
+    let devFilter = { sev: null };
     async function loadDeviations(sev = null) {
-      document.getElementById('dev-status').textContent = 'Loading…';
-      const url = sev ? `${API}/alerts?severity=${sev}&limit=500` : `${API}/alerts?limit=500`;
-      const r = await get(url); if (!r) return;
-      document.getElementById('dev-total').textContent = r.total + ' total';
-      document.getElementById('dev-status').textContent = r.alerts.length + ' shown';
+      if (sev !== null) devFilter.sev = sev;
+      const el = document.getElementById('dev-status');
+      if (el) el.textContent = 'Loading…';
+      const r = await get(`${API}/alerts?limit=500`);
+      if (!r) { if (el) el.textContent = 'Failed to load'; return; }
+      devAlerts = r.alerts || [];
+      if (el) el.textContent = `${devAlerts.length} alerts`;
+      const t = document.getElementById('dev-total');
+      if (t) t.textContent = `${r.total || devAlerts.length} total`;
+      renderDeviations();
+    }
+    function setDevSev(sev) { devFilter.sev = sev; renderDeviations(); }
+    function renderDeviations() {
+      const rank = { critical: 4, high: 3, medium: 2, low: 1 };
+      const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+      devAlerts.forEach(a => { const s = a.severity || 'low'; if (counts[s] != null) counts[s]++; });
+      // severity summary tiles
+      const order = [['critical', 'Critical'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low']];
+      document.getElementById('dev-sevbar').innerHTML =
+        `<button class="dev-sev-tile all ${!devFilter.sev ? 'active' : ''}" onclick="setDevSev(null)"><span class="dst-count">${devAlerts.length}</span><span class="dst-label">All</span></button>` +
+        order.map(([k, label]) => `<button class="dev-sev-tile ${k} ${devFilter.sev === k ? 'active' : ''}" onclick="setDevSev('${k}')"><span class="dst-count">${counts[k]}</span><span class="dst-label">${label}</span></button>`).join('');
+      // filter
+      const q = (document.getElementById('dev-search')?.value || '').toLowerCase().trim();
+      let list = devAlerts.slice();
+      if (devFilter.sev) list = list.filter(a => (a.severity || 'low') === devFilter.sev);
+      if (q) list = list.filter(a => (a.ip || '').includes(q) || (a.type || '').toLowerCase().includes(q));
+      list.sort((a, b) => (rank[b.severity] || 0) - (rank[a.severity] || 0) || (b.ts || '').localeCompare(a.ts || ''));
+      // affected IPs column
       const byIP = {};
-      r.alerts.forEach(a => { byIP[a.ip] = byIP[a.ip] || []; byIP[a.ip].push(a); });
-      const sorted = Object.entries(byIP).sort((a, b) => b[1].length - a[1].length);
-      const sevRank = { critical: 4, high: 3, medium: 2, low: 1 };
-      document.getElementById('dev-ip-count').textContent = sorted.length + ' IPs';
-      document.getElementById('dev-ip-chips').innerHTML = sorted.length
-        ? `<div class="dev-chip-grid">${sorted.map(([ip, als]) => {
-          const topSeverity = als.map(a => a.severity || 'low').sort((a, b) => (sevRank[b] || 0) - (sevRank[a] || 0))[0] || 'low';
-          const typeCounts = {};
-          als.forEach(a => { const t = a.type || 'unknown'; typeCounts[t] = (typeCounts[t] || 0) + 1; });
-          const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
-          return `<button class="ip-chip dev-ip-card ${topSeverity}" onclick="goTrail('${ip}')" title="${als.length} deviation alerts for ${ip}">
-            <span class="dev-chip-ip">${ip}</span>
-            <span class="dev-chip-meta">${als.length} alerts · ${topType.replace(/_/g, ' ')}</span>
-            <span class="dev-chip-sev">${topSeverity}</span>
-          </button>`;
-        }).join('')}</div>`
-        : '<span style="color:var(--muted);font-size:12px">No deviations yet — build baselines first</span>';
-      const typeCounts = {};
-      r.alerts.forEach(a => { const t = a.type || 'unknown'; typeCounts[t] = (typeCounts[t] || 0) + 1; });
-      if (Object.keys(typeCounts).length) {
-        const entries = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).slice(0, 12);
-        bar('ch-devbar', entries.map(e => e[0].replace(/_/g, ' ')), entries.map(e => e[1]), '#e3b341', true);
-      }
-      document.getElementById('dev-list').innerHTML = r.alerts.length
-        ? r.alerts.map(a => renderAlert(a, true)).join('')
-        : '<div class="empty">No deviation alerts found. Upload logs → Build baselines → Check here.</div>';
+      list.forEach(a => { (byIP[a.ip] = byIP[a.ip] || []).push(a); });
+      const ips = Object.entries(byIP).sort((x, y) => y[1].length - x[1].length);
+      document.getElementById('dev-ip-count').textContent = `${ips.length}`;
+      document.getElementById('dev-ip-list').innerHTML = ips.length ? ips.map(([ip, als]) => {
+        const top = als.map(a => a.severity || 'low').sort((a, b) => (rank[b] || 0) - (rank[a] || 0))[0] || 'low';
+        return `<div class="dev-ip-row ${top}" onclick="goTrail('${ip}')"><span class="dev-ip-dot"></span><span class="dev-ip-addr">${ip}</span><span class="dev-ip-count">${als.length}</span></div>`;
+      }).join('') : '<div class="muted" style="padding:14px;font-size:12px">No IPs match</div>';
+      // alert feed
+      document.getElementById('dev-list').innerHTML = list.length ?
+        list.map(renderDevCard).join('') :
+        '<div class="empty" style="padding:24px;text-align:center;color:var(--muted)">No deviations match this filter</div>';
+    }
+    function renderDevCard(a) {
+      const sc = a.severity || 'low';
+      const exp = alertWhy(a.type, sc);
+      const when = (a.ts || '').substring(0, 19).replace('T', ' ');
+      const det = a.details ? Object.entries(a.details).slice(0, 4).map(([k, v]) =>
+        `<span class="dev-detchip"><b>${k.replace(/_/g, ' ')}</b> ${Array.isArray(v) ? v.slice(0, 3).join(', ') : v}</span>`).join('') : '';
+      return `<div class="dev-card ${sc}">
+        <div class="dev-card-head">
+          <span class="dev-card-ip" onclick="goTrail('${a.ip}')">${a.ip}</span>
+          <span class="dev-card-type">${(a.type || '').replace(/_/g, ' ')}</span>
+          <span class="badge ${sc}">${sc}</span>
+          <span class="dev-card-time">${when}</span>
+        </div>
+        <div class="dev-sec what">
+          <span class="dev-sec-tag">What happened</span>
+          <p>${a.message || ''}</p>
+        </div>
+        <div class="dev-grid2">
+          <div class="dev-sec why"><span class="dev-sec-tag">Why it matters</span><p>${exp.why}</p></div>
+          <div class="dev-sec act"><span class="dev-sec-tag">Recommended action</span><p>${exp.action}</p></div>
+        </div>
+        ${det ? `<div class="dev-detgrid">${det}</div>` : ''}
+        <div class="dev-card-foot">
+          <button class="btn ai" onclick="aiExplainAlert('${a.ip}','${a.type}',this)">✦ AI summary</button>
+          <button class="btn" onclick="goTrail('${a.ip}')">View IP trail →</button>
+        </div>
+        <div id="ai-alert-${a.ip}-${a.type}" class="dev-ai-box" style="display:none"></div>
+      </div>`;
     }
     async function buildAllBaselines() {
       document.getElementById('dev-status').textContent = 'Building baselines…';
@@ -3333,20 +3713,22 @@
       document.getElementById('ai-inv-model').textContent = '';
       aiLoading(body);
 
+      const fetchDirect = async url => { try { const r = await fetch(url, { headers: _ah() }); return r.ok ? await r.json() : null; } catch { return null; } };
+
       const [intel, bslRes, alr, sum, mlRes, aiRes] = await Promise.all([
-        get(`${API}/intel/${ip}`),
-        get(`${API}/baseline/${ip}`),
-        get(`${API}/alerts/${ip}`),
-        get(`${API}/trail/${ip}/summary`),
-        get(`${ML}/score/${ip}`),
-        get(`${API}/explain/${ip}`)
+        fetchDirect(`${API}/intel/${ip}`),
+        fetchDirect(`${API}/baseline/${ip}`),
+        fetchDirect(`${API}/alerts/${ip}`),
+        fetchDirect(`${API}/trail/${ip}/summary`),
+        fetchDirect(`${ML}/score/${ip}`),
+        fetchDirect(`${API}/explain/${ip}`)
       ]);
 
-      const ai = aiRes || { explanation: "AI unavailable." };
-      const d = intel || { ip: ip, is_known_bad: false, in_blocklist: false, abuseipdb: null };
+      const ai = aiRes || { explanation: null };
+      const d = intel || { ip: ip, is_known_bad: false, abuseipdb: null };
       const b = (bslRes && bslRes.found) ? bslRes.baseline : null;
       const t = sum || { total: 0, first_seen: '', last_seen: '', threat_types: {} };
-      const ml = mlRes || { risk_score: 0, confidence: 'low', anomaly_score: 0 };
+      const ml = mlRes || { risk_score: 0, anomaly_score: 0, is_anomaly: false };
 
       const tt = t.threat_types ? Object.entries(t.threat_types).sort((a,b)=>b[1]-a[1])[0] : null;
       const threatStr = tt ? `${tt[0].replace(/_/g, ' ')}: ${tt[1]}` : 'none';
@@ -3361,7 +3743,7 @@
           <div class="cb" style="line-height:2.0;font-size:13px">
             <b>IP:</b> ${d.ip}<br>
             <b>Type:</b> ${d.ip.startsWith('10.')||d.ip.startsWith('192.') ? 'Internal' : 'External'}<br>
-            <b>Blocked:</b> ${d.in_blocklist ? 'Yes' : 'No'}<br>
+
             <b>Known bad subnet:</b> ${d.is_known_bad ? 'Yes' : 'No'}
           </div></div>
 
@@ -3386,7 +3768,7 @@
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:15px;">
           <div class="card" style="margin:0;border-left:2px solid var(--accent)"><div class="ch" style="border:none;padding-bottom:5px"><span class="ct" style="color:var(--muted)">ML ANALYSIS</span></div>
           <div class="cb" style="font-size:12px;line-height:1.8">
-            ${mlRes ? `Anomaly Score: ${ml.anomaly_score.toFixed(3)}<br>Confidence: ${ml.confidence}` : 'No ML score available. Train the model first.'}
+            ${mlRes ? `Risk: <b>${ml.risk_score}/100</b><br>Anomaly score: ${(ml.anomaly_score||0).toFixed(3)}<br>Anomaly: ${ml.is_anomaly ? '<span style="color:var(--danger)">YES</span>' : 'No'}` : 'No ML score. Train the model first.'}
           </div></div>
 
           <div class="card" style="margin:0;border-left:2px solid var(--ok)"><div class="ch" style="border:none;padding-bottom:5px"><span class="ct" style="color:var(--muted)">EVENT TRAIL</span></div>
@@ -3409,42 +3791,93 @@
         </div>
 
         <div style="margin-top:10px">
-          <h3 style="font-size:12px;color:var(--ai);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">🤖 AI ANALYSIS</h3>
-          <div style="font-size:14px;line-height:1.7;color:var(--text);background:rgba(255,255,255,0.02);padding:15px;border-radius:8px">
-            ${formatAIText(ai.explanation)}
+          <div class="ai-panel">
+            <div class="ai-header"><span class="ai-badge">AI</span><span class="ai-title">AI Analysis</span></div>
+            <div class="ai-body">
+              ${ai.explanation ? formatReportText(ai.explanation) : '<span style="color:var(--warn)">AI analysis unavailable — check AI_API_KEY in .env</span>'}
+            </div>
           </div>
         </div>
       </div>`;
 
       body.innerHTML = html;
-      document.getElementById('ai-inv-model').textContent = (ai.model || 'AI model') + ' · ' + String(ai.generated_at || '').substring(0, 19);
+      document.getElementById('ai-inv-model').textContent = ai.model ? `${ai.model} · ${toIST(ai.generated_at)}` : '';
       toast('Full investigation ready', 'ai');
     }
     async function aiMLExplain() {
       const ip = document.getElementById('ai-ip-input').value.trim(); if (!ip) return;
-      await aiMLExplainFor(ip);
-    }
-    async function aiMLExplainFromInput() {
-      const ip = document.getElementById('ml-ip').value.trim(); if (!ip) return;
-      await aiMLExplainFor(ip);
-    }
-    async function aiMLExplainFor(ip) {
-      nav('aiinvestigate');
-      document.getElementById('ai-ip-input').value = ip;
       const panel = document.getElementById('ai-investigate-panel');
       const body = document.getElementById('ai-inv-body');
       panel.style.display = 'block';
       document.getElementById('ai-inv-title').textContent = 'ML explanation — ' + ip;
       document.getElementById('ai-inv-model').textContent = '';
       aiLoading(body);
-      const r = await get(`${API}/explain/ml/${ip}`);
-      if (!r) {
-        body.innerHTML = '<span style="color:var(--warn)">No AI ML explanation available yet. Score or train the ML model first, and make sure the AI key is configured.</span>';
-        return;
+      // Score first so explain endpoint always has data
+      try { await fetch(`${ML}/score/${ip}`, { headers: _ah() }); } catch (_) {}
+      try {
+        const resp = await fetch(`${API}/explain/ml/${ip}`, { headers: _ah() });
+        if (!resp.ok) {
+          body.innerHTML = `<span style="color:var(--warn)">Error ${resp.status} — ${resp.status===404?'No ML score found. Use the ML page to score this IP first.':'Could not generate explanation.'}</span>`;
+          return;
+        }
+        const r = await resp.json();
+        document.getElementById('ai-inv-model').textContent = r.model ? `${r.model} · ${toIST(r.generated_at)}` : '';
+        body.innerHTML = formatReportText(r.explanation || '');
+        toast('AI ML explanation ready', 'ai');
+      } catch (e) {
+        body.innerHTML = `<span style="color:var(--warn)">Request failed: ${e.message}</span>`;
       }
-      document.getElementById('ai-inv-model').textContent = (r.model || 'AI model') + ' · ' + String(r.generated_at || '').substring(0, 19);
-      body.innerHTML = formatAIText(r.explanation);
-      toast('AI ML explanation ready', 'ai');
+    }
+    async function aiMLExplainFromInput() {
+      const ip = document.getElementById('ml-ip').value.trim(); if (!ip) return;
+      await aiMLExplainFor(ip);
+    }
+    async function aiMLExplainFor(ip) {
+      nav('ml');
+      document.getElementById('ml-ip').value = ip;
+
+      // Ensure the deterministic score panel is shown first
+      const scorePanel = document.getElementById('score-panel');
+      const aiPanel = document.getElementById('ai-ml-panel');
+      const aiBody = document.getElementById('ai-ml-body');
+      aiPanel.style.display = 'block';
+      document.getElementById('ai-ml-title').textContent = 'AI ML explanation — ' + ip;
+      document.getElementById('ai-ml-model').textContent = '';
+      aiLoading(aiBody);
+
+      // Score the IP first (direct fetch so we don't silently fail)
+      try {
+        const sr = await fetch(`${ML}/score/${ip}`, { headers: _ah() });
+        if (sr.ok) {
+          const sd = await sr.json();
+          if (sd && sd.risk_score !== undefined) {
+            scorePanel.style.display = 'block';
+            document.getElementById('score-body').innerHTML = `
+              <div style="display:flex;gap:20px;align-items:center;margin-bottom:10px">
+                <div><div style="font-size:11px;color:var(--muted)">Risk Score</div><div style="font-size:28px;font-weight:700;color:${sd.risk_score>70?'var(--danger)':sd.risk_score>40?'var(--warn)':'var(--ok)'}">${sd.risk_score}/100</div></div>
+                <div><div style="font-size:11px;color:var(--muted)">Anomaly</div><div style="font-size:18px;font-weight:700;color:${sd.is_anomaly?'var(--danger)':'var(--ok)'}">${sd.is_anomaly?'YES':'NO'}</div></div>
+                <div><div style="font-size:11px;color:var(--muted)">Confidence</div><div style="font-size:28px;font-weight:700;color:${confidenceColor(computeConfidence(sd))}">${computeConfidence(sd)}/100</div><div style="font-size:11px;color:var(--muted)">${confidenceLabel(computeConfidence(sd))}</div></div>
+              </div>
+              ${sd.anomaly_score !== undefined && sd.risk_score !== undefined ? explainMLScore(sd) : ''}
+              <div style="margin-top:12px"><button class="btn ai" onclick="aiMLExplainFor('${ip}')">Ask AI why this score</button></div>`;
+          }
+        }
+      } catch (_) {}
+
+      // Now call the AI explain endpoint
+      try {
+        const resp = await fetch(`${API}/explain/ml/${ip}`, { headers: _ah() });
+        if (!resp.ok) {
+          aiBody.innerHTML = `<span style="color:var(--warn)">Error ${resp.status} — ${resp.status===404?'No ML score found. Try scoring the IP first.':'Could not generate explanation.'}</span>`;
+          return;
+        }
+        const r = await resp.json();
+        document.getElementById('ai-ml-model').textContent = r.model ? `${r.model} · ${toIST(r.generated_at)}` : '';
+        aiBody.innerHTML = formatReportText(r.explanation || '');
+        toast('AI ML explanation ready', 'ai');
+      } catch (e) {
+        aiBody.innerHTML = `<span style="color:var(--warn)">Request failed: ${e.message}</span>`;
+      }
     }
     async function aiAnalysePattern() {
       const text = document.getElementById('ai-pattern-input').value.trim(); if (!text) return;
@@ -3462,184 +3895,515 @@
       body.innerHTML = formatAIText(r.explanation);
       toast('Pattern analysis ready', 'ai');
     }
-    async function blockIPDirect(ip) {
-      await post(`${API}/blocklist/add`, { ip });
-      toast(ip + ' blocked', 'ok');
+    // ── Natural Language SOC Query ────────────────────────────────────────────
+    let _nlLastRows = [], _nlLastCols = [];
+    function nlSetQ(q) {
+      document.getElementById('nl-input').value = q;
+      runNLQuery();
     }
-    async function trainModel() {
-      document.getElementById('train-status').textContent = 'Training…';
-      const r = await post(`${ML}/train`);
-      if (r) { document.getElementById('train-status').textContent = `Trained on ${r.ip_count} IPs · ${r.anomalies} anomalies`; toast('Model trained!', 'ok'); await loadAnomalies(); }
-    }
-    async function trainModelQuick() {
-      document.getElementById('qa-status').textContent = 'Training model…';
-      const r = await post(`${ML}/train`);
-      if (r) { document.getElementById('qa-status').textContent = `Model trained — ${r.anomalies} anomalies found`; toast('Model trained!', 'ok'); }
-    }
-
-    function fmtNumber(v) {
-      if (v === null || v === undefined || v === '') return '—';
-      const n = Number(v);
-      return Number.isFinite(n) ? n.toLocaleString() : String(v);
-    }
-    function fmtPct(v) {
-      if (v === null || v === undefined || v === '') return '—';
-      const n = Number(v);
-      return Number.isFinite(n) ? (n * 100).toFixed(2) + '%' : String(v);
-    }
-    function fmtModelTime(value) {
-      if (!value) return '—';
-      return String(value).substring(0, 19).replace('T', ' ');
-    }
-    function triggerBadge(label, active) {
-      return `<span class="mi-trigger ${active ? 'on' : 'off'}">${label}: ${active ? 'ON' : 'off'}</span>`;
-    }
-    function modelStatusBadge(status) {
-      const s = status || 'unknown';
-      const cls = s === 'active' ? 'low' : s === 'candidate' ? 'high' : s === 'previous' ? 'medium' : 'blocked';
-      return `<span class="badge ${cls}">${s}</span>`;
-    }
-    function renderMetricTile(label, value, sub = '') {
-      return `<div class="mi-mini">
-        <div class="mi-mini-l">${label}</div>
-        <div class="mi-mini-v">${value}</div>
-        ${sub ? `<div class="mi-mini-s">${sub}</div>` : ''}
-      </div>`;
-    }
-    function renderMLInternCandidate(model) {
-      if (!model) return '<div class="empty">No candidate model available yet. Click Manual retrain to create one.</div>';
-      const isCandidate = model.status === 'candidate';
-      return `<div class="mi-candidate">
-        <div class="mi-candidate-head">
-          <div>
-            <div class="mi-model-id">${model.model_id || '—'}</div>
-            <div class="mi-model-meta">trained ${fmtModelTime(model.trained_at)} · ${fmtNumber(model.training_rows)} rows</div>
-          </div>
-          ${modelStatusBadge(model.status)}
-        </div>
-        <div class="mi-mini-grid">
-          ${renderMetricTile('Anomaly rate', fmtPct(model.anomaly_rate), 'candidate outlier share')}
-          ${renderMetricTile('Drift score', model.drift_score ?? '—', 'hybrid drift check')}
-          ${renderMetricTile('Distribution diff', model.distribution_difference ?? '—', 'vs active model')}
-          ${renderMetricTile('Score shift', model.score_shift ?? '—', 'vs active score mean')}
-        </div>
-        <div class="mi-report-summary">${model.report_summary || 'No report summary provided.'}</div>
-        <div class="mi-recommendation">Recommendation: <b>${(model.recommendation || 'review').replace(/_/g, ' ')}</b></div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
-          <button class="btn pri" ${isCandidate ? '' : 'disabled'} onclick="approveMLInternModel('${model.model_id}')">Approve candidate</button>
-          <button class="btn" onclick="loadMLIntern()">Refresh</button>
-        </div>
-      </div>`;
-    }
-    function renderMLInternTriggers(check = {}) {
-      const thresholds = check.thresholds || {};
-      return `<div class="mi-trigger-panel">
-        <div class="mi-trigger-row">${triggerBadge('Time', check.time_trigger)}<span>${check.hours_since_train ?? 'never'} hours since train · threshold ${thresholds.time_hours ?? '—'}h</span></div>
-        <div class="mi-trigger-row">${triggerBadge('Data', check.data_trigger)}<span>${fmtNumber(check.new_logs_count)} new logs · threshold ${fmtNumber(thresholds.new_logs)}</span></div>
-        <div class="mi-trigger-row">${triggerBadge('Drift', check.strong_drift_trigger || check.drift_trigger)}<span>score ${check.drift_score ?? '—'} · strong threshold ${thresholds.strong_drift ?? thresholds.drift ?? '—'}</span></div>
-        <div class="mi-decision ${check.should_retrain ? 'on' : 'off'}">${check.should_retrain ? 'Candidate creation condition is TRUE' : check.pending_candidate_exists ? 'Candidate already waiting for review' : 'No candidate needed right now'}</div>
-      </div>`;
-    }
-    function renderMLInternModels(models = [], activeId = null) {
-      if (!models.length) return '<div class="empty">No model versions yet</div>';
-      return `<div class="mi-model-grid">${models.map(m => `
-        <div class="mi-model-card ${m.model_id === activeId ? 'active' : ''}">
-          <div class="mi-model-top">
-            <span class="mi-model-id">${m.model_id}</span>
-            ${modelStatusBadge(m.status)}
-          </div>
-          <div class="mi-model-meta">${fmtModelTime(m.trained_at)} · ${fmtNumber(m.training_rows)} rows</div>
-          <div class="mi-model-stats">
-            <span>Anomaly ${fmtPct(m.anomaly_rate)}</span>
-            <span>Drift ${m.drift_score ?? '—'}</span>
-            <span>Diff ${m.distribution_difference ?? '—'}</span>
-          </div>
-          <div class="mi-model-summary">${m.report_summary || ''}</div>
-          ${m.status === 'candidate' ? `<button class="btn pri" onclick="approveMLInternModel('${m.model_id}')">Approve</button>` : ''}
-        </div>`).join('')}</div>`;
-    }
-    function renderMLInternReport(report) {
-      if (!report || report.status === 'none') return '<div class="empty">No training report has been generated yet</div>';
-      const top = report.top_anomaly_ips || [];
-      return `<div class="mi-report">
-        <div class="mi-report-summary">${report.report_summary || 'No report summary provided.'}</div>
-        <div class="mi-mini-grid">
-          ${renderMetricTile('Model', report.model_id || '—', report.status || '')}
-          ${renderMetricTile('Rows', fmtNumber(report.training_rows), 'training feature rows')}
-          ${renderMetricTile('Anomaly rate', fmtPct(report.anomaly_rate), 'new candidate')}
-          ${renderMetricTile('Drift', report.drift_score ?? '—', 'latest trigger score')}
-        </div>
-        <div class="mi-section-title">Top anomaly IPs from candidate</div>
-        <div class="mi-anomaly-list">${top.length ? top.map(item => `<span class="ip-chip">${item.ip} (${item.score})</span>`).join('') : '<span style="color:var(--muted)">No top anomaly list available</span>'}</div>
-      </div>`;
-    }
-    async function loadMLIntern() {
-      const [status, models, report] = await Promise.all([
-        get(`${INTERN}/status`),
-        get(`${INTERN}/models`),
-        get(`${INTERN}/reports/latest`),
-      ]);
-      if (!status) return;
-      const latest = status.latest_training;
-      const check = status.latest_check || {};
-      const allModels = models?.models || [];
-      const candidates = allModels.filter(m => m.status === 'candidate');
-      const latestCandidate = candidates[0] || null;
-      const active = status.active_model;
-
-      document.getElementById('mi-posture').textContent = active
-        ? (latestCandidate ? 'Active model governed · candidate waiting' : 'Active model governed')
-        : latestCandidate ? 'Candidate waiting for approval' : 'No approved model yet';
-      document.getElementById('mi-summary').textContent = latest
-        ? `${latest.model_id} trained on ${fmtNumber(latest.training_rows)} rows. ${latest.report_summary || ''}`
-        : 'ML Intern is monitoring Redis and will create candidate models when hybrid retraining conditions are met.';
-      document.getElementById('mi-time-trigger').textContent = `TIME ${check.time_trigger ? 'ON' : 'off'}`;
-      document.getElementById('mi-data-trigger').textContent = `DATA ${check.data_trigger ? 'ON' : 'off'}`;
-      document.getElementById('mi-drift-trigger').textContent = `DRIFT ${check.drift_trigger ? 'ON' : 'off'}`;
-      document.getElementById('mi-running').textContent = status.running_job ? 'TRAINING' : 'IDLE';
-      document.getElementById('mi-new-logs').textContent = fmtNumber(check.new_logs_count);
-      document.getElementById('mi-new-logs-threshold').textContent = `threshold ${fmtNumber(check.thresholds?.new_logs)}`;
-      document.getElementById('mi-drift').textContent = check.drift_score ?? '—';
-      document.getElementById('mi-drift-threshold').textContent = `threshold ${check.thresholds?.drift ?? '—'}`;
-      document.getElementById('mi-candidate-count').textContent = candidates.length;
-      document.getElementById('mi-candidate-state').textContent = latestCandidate ? latestCandidate.status : 'none';
-      document.getElementById('mi-candidate-body').innerHTML = renderMLInternCandidate(latestCandidate);
-      document.getElementById('mi-check-time').textContent = check.checked_at ? fmtModelTime(check.checked_at) : 'live';
-      document.getElementById('mi-trigger-body').innerHTML = renderMLInternTriggers(check);
-      document.getElementById('mi-model-count').textContent = allModels.length + ' version(s)';
-      document.getElementById('mi-model-list').innerHTML = renderMLInternModels(allModels, models?.active_model_id);
-      document.getElementById('mi-report-state').textContent = report?.model_id || report?.status || '—';
-      document.getElementById('mi-report-body').innerHTML = renderMLInternReport(report);
-      document.getElementById('mlintern-status').innerHTML = '<span style="width:6px;height:6px;border-radius:50%;background:var(--purple);display:inline-block"></span> Intern ready';
-    }
-    async function manualMLInternRetrain() {
-      document.getElementById('mi-action-status').textContent = 'Training candidate…';
-      const r = await post(`${INTERN}/retrain`);
-      if (!r) return;
-      if (r.status === 'already_running') {
-        toast('ML Intern is already training', 'warn');
-      } else if (r.status === 'not_enough_data') {
-        toast('Not enough feature rows for ML Intern', 'warn');
-      } else {
-        toast('Candidate model created: ' + r.model_id, 'ok');
+    async function runNLQuery() {
+      const q = document.getElementById('nl-input').value.trim();
+      if (!q) return;
+      const sqlBlock = document.getElementById('nl-sql-block');
+      const resultsEl = document.getElementById('nl-results');
+      const errorEl = document.getElementById('nl-error');
+      const tableWrap = document.getElementById('nl-table-wrap');
+      const btn = document.getElementById('nl-run-btn');
+      sqlBlock.style.display = 'none';
+      errorEl.style.display = 'none';
+      resultsEl.style.display = 'block';
+      tableWrap.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted)">Generating SQL and running query…</div>';
+      document.getElementById('nl-result-title').textContent = 'Running…';
+      btn.disabled = true; btn.textContent = '…';
+      try {
+        const resp = await fetch(`${API}/nl/query`, {
+          method: 'POST',
+          headers: { ..._ah(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: q })
+        });
+        const data = await resp.json();
+        btn.disabled = false; btn.textContent = 'Run Query';
+        if (!resp.ok) {
+          resultsEl.style.display = 'none';
+          errorEl.style.display = 'block';
+          errorEl.textContent = data.detail || 'Query failed';
+          return;
+        }
+        sqlBlock.style.display = 'block';
+        document.getElementById('nl-sql-text').textContent = data.sql;
+        document.getElementById('nl-timing').textContent = `· ${data.elapsed_ms}ms · ${data.row_count} row${data.row_count !== 1 ? 's' : ''}`;
+        _nlLastCols = data.columns; _nlLastRows = data.rows;
+        document.getElementById('nl-result-title').textContent = `Results — ${data.row_count} row${data.row_count !== 1 ? 's' : ''}`;
+        if (!data.rows.length) {
+          tableWrap.innerHTML = '<div class="empty" style="padding:16px">No results returned</div>';
+          return;
+        }
+        let html = '<table class="tbl"><thead><tr>' + data.columns.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+        for (const row of data.rows) {
+          html += '<tr>' + row.map(v => `<td style="white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${String(v??'').replace(/"/g,'&quot;')}">${v??'—'}</td>`).join('') + '</tr>';
+        }
+        html += '</tbody></table>';
+        tableWrap.innerHTML = html;
+        toast('Query complete — ' + data.row_count + ' rows', 'ok');
+      } catch (e) {
+        btn.disabled = false; btn.textContent = 'Run Query';
+        resultsEl.style.display = 'none';
+        errorEl.style.display = 'block';
+        errorEl.textContent = 'Request failed: ' + e.message;
       }
-      document.getElementById('mi-action-status').textContent = '';
-      await loadMLIntern();
     }
-    async function approveMLInternModel(modelId) {
-      if (!modelId) return;
-      document.getElementById('mi-action-status').textContent = 'Approving ' + modelId + '…';
-      const r = await post(`${INTERN}/approve-model/${modelId}`);
-      if (r) toast('Approved active model: ' + modelId, 'ok');
-      document.getElementById('mi-action-status').textContent = '';
-      await loadMLIntern();
+    function nlExportCSV() {
+      if (!_nlLastCols.length) return;
+      let csv = _nlLastCols.join(',') + '\n';
+      for (const row of _nlLastRows) {
+        csv += row.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',') + '\n';
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+      a.download = 'soc_query_' + Date.now() + '.csv';
+      a.click();
     }
-    async function rollbackMLIntern() {
-      document.getElementById('mi-action-status').textContent = 'Rolling back model…';
-      const r = await post(`${INTERN}/rollback`);
-      if (r) toast('Rolled back to previous model', 'warn');
-      document.getElementById('mi-action-status').textContent = '';
-      await loadMLIntern();
+
+    // ── Cyber Resilience Score ─────────────────────────────────────────────────
+    async function loadResilience() {
+      const r = await get(`${API}/resilience`); if (!r) return;
+      const score = r.score;
+      const col = score >= 80 ? 'var(--ok)' : score >= 60 ? 'var(--warn)' : 'var(--danger)';
+      const deg = Math.round(score * 3.6);
+      document.getElementById('res-score').textContent = score;
+      document.getElementById('res-score').style.color = col;
+      document.getElementById('res-grade').textContent = r.grade;
+      document.getElementById('res-grade').style.color = col;
+      document.getElementById('res-ring').style.background = `conic-gradient(${col} ${deg}deg, var(--bg3) ${deg}deg)`;
+      document.getElementById('res-computed').textContent = 'Updated ' + toIST(r.computed_at);
+      const comps = r.components;
+      let html = '';
+      for (const c of Object.values(comps)) {
+        const cc = c.pct >= 75 ? 'var(--ok)' : c.pct >= 40 ? 'var(--warn)' : 'var(--danger)';
+        html += `<div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+            <span style="color:var(--text)">${c.label}</span>
+            <span style="color:${cc}">${c.score}/${c.max} pts &nbsp;·&nbsp; ${c.detail}</span>
+          </div>
+          <div style="height:5px;background:var(--bg3);border-radius:3px">
+            <div style="height:5px;width:${c.pct}%;background:${cc};border-radius:3px;transition:width .6s ease"></div>
+          </div></div>`;
+      }
+      document.getElementById('res-components').innerHTML = html;
+      const weak = Object.values(comps).filter(c => c.pct < 50).map(c => c.label);
+      const narrative = score >= 80
+        ? `Strong security posture across ${r.active_ips} active IPs — ML coverage, baselines, and threat response are all healthy.`
+        : score >= 55
+        ? `Moderate resilience. ${weak.length ? 'Focus on: ' + weak.join(', ') + '.' : 'Reduce active critical threats to improve.'}`
+        : `Low resilience. Immediate action needed on: ${weak.join(', ')}. Score ${r.active_ips} more IPs and establish baselines.`;
+      document.getElementById('res-narrative').textContent = narrative;
+    }
+
+    // ── ML Anomaly ────────────────────────────────────────────────────────────
+    async function scoreIP(ipOverride = null) {
+      const ip = ipOverride || document.getElementById('ml-ip').value.trim(); if (!ip) return;
+      document.getElementById('ml-ip').value = ip;
+      const r = await get(`${ML}/score/${ip}`); if (!r) return;
+      document.getElementById('score-panel').style.display = 'block';
+      const rc = r.risk_score > 70 ? 'var(--danger)' : r.risk_score > 40 ? 'var(--warn)' : 'var(--ok)';
+      const conf = computeConfidence(r);
+      document.getElementById('score-body').innerHTML = `
+        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px">
+          <div><div style="font-size:11px;color:var(--muted)">Risk score</div><div style="font-size:40px;font-weight:700;color:${rc}">${r.risk_score ?? '—'}/100</div></div>
+          <div><div style="font-size:11px;color:var(--muted)">Anomaly score</div><div style="font-size:28px;font-weight:700">${r.anomaly_score ?? '—'}</div></div>
+          <div><div style="font-size:11px;color:var(--muted)">Confidence</div><div style="font-size:28px;font-weight:700;color:${confidenceColor(conf)}">${conf}/100</div><div style="font-size:11px;color:var(--muted)">${confidenceLabel(conf)}</div></div>
+          <div><div style="font-size:11px;color:var(--muted)">Anomaly</div><div style="font-size:22px;font-weight:700;color:${r.is_anomaly ? 'var(--danger)' : 'var(--ok)'}">${r.is_anomaly ? 'YES' : 'No'}</div></div>
+        </div>
+        ${r.features ? `<div style="font-size:11px;color:var(--muted);font-family:var(--mono);line-height:2.2">
+          Events: <b>${r.features.n_events}</b> &nbsp;|&nbsp; Rate: <b>${r.features.event_rate_pm}/min</b> &nbsp;|&nbsp;
+          Unique dst IPs: <b>${r.features.unique_dst_ips}</b> &nbsp;|&nbsp; Unique ports: <b>${r.features.unique_dst_ports}</b><br>
+          Brute force: <b>${r.features.brute_force_cnt}</b> &nbsp;|&nbsp; SSH BF: <b>${r.features.ssh_bf_cnt}</b> &nbsp;|&nbsp;
+          RDP: <b>${r.features.rdp_cnt}</b> &nbsp;|&nbsp; DB scans: <b>${r.features.db_scan_cnt}</b><br>
+          <span style="color:var(--warn)">Baseline alerts: <b>${r.features.baseline_alerts}</b> &nbsp;|&nbsp; Critical alerts: <b>${r.features.critical_alerts}</b></span>
+        </div>` : ''}
+        ${r.note ? `<div style="margin-top:8px;color:var(--warn);font-size:12px">${r.note}</div>` : ''}
+        ${r.anomaly_score !== undefined && r.risk_score !== undefined ? explainMLScore(r) : ''}
+        <div style="margin-top:12px"><button class="btn ai" onclick="aiMLExplainFor('${ip}')">Ask AI why this score</button></div>`;
+    }
+    function openMLScore(ip) { document.getElementById('ml-ip').value = ip; scoreIP(ip); }
+    async function loadAnomalies() {
+      const r = await get(`${ML}/anomalies`); if (!r) return;
+      const mlh = await get(`${ML}/health`);
+      const ready = Boolean(mlh?.model_ready);
+      document.getElementById('train-status').textContent = ready
+        ? `Current model loaded · ${r.anomalies.length} anomalies`
+        : 'No trained model yet';
+      document.getElementById('anom-tbody').innerHTML = r.anomalies.length
+        ? r.anomalies.map(a => `<tr onclick="openMLScore('${a.ip}')" style="cursor:pointer">
+          <td style="color:var(--accent)">${a.ip}</td>
+          <td><span style="color:${a.risk_score > 70 ? 'var(--danger)' : a.risk_score > 40 ? 'var(--warn)' : 'var(--ok)'};font-weight:700">${a.risk_score ?? '—'}</span>/100</td>
+          <td style="color:var(--muted)">${a.anomaly_score ?? '—'}</td>
+          <td><span class="badge ${a.risk_score > 70 ? 'critical' : a.risk_score > 40 ? 'high' : 'medium'}">${a.risk_score > 70 ? 'critical' : a.risk_score > 40 ? 'high' : 'medium'}</span></td>
+          <td style="white-space:nowrap">
+            <button class="btn" style="font-size:10px;padding:3px 8px;margin-right:3px" onclick="event.stopPropagation();openMLScore('${a.ip}')">Explain</button>
+            <button class="btn ai" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();aiMLExplainFor('${a.ip}')">AI</button>
+          </td></tr>`).join('')
+        : `<tr><td colspan="5" class="empty">${ready ? 'No anomalies found' : 'Train the model first'}</td></tr>`;
+    }
+
+    // ── Incidents ─────────────────────────────────────────────────────────────
+    async function loadIncidents() {
+      const r = await get(`${API}/incidents`); if (!r) return;
+      const inc = r.incidents || [];
+      if (!inc.length) {
+        document.getElementById('incidents-body').innerHTML = '<div class="card"><div class="cb empty">No active incidents — keep monitoring</div></div>';
+        return;
+      }
+      document.getElementById('incidents-body').innerHTML = inc.map(i => {
+        const pc = i.priority > 70 ? 'var(--danger)' : i.priority > 40 ? 'var(--warn)' : 'var(--ok)';
+        const chips = (i.tactics || []).map(t => `<span class="chip" style="font-size:10px">${t}</span>`).join('');
+        const techs = (i.techniques || []).map(t => `<span style="font-size:11px;color:var(--muted);margin-right:8px">${t.id}</span>`).join('');
+        const ips = (i.entities?.ips || []).slice(0, 5).map(ip =>
+          `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <span style="font-family:var(--mono);font-size:12px;color:var(--accent);min-width:120px">${ip}</span>
+            <button class="btn" style="font-size:10px;padding:2px 7px" onclick="goTrail('${ip}')">Trail</button>
+            <button class="btn" style="font-size:10px;padding:2px 7px" onclick="goKillChain('${ip}')">Kill Chain</button>
+          </div>`).join('');
+        const lead = i.entities?.ips?.[0] || '';
+        return `<div class="card" style="margin-bottom:12px;border-left:3px solid ${pc}">
+          <div class="ch">
+            <span class="ct" style="color:${pc}">${i.type === 'campaign' ? 'Campaign' : 'Host'}: ${i.subnet || lead}</span>
+            <span style="font-size:24px;font-weight:700;color:${pc}">${i.priority}</span>
+          </div>
+          <div class="cb">
+            <div style="margin-bottom:8px">${chips}</div>
+            <div style="margin-bottom:8px;font-size:12px">${techs}</div>
+            <div style="margin-bottom:10px">${ips}${i.ip_count > 5 ? `<span style="font-size:11px;color:var(--muted)">+${i.ip_count - 5} more</span>` : ''}</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">${i.narrative || ''}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              ${lead ? `<button class="btn ai" style="font-size:11px" onclick="incidentNarrative('${lead}', this)">AI incident report</button>` : ''}
+              ${lead ? `<button class="btn" style="font-size:11px" onclick="nav('ueba')">UEBA</button>` : ''}
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+    async function incidentNarrative(ip, btn) {
+      btn.textContent = 'Generating…'; btn.disabled = true;
+      const r = await get(`${API}/incidents/${ip}/narrative`);
+      btn.disabled = false; btn.textContent = 'AI incident report';
+      if (!r) return;
+      const panel = btn.closest('.cb');
+      let existing = panel.querySelector('.inc-narrative');
+      if (!existing) { existing = document.createElement('div'); existing.className = 'inc-narrative'; existing.style.marginTop = '12px'; panel.appendChild(existing); }
+      const mits = (r.recommended_mitigations || []).map(m =>
+        `<div style="padding:8px 12px;background:var(--bg2);border-radius:6px;margin-bottom:6px">
+          <span style="font-weight:600;color:var(--accent)">${m.id} — ${m.name}</span>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">${m.detail}</div>
+        </div>`).join('');
+      existing.innerHTML = `
+        <div class="ai-panel">
+          <div class="ai-header">
+            <span class="ai-badge">AI</span>
+            <span class="ai-title">Incident Narrative</span>
+            <span class="ai-model">${r.model || ''} · ${String(r.generated_at || '').substring(0, 19).replace('T',' ')} IST</span>
+          </div>
+          <div class="ai-body">${formatReportText(r.ai_narrative || r.explanation || '')}</div>
+        </div>
+        ${mits ? `<div style="margin-top:12px"><div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:8px;letter-spacing:.05em">RECOMMENDED MITIGATIONS</div>${mits}</div>` : ''}`;
+    }
+
+    // ── UEBA ──────────────────────────────────────────────────────────────────
+    async function loadUEBA() {
+      const [ato, travel, peers] = await Promise.all([
+        get(`${API}/ueba/account-takeover`),
+        get(`${API}/ueba/impossible-travel`),
+        get(`${API}/ueba/peer-outliers`),
+      ]);
+      // ATO
+      if (ato) {
+        document.getElementById('ueba-ato-count').textContent = `${ato.total} findings · ${ato.users_scanned} users scanned`;
+        document.getElementById('ueba-ato-body').innerHTML = ato.findings.length
+          ? ato.findings.map(f => `<div style="background:var(--bg3);border-radius:6px;padding:10px 14px;margin-bottom:8px;border-left:3px solid ${f.severity === 'high' ? 'var(--danger)' : 'var(--warn)'}">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-weight:600">${f.username}</span>
+                <span class="badge ${f.severity}">${f.severity}</span>
+              </div>
+              <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${f.message}</div>
+              <div style="font-size:11px;font-family:var(--mono)">IP: <span style="color:var(--accent);cursor:pointer" onclick="goTrail('${f.src_ip}')">${f.src_ip}</span> · Country: ${f.country} · ${toIST(f.ts)}</div>
+            </div>`).join('')
+          : '<span style="color:var(--ok);font-size:12px">No account takeover patterns detected</span>';
+      }
+      // Impossible travel
+      if (travel) {
+        document.getElementById('ueba-travel-count').textContent = `${travel.total} findings`;
+        document.getElementById('ueba-travel-body').innerHTML = travel.findings.length
+          ? travel.findings.map(f => `<div style="background:var(--bg3);border-radius:6px;padding:10px 14px;margin-bottom:8px;border-left:3px solid var(--danger)">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-weight:600">${f.username}</span>
+                <span class="badge high">impossible travel</span>
+              </div>
+              <div style="font-size:12px;color:var(--muted);margin-bottom:4px">${f.message}</div>
+              <div style="font-size:11px;font-family:var(--mono)">${f.from?.country} → ${f.to?.country} · ${Math.round(f.evidence?.distance_km || 0).toLocaleString()} km · ${Math.round(f.evidence?.speed_kmh || 0).toLocaleString()} km/h</div>
+            </div>`).join('')
+          : '<span style="color:var(--ok);font-size:12px">No impossible travel detected</span>';
+      }
+      // Peer outliers
+      if (peers) {
+        document.getElementById('ueba-peer-count').textContent = `${(peers.outliers || []).length} outliers in ${peers.population || 0} entities`;
+        document.getElementById('ueba-peer-body').innerHTML = (peers.outliers || []).length
+          ? peers.outliers.map(o => `<div style="background:var(--bg3);border-radius:6px;padding:10px 14px;margin-bottom:8px;border-left:3px solid var(--warn)">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-weight:600;font-family:var(--mono)">${o.entity}</span>
+                <span class="badge ${o.severity}">${o.severity} · z=${o.max_z}</span>
+              </div>
+              <div style="font-size:12px;color:var(--muted)">${o.message}</div>
+            </div>`).join('')
+          : '<span style="color:var(--ok);font-size:12px">No peer outliers detected</span>';
+      }
+    }
+
+    // ── Kill Chain ────────────────────────────────────────────────────────────
+    function goKillChain(ip) { nav('killchain'); document.getElementById('kc-ip').value = ip; loadKillChain(); }
+    async function loadKillChain() {
+      const ip = document.getElementById('kc-ip').value.trim(); if (!ip) return;
+      const r = await get(`${API}/killchain/${ip}`); if (!r) return;
+      document.getElementById('kc-panel').style.display = 'block';
+      document.getElementById('kc-ai-panel').style.display = 'none';
+      document.getElementById('kc-title').textContent = `Attack Timeline — ${ip}`;
+
+      // ── Summary card ─────────────────────────────────────────────────────
+      const net = r.network_path || [];
+      const stages = r.stages || [];
+      const fwStage = net.find(n => n.stage.startsWith('Firewall'));
+      const routerStage = net.find(n => n.stage.startsWith('Router'));
+      const endpointStage = net.find(n => n.stage === 'Endpoint');
+      const firstTs = stages[0]?.first_seen || net[0]?.first_seen || '';
+      const lastTs  = stages[stages.length-1]?.last_seen || '';
+      const deepestColor = r.reached_impact ? 'var(--danger)' : stages.length > 3 ? 'var(--warn)' : 'var(--ok)';
+      const fwColor = { allowed:'var(--ok)', blocked:'var(--danger)', partial:'var(--warn)', observed:'var(--muted)' }[fwStage?.status] || 'var(--muted)';
+      const totalSev = stages.reduce((acc, s) => { Object.entries(s.severities||{}).forEach(([k,v]) => acc[k]=(acc[k]||0)+v); return acc; }, {});
+
+      document.getElementById('kc-summary-card').innerHTML = `
+        <div class="ch" style="border-bottom:none;padding-bottom:8px">
+          <span class="ct">Kill Chain Summary</span>
+          <span style="font-size:11px;color:var(--muted)">${ip} · ${r.total_events} total events</span>
+        </div>
+        <div class="cb" style="padding-top:0">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px">
+            <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid var(--accent)">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">ATT&CK Stages Reached</div>
+              <div style="font-size:26px;font-weight:700;color:var(--accent)">${stages.length}</div>
+              <div style="font-size:11px;color:var(--muted)">of 14 tactics</div>
+            </div>
+            <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid ${deepestColor}">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Deepest Stage</div>
+              <div style="font-size:14px;font-weight:700;color:${deepestColor}">${r.max_stage || '—'}</div>
+              <div style="font-size:11px;color:${deepestColor}">${r.reached_impact ? '⚠ Impact/Lateral reached' : stages.length > 2 ? 'Multi-stage attack' : 'Early stage'}</div>
+            </div>
+            <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid ${fwColor}">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Firewall Decision</div>
+              <div style="font-size:14px;font-weight:700;color:${fwColor}">${(fwStage?.status || 'unknown').toUpperCase()}</div>
+              <div style="font-size:11px;color:var(--muted)">${fwStage?.detail || 'No firewall data'}</div>
+            </div>
+            <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid #00bcd4">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Network Segment</div>
+              <div style="font-size:14px;font-weight:700;color:#00bcd4">${routerStage ? routerStage.stage.replace('Router → ','') : '—'}</div>
+              <div style="font-size:11px;color:var(--muted)">${endpointStage?.detail || (routerStage ? 'Traffic routed' : 'No routing data')}</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div style="background:var(--bg3);border-radius:8px;padding:12px">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:8px">Event Severity Breakdown</div>
+              <div style="display:flex;gap:10px;flex-wrap:wrap">
+                ${['critical','high','medium','low'].map(s => totalSev[s] ? `<span class="badge ${s}">${s} ${totalSev[s]}</span>` : '').join('')}
+              </div>
+            </div>
+            <div style="background:var(--bg3);border-radius:8px;padding:12px">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:8px">Activity Window</div>
+              <div style="font-size:11px;color:var(--text);line-height:1.8">
+                <b>First seen:</b> ${toIST(firstTs)}<br>
+                <b>Last seen:</b> ${toIST(lastTs)}<br>
+                <b>ATT&CK progression:</b> ${stages.map(s=>s.tactic).join(' → ') || '—'}
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const tacticColors = { Reconnaissance:'#64b5f6', 'Resource Development':'#64b5f6', 'Initial Access':'var(--ok)', Execution:'var(--warn)', Persistence:'var(--warn)', 'Privilege Escalation':'var(--danger)', 'Defense Evasion':'var(--muted)', 'Credential Access':'var(--danger)', Discovery:'#7c3aed', 'Lateral Movement':'var(--danger)', Collection:'#d97706', 'Command and Control':'var(--danger)', Exfiltration:'var(--danger)', Impact:'var(--danger)' };
+      const netColors = { established:'#00bcd4', allowed:'var(--ok)', blocked:'var(--danger)', partial:'var(--warn)', observed:'var(--muted)', routed:'#00bcd4', reached:'var(--ok)' };
+      const netIcons  = { 'TCP Connection':'🌐', Firewall:'🛡', 'Firewall / IDS':'🛡', Endpoint:'💻' };
+
+      const netPath = (r.network_path || []);
+      const attckStages = (r.stages || []);
+      const total = netPath.length + attckStages.length;
+      let idx = 0;
+
+      const netHtml = netPath.map(n => {
+        const col = netColors[n.status] || '#00bcd4';
+        const icon = Object.keys(netIcons).find(k => n.stage.startsWith(k.split(' ')[0]));
+        const isLast = (idx === total - 1);
+        const html = `<div style="display:flex;gap:0;margin-bottom:0">
+          <div style="display:flex;flex-direction:column;align-items:center;width:32px">
+            <div style="width:14px;height:14px;border-radius:3px;background:${col};border:2px solid var(--bg2);z-index:1;margin-top:13px;display:flex;align-items:center;justify-content:center;font-size:8px"></div>
+            ${!isLast ? `<div style="width:2px;flex:1;min-height:12px;background:${col};opacity:0.4"></div>` : ''}
+          </div>
+          <div style="flex:1;background:var(--bg3);border-radius:8px;padding:10px 16px;margin-left:8px;margin-bottom:10px;border-left:3px solid ${col}">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <span style="font-weight:700;color:${col};font-size:13px">${netIcons[icon]||'📡'} ${n.stage}</span>
+              <span style="font-size:10px;background:${col};color:#000;padding:1px 6px;border-radius:10px;font-weight:600">${n.status?.toUpperCase()}</span>
+            </div>
+            <div style="font-size:12px;color:var(--text);margin-bottom:4px">${n.detail}</div>
+            ${n.topology && Object.keys(n.topology).length ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${Object.entries(n.topology).map(([k,v])=>`<span style="font-size:10px;background:var(--bg2);border-radius:4px;padding:2px 7px;color:var(--accent)"><b>${k}:</b> ${v}</span>`).join('')}</div>` : ''}
+            <div style="font-size:10px;color:var(--muted);margin-top:4px">${toIST(n.first_seen)}</div>
+          </div>
+        </div>`;
+        idx++;
+        return html;
+      }).join('');
+
+      // divider between network path and ATT&CK stages
+      const divider = netPath.length && attckStages.length ? `<div style="display:flex;align-items:center;gap:10px;margin:6px 0 14px 0">
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+        <span style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px">ATT&amp;CK Kill Chain</span>
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+      </div>` : '';
+
+      const attckHtml = attckStages.map(s => {
+        const col = tacticColors[s.tactic] || 'var(--accent)';
+        const techs = (s.techniques || []).map(t => `<span style="font-size:11px;color:var(--muted)">${t.id}: ${t.name} (${t.count})</span>`).join('<br>');
+        const isLast = (idx === total - 1);
+        const html = `<div style="display:flex;gap:0;margin-bottom:0">
+          <div style="display:flex;flex-direction:column;align-items:center;width:32px">
+            <div style="width:12px;height:12px;border-radius:50%;background:${col};border:2px solid var(--bg2);z-index:1;margin-top:14px"></div>
+            ${!isLast ? `<div style="width:2px;flex:1;min-height:12px;background:var(--border)"></div>` : ''}
+          </div>
+          <div style="flex:1;background:var(--bg3);border-radius:8px;padding:12px 16px;margin-left:8px;margin-bottom:10px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+              <span style="font-weight:600;color:${col}">${s.tactic}</span>
+              <span style="font-size:11px;color:var(--muted)">${s.events} events</span>
+            </div>
+            <div style="margin-bottom:6px">${techs}</div>
+            <div style="font-size:10px;color:var(--muted)">${toIST(s.first_seen)} → ${toIST(s.last_seen)}</div>
+          </div>
+        </div>`;
+        idx++;
+        return html;
+      }).join('');
+
+      document.getElementById('kc-stages').innerHTML = netHtml + divider + attckHtml;
+
+      // ── Correlation panel ───────────────────────────────────────────────
+      const cor = r.correlation;
+      const corrEl = document.getElementById('kc-correlation');
+      if (!cor) { corrEl.style.display = 'none'; }
+      else {
+        corrEl.style.display = 'block';
+        const vel = cor.velocity || {};
+        const sevBadge = s => `<span class="badge ${s}">${s}</span>`;
+
+        // Attack waves table
+        const wavesHtml = cor.attack_waves?.length
+          ? `<table class="tbl" style="font-size:11px"><thead><tr><th>Hour</th><th>Events</th><th>Peak Severity</th><th>Tactics Active</th></tr></thead><tbody>
+              ${cor.attack_waves.map(w=>`<tr>
+                <td style="white-space:nowrap">${w.time}</td>
+                <td><b>${w.events}</b></td>
+                <td>${sevBadge(w.peak_severity)}</td>
+                <td style="color:var(--muted);font-size:10px">${w.tactics.join(', ')||'—'}</td>
+              </tr>`).join('')}
+            </tbody></table>`
+          : '<span style="color:var(--muted)">No time data</span>';
+
+        // Technique chain
+        const techHtml = cor.technique_chain?.length
+          ? cor.technique_chain.map((t,i)=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span style="background:var(--bg2);border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--muted);flex-shrink:0">${i+1}</span>
+              <div style="flex:1;background:var(--bg3);border-radius:6px;padding:6px 10px">
+                <span style="color:var(--accent);font-weight:600;font-size:12px">${t.id||'—'}</span>
+                <span style="color:var(--text);font-size:12px"> ${t.name||'Unknown technique'}</span>
+                <span style="color:var(--muted);font-size:10px"> · ${t.tactic||''} · ×${t.count}</span>
+              </div>
+            </div>`).join('')
+          : '<span style="color:var(--muted)">No technique data</span>';
+
+        // Port sequence
+        const portHtml = cor.port_sequence?.length
+          ? cor.port_sequence.map(p=>`<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg3);border-radius:6px;padding:4px 8px;margin:3px;font-size:11px">
+              <b style="color:var(--accent)">${p.port}</b>${p.service?`<span style="color:var(--muted)">(${p.service})</span>`:''}
+              <span style="color:var(--muted)">×${p.count}</span>
+            </span>`).join('')
+          : '<span style="color:var(--muted)">No port data</span>';
+
+        // Targeted accounts
+        const acctHtml = cor.targeted_accounts?.length
+          ? cor.targeted_accounts.map(a=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px">
+              <span style="color:var(--warn)">👤 ${a.account}</span>
+              <span style="color:var(--muted)">${a.hits} hit${a.hits>1?'s':''}</span>
+            </div>`).join('')
+          : '<span style="color:var(--muted)">No account targets identified</span>';
+
+        // Top rules
+        const rulesHtml = cor.top_rules?.length
+          ? cor.top_rules.map(r=>`<div style="padding:5px 0;border-bottom:1px solid var(--border)">
+              <div style="display:flex;justify-content:space-between">
+                <span style="font-size:11px;color:var(--text)">${r.rule}</span>
+                <span class="badge ${r.severity}" style="margin-left:8px;flex-shrink:0">×${r.count}</span>
+              </div>
+              ${r.rule_id?`<span style="font-size:10px;color:var(--muted)">Rule ID: ${r.rule_id}</span>`:''}
+            </div>`).join('')
+          : '<span style="color:var(--muted)">No rules data</span>';
+
+        // Related IPs
+        const relHtml = cor.related_ips?.length
+          ? cor.related_ips.map(h=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)">
+              <a style="color:var(--accent);cursor:pointer;font-size:12px" onclick="goKillChain('${h.ip}')">${h.ip}</a>
+              <div style="display:flex;gap:6px">
+                <span style="font-size:10px;color:var(--muted)">${h.events} events</span>
+                <button class="btn" style="font-size:10px;padding:2px 6px" onclick="goKillChain('${h.ip}')">Kill Chain</button>
+              </div>
+            </div>`).join('')
+          : '<span style="color:var(--muted)">No related IPs in same subnet</span>';
+
+        corrEl.innerHTML = `
+          <div class="ch"><span class="ct">Event Correlation</span>
+            <span style="font-size:11px;color:var(--muted)">${vel.total_hours_active} active hour(s) · avg ${vel.avg_per_hour} events/hr · peak ${vel.peak_count} events @ ${vel.peak_hour||'?'}</span>
+          </div>
+          <div class="cb" style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+            <div>
+              <div style="font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Attack Waves (by hour)</div>
+              ${wavesHtml}
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Technique Chain (in order)</div>
+              ${techHtml}
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Ports / Services Probed</div>
+              ${portHtml}
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Targeted Accounts</div>
+              ${acctHtml}
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Top Rules Fired</div>
+              ${rulesHtml}
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Related IPs — Same /24 Subnet</div>
+              ${relHtml}
+            </div>
+          </div>`;
+      }
+    }
+    async function groundedAI() {
+      const ip = document.getElementById('kc-ip').value.trim(); if (!ip) { toast('Enter an IP first', 'warn'); return; }
+      document.getElementById('kc-ai-panel').style.display = 'block';
+      document.getElementById('kc-ai-body').innerHTML = '<span style="color:var(--muted)">Generating grounded brief — calling AI… (may take 10–20 s)</span>';
+      document.getElementById('kc-ai-model').textContent = '';
+      try {
+        const resp = await fetch(`${API}/explain/grounded/${ip}`, { headers: _ah() });
+        if (!resp.ok) { document.getElementById('kc-ai-body').textContent = `Error ${resp.status} from server.`; return; }
+        const r = await resp.json();
+        document.getElementById('kc-ai-model').textContent = (r.model || '') + (r.generated_at ? ' · ' + toIST(r.generated_at) : '');
+        document.getElementById('kc-ai-body').innerHTML = formatReportText(r.explanation || '');
+      } catch (e) {
+        document.getElementById('kc-ai-body').textContent = 'Request failed: ' + e.message;
+      }
     }
 
     function mlRiskLabel(risk) {
@@ -3680,7 +4444,6 @@
       const scorePosition = score === null ? 'not available' : score < -0.1 ? 'well below the anomaly boundary' : score < 0 ? 'just below the anomaly boundary' : 'above the anomaly boundary';
       const mainReasons = [];
       const drivers = [];
-
       if (r.is_anomaly) {
         mainReasons.push('Isolation Forest returned anomaly=YES because this IP sits outside the normal cluster of trained IP behaviour.');
         drivers.push({ level: 'critical', text: `<b>Model decision:</b> anomaly=YES. This means the IP was separated from normal IPs by the Isolation Forest trees.` });
@@ -3725,109 +4488,66 @@
         drivers.push({ level: 'medium', text: `<b>No single loud driver dominated.</b> The score came from the combined feature vector after scaling and comparison against other IPs.` });
       }
       const finalReason = mainReasons.slice(0, 4).join(' ');
-      const confidenceReason = confidence < 45 ? 'Confidence is low because the model has limited supporting evidence, usually too few events or few corroborating signals.' :
-        confidence < 75 ? 'Confidence is medium because there is useful evidence, but not enough volume or corroboration for full trust.' :
-          'Confidence is high because enough events and multiple signals support the score.';
-      const verdict = risk > 70 ? 'Critical because the base anomaly score plus baseline/security features crossed the critical threshold.' :
-        risk > 40 ? 'High because the IP is anomalous, but the final score stayed below the critical threshold.' :
-          'Medium because the model saw some unusual behaviour, but not enough supporting signals for high/critical.';
-
+      const confidenceReason = confidence < 45
+        ? 'Confidence is low because the model has limited supporting evidence, usually too few events or few corroborating signals.'
+        : confidence < 75
+          ? 'Confidence is medium because there is useful evidence, but not enough volume or corroboration for full trust.'
+          : 'Confidence is high because enough events and multiple signals support the score.';
+      const verdict = risk > 70
+        ? 'Critical because the base anomaly score plus baseline/security features crossed the critical threshold.'
+        : risk > 40
+          ? 'High because the IP is anomalous, but the final score stayed below the critical threshold.'
+          : 'Medium because the model saw some unusual behaviour, but not enough supporting signals for high/critical.';
       return `<div class="ml-explain">
-    <div class="ml-explain-title">Actual reason this IP got ${risk}/100 (${mlRiskLabel(risk)})</div>
-    <p><b>Short answer:</b> ${finalReason}</p>
-    <p><b>Verdict:</b> ${verdict}</p>
-    <p><b>Confidence:</b> ${confidence}/100 (${confidenceLabel(confidence)}). ${confidenceReason}</p>
-    <div class="ml-formula">calculation: anomaly_score ${score ?? 'n/a'} → base_risk ${baseRisk}; baseline boost ${baselineBoost}; final risk ${risk}/100</div>
-    <div class="ml-driver-list">${drivers.map(d => `<div class="ml-driver ${d.level}">${d.text}</div>`).join('')}</div>
-  </div>`;
+        <div class="ml-explain-title">Actual reason this IP got ${risk}/100 (${mlRiskLabel(risk)})</div>
+        <p><b>Short answer:</b> ${finalReason}</p>
+        <p><b>Verdict:</b> ${verdict}</p>
+        <p><b>Confidence:</b> ${confidence}/100 (${confidenceLabel(confidence)}). ${confidenceReason}</p>
+        <div class="ml-formula">calculation: anomaly_score ${score ?? 'n/a'} → base_risk ${baseRisk}; baseline boost ${baselineBoost}; final risk ${risk}/100</div>
+        <div class="ml-driver-list">${drivers.map(d => `<div class="ml-driver ${d.level}">${d.text}</div>`).join('')}</div>
+      </div>`;
     }
-    function openMLScore(ip) {
-      nav('ml');
-      document.getElementById('ml-ip').value = ip;
-      scoreIP(ip);
+
+    async function trainModel() {
+      document.getElementById('train-status').textContent = 'Training…';
+      const r = await post(`${ML}/train`);
+      if (r) { document.getElementById('train-status').textContent = `Trained on ${r.ip_count} IPs · ${r.anomalies} anomalies`; toast('Model trained!', 'ok'); await loadAnomalies(); }
     }
-    async function scoreIP(ipOverride = null) {
-      const ip = ipOverride || document.getElementById('ml-ip').value.trim(); if (!ip) return;
-      document.getElementById('ml-ip').value = ip;
-      const r = await get(`${ML}/score/${ip}`); if (!r) return;
-      document.getElementById('score-panel').style.display = 'block';
-      const rc = r.risk_score > 70 ? 'var(--danger)' : r.risk_score > 40 ? 'var(--warn)' : 'var(--ok)';
-      const conf = computeConfidence(r);
-      document.getElementById('score-body').innerHTML = `
-    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px">
-      <div><div style="font-size:11px;color:var(--muted)">Risk score</div><div style="font-size:40px;font-weight:700;color:${rc}">${r.risk_score ?? '—'}/100</div></div>
-      <div><div style="font-size:11px;color:var(--muted)">Anomaly score</div><div style="font-size:28px;font-weight:700">${r.anomaly_score ?? '—'}</div></div>
-      <div><div style="font-size:11px;color:var(--muted)">Confidence</div><div style="font-size:28px;font-weight:700;color:${confidenceColor(conf)}">${conf}/100</div><div style="font-size:11px;color:var(--muted)">${confidenceLabel(conf)}</div></div>
-      <div><div style="font-size:11px;color:var(--muted)">Anomaly</div><div style="font-size:22px;font-weight:700;color:${r.is_anomaly ? 'var(--danger)' : 'var(--ok)'}">${r.is_anomaly ? 'YES' : 'No'}</div></div>
-    </div>
-    ${r.features ? `<div style="font-size:11px;color:var(--muted);font-family:var(--mono);line-height:2.2">
-      Events: <b>${r.features.n_events}</b> &nbsp;|&nbsp;
-      Rate: <b>${r.features.event_rate_pm}/min</b> &nbsp;|&nbsp;
-      Unique dst IPs: <b>${r.features.unique_dst_ips}</b> &nbsp;|&nbsp;
-      Unique ports: <b>${r.features.unique_dst_ports}</b><br>
-      Brute force: <b>${r.features.brute_force_cnt}</b> &nbsp;|&nbsp;
-      SSH BF: <b>${r.features.ssh_bf_cnt}</b> &nbsp;|&nbsp;
-      RDP: <b>${r.features.rdp_cnt}</b> &nbsp;|&nbsp;
-      DB scans: <b>${r.features.db_scan_cnt}</b><br>
-      <span style="color:var(--warn)">Baseline alerts: <b>${r.features.baseline_alerts}</b> &nbsp;|&nbsp; Critical alerts: <b>${r.features.critical_alerts}</b></span>
-    </div>`: ''}
-    ${r.note ? `<div style="margin-top:8px;color:var(--warn);font-size:12px">${r.note}</div>` : ''}
-    ${r.anomaly_score !== undefined && r.risk_score !== undefined ? explainMLScore(r) : ''}
-    <div style="margin-top:12px"><button class="btn ai" onclick="aiMLExplainFor('${ip}')">Ask AI why this score</button></div>`;
+    async function trainModelQuick() {
+      document.getElementById('qa-status').textContent = 'Training model…';
+      const r = await post(`${ML}/train`);
+      if (r) { document.getElementById('qa-status').textContent = `Model trained — ${r.anomalies} anomalies found`; toast('Model trained!', 'ok'); }
     }
-    async function loadAnomalies() {
-      const r = await get(`${ML}/anomalies`); if (!r) return;
-      const mlh = await get(`${ML}/health`);
-      const ready = Boolean(mlh?.model_ready);
-      document.getElementById('train-status').textContent = ready
-        ? `Current model loaded · ${r.anomalies.length} anomalies`
-        : 'No trained model yet';
-      document.getElementById('anom-tbody').innerHTML = r.anomalies.length
-        ? r.anomalies.map(a => `<tr onclick="openMLScore('${a.ip}')" style="cursor:pointer">
-      <td style="color:var(--accent)">${a.ip}</td>
-      <td><span style="color:${a.risk_score > 70 ? 'var(--danger)' : a.risk_score > 40 ? 'var(--warn)' : 'var(--ok)'};font-weight:700">${a.risk_score ?? '—'}</span>/100</td>
-      <td style="color:var(--muted)">${a.anomaly_score ?? '—'}</td>
-      <td><span class="badge ${a.risk_score > 70 ? 'critical' : a.risk_score > 40 ? 'high' : 'medium'}">${a.risk_score > 70 ? 'critical' : a.risk_score > 40 ? 'high' : 'medium'}</span></td>
-      <td style="white-space:nowrap">
-        <button class="btn" style="font-size:10px;padding:3px 8px;margin-right:3px" onclick="event.stopPropagation();openMLScore('${a.ip}')">Explain</button>
-        <button class="btn ai" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();aiMLExplainFor('${a.ip}')">AI</button>
-      </td>
-    </tr>`).join('')
-        : `<tr><td colspan="5" class="empty">${ready ? 'No anomalies found in the current trained model' : 'Train the model first'}</td></tr>`;
+
+    function fmtNumber(v) {
+      if (v === null || v === undefined || v === '') return '—';
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toLocaleString() : String(v);
     }
-    async function loadClusters() {
-      const r = await get(`${ML}/clusters`); if (!r) return;
-      if (!r.clusters.length) { document.getElementById('clusters-body').innerHTML = '<div class="card"><div class="cb empty">No clusters found</div></div>'; return; }
-      const max = Math.max(...r.clusters.map(c => c.total_events));
-      document.getElementById('clusters-body').innerHTML = `<div class="card">
-    <div class="ch"><span class="ct">Coordinated attack clusters</span><span style="font-size:11px;color:var(--muted)">${r.clusters.length} clusters</span></div>
-    <div class="cb">${r.clusters.map(c => `
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;background:var(--bg3);border-radius:6px;padding:12px">
-        <div style="min-width:150px"><div style="font-family:var(--mono);font-size:13px;font-weight:600">${c.subnet}</div><div style="font-size:10px;color:var(--muted)">${c.ip_count} IPs</div></div>
-        <div style="flex:1;height:6px;background:var(--bg2);border-radius:3px"><div style="height:100%;border-radius:3px;width:${Math.round(c.total_events / max * 100)}%;background:${c.threat_level === 'critical' ? 'var(--danger)' : c.threat_level === 'high' ? 'var(--warn)' : 'var(--accent)'}"></div></div>
-        <div style="font-size:12px;color:var(--muted);min-width:80px;text-align:right">${c.total_events.toLocaleString()} events</div>
-        <span class="badge ${c.threat_level}">${c.threat_level}</span>
-      </div>
-      <div style="padding:0 12px 10px;font-size:11px;color:var(--muted);font-family:var(--mono)">${c.ips.join(', ')}</div>`).join('')}
-    </div></div>`;
+    function fmtPct(v) {
+      if (v === null || v === undefined || v === '') return '—';
+      const n = Number(v);
+      return Number.isFinite(n) ? (n * 100).toFixed(2) + '%' : String(v);
     }
-    async function loadBlocklist() {
-      const r = await get(`${API}/blocklist`); if (!r) return;
-      document.getElementById('bl-count').textContent = r.count + ' IPs';
-      document.getElementById('bl-body').innerHTML = r.ips.length
-        ? r.ips.map(ip => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(48,54,61,.4)">
-        <span style="font-family:var(--mono);font-size:12px;flex:1">${ip}</span>
-        <button class="btn" style="font-size:10px;padding:3px 8px" onclick="unblockIP('${ip}')">Unblock</button>
-        <button class="btn" style="font-size:10px;padding:3px 8px" onclick="goTrail('${ip}')">Trail</button>
-      </div>`).join('')
-        : '<span style="color:var(--muted);font-size:12px">No IPs blocked</span>';
+    function fmtModelTime(value) {
+      if (!value) return '—';
+      return String(value).substring(0, 19).replace('T', ' ');
     }
-    async function manualBlock() {
-      const ip = document.getElementById('block-ip').value.trim(); if (!ip) return;
-      await post(`${API}/blocklist/add`, { ip });
-      toast(ip + ' blocked', 'ok'); document.getElementById('block-ip').value = ''; await loadBlocklist();
+    function triggerBadge(label, active) {
+      return `<span class="mi-trigger ${active ? 'on' : 'off'}">${label}: ${active ? 'ON' : 'off'}</span>`;
     }
-    async function unblockIP(ip) { await del(`${API}/blocklist/${ip}`); toast(ip + ' unblocked', 'warn'); await loadBlocklist(); }
+    function modelStatusBadge(status) {
+      const s = status || 'unknown';
+      const cls = s === 'active' ? 'low' : s === 'candidate' ? 'high' : s === 'previous' ? 'medium' : 'blocked';
+      return `<span class="badge ${cls}">${s}</span>`;
+    }
+    function renderMetricTile(label, value, sub = '') {
+      return `<div class="mi-mini">
+        <div class="mi-mini-l">${label}</div>
+        <div class="mi-mini-v">${value}</div>
+        ${sub ? `<div class="mi-mini-s">${sub}</div>` : ''}
+      </div>`;
+    }
     function dragOver(e) { e.preventDefault(); document.getElementById('drop-zone').classList.add('drag'); }
     function dragLeave() { document.getElementById('drop-zone').classList.remove('drag'); }
     function dropFile(e) { e.preventDefault(); dragLeave(); const f = e.dataTransfer.files[0]; if (f) uploadCSV(f); }
@@ -3873,7 +4593,7 @@
     const _origRefresh = refreshAll;
     refreshAll = async function () {
       await _origRefresh();
-      ['m-total', 'm-ips', 'm-hot', 'm-balerts', 'm-crit', 'm-blocked'].forEach(id => {
+      ['m-total', 'm-ips', 'm-hot', 'm-balerts', 'm-crit'].forEach(id => {
         const el = document.getElementById(id);
         if (el) { const v = parseInt(el.textContent.replace(/[^0-9]/g, '')) || 0; animateValue(el, v, 700); }
       });
@@ -3898,6 +4618,242 @@
     refreshReportEndpoints();
     refreshAll();
     setInterval(refreshAll, 30000);
+
+    // ── IST timestamp formatter (UTC → Asia/Kolkata) ─────────────────────
+    function toIST(ts) {
+      if (!ts || ts === '—') return '—';
+      // ClickHouse returns "2026-06-18 09:40:32.729000" (UTC, no Z suffix)
+      const d = new Date(String(ts).replace(' ', 'T').replace(/(\.\d+)?$/, 'Z'));
+      if (isNaN(d)) return String(ts).slice(0, 16);
+      return d.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false
+      }).replace(/\//g, '-');
+    }
+
+    // ── Grafana quick-access banner ───────────────────────────────────────
+    function _grafanaBanner() {
+      const url = '/grafana/d/cs-ingestion/cybersentinel-logs-explorer';
+      return `<div style="display:flex;align-items:center;gap:16px;background:linear-gradient(135deg,rgba(240,136,62,.12),rgba(88,166,255,.08));border:1px solid rgba(240,136,62,.3);border-radius:8px;padding:14px 18px">
+        <div style="width:38px;height:38px;border-radius:8px;background:rgba(240,136,62,.15);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f0883e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+        </div>
+        <div style="flex:1">
+          <div style="font-weight:600;font-size:13px">Grafana Log Explorer</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">Visualise live ClickHouse logs — timelines, histograms, raw log browser</div>
+        </div>
+        <a href="${url}" target="_blank" rel="noopener"
+           style="display:inline-flex;align-items:center;gap:6px;background:#f0883e;color:#fff;font-size:12px;font-weight:600;padding:7px 14px;border-radius:6px;text-decoration:none;white-space:nowrap">
+          Open Grafana
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </a>
+        <div style="font-size:10px;color:var(--muted);text-align:right;min-width:90px">
+          <div>Login: <b style="color:var(--text)">admin</b></div>
+          <div style="font-family:var(--mono)">${host}:${GRAFANA_PORT}</div>
+        </div>
+      </div>`;
+    }
+
+    // ── User Management ────────────────────────────────────────────────────
+    const _ROLE_COLOR = { admin: 'var(--warn)', user: 'var(--ok)' };
+    const _ACTION_COLOR = {
+      login: 'var(--ok)', logout: 'var(--muted)',
+      login_failed: 'var(--danger)', create_user: 'var(--accent)',
+      deactivate_user: 'var(--danger)', reactivate_user: 'var(--ok)'
+    };
+
+    async function loadTopologyStatus() {
+      const r = await get(`${API}/network/topology`);
+      const el = document.getElementById('topo-status');
+      const prev = document.getElementById('topo-preview');
+      if (!r) { el.textContent = 'Could not reach topology endpoint.'; return; }
+      if (r.entries === 0) {
+        el.textContent = 'No topology loaded. Upload an Excel or CSV file to enrich Kill Chain.';
+        prev.innerHTML = '';
+        return;
+      }
+      el.innerHTML = `<span style="color:var(--ok)">✔ ${r.entries} IP entries loaded</span>`;
+      const sample = Object.entries(r.data || {}).slice(0, 5);
+      if (sample.length) {
+        const cols = [...new Set(sample.flatMap(([,v]) => Object.keys(v)))];
+        prev.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Sample (first 5 entries):</div>
+          <table class="tbl" style="font-size:11px"><thead><tr><th>IP</th>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+          <tbody>${sample.map(([ip,v])=>`<tr><td><b>${ip}</b></td>${cols.map(c=>`<td>${v[c]||''}</td>`).join('')}</tr>`).join('')}
+          </tbody></table>`;
+      }
+    }
+    async function uploadTopology(input) {
+      const file = input.files[0]; if (!file) return;
+      const el = document.getElementById('topo-status');
+      el.textContent = 'Uploading…';
+      const fd = new FormData(); fd.append('file', file);
+      try {
+        const resp = await fetch(`${API}/network/topology/upload`, { method:'POST', headers: _ah(), body: fd });
+        const r = await resp.json();
+        if (!resp.ok) { el.innerHTML = `<span style="color:var(--danger)">Error: ${r.detail||resp.status}</span>`; return; }
+        el.innerHTML = `<span style="color:var(--ok)">✔ Loaded ${r.loaded} IP entries. Columns: ${r.columns.join(', ')}</span>`;
+        toast(`Topology loaded: ${r.loaded} entries`, 'ok');
+        await loadTopologyStatus();
+      } catch(e) { el.innerHTML = `<span style="color:var(--danger)">Upload failed: ${e.message}</span>`; }
+      input.value = '';
+    }
+    async function clearTopology() {
+      if (!confirm('Clear all topology data?')) return;
+      await fetch(`${API}/network/topology`, { method:'DELETE', headers: _ah() });
+      toast('Topology cleared', 'ok');
+      await loadTopologyStatus();
+    }
+
+    async function loadUsers() {
+      const banner = document.getElementById('grafana-banner-users');
+      if (banner) banner.innerHTML = _grafanaBanner();
+      const el = document.getElementById('users-list');
+      el.innerHTML = '<span style="color:var(--muted)">Loading…</span>';
+      const t = _authToken();
+      let rows;
+      try {
+        const r = await fetch(AUTH + '/users', { headers: { 'Authorization': 'Bearer ' + t } });
+        if (!r.ok) { el.innerHTML = '<span style="color:var(--danger)">Error: ' + r.status + '</span>'; return; }
+        rows = await r.json();
+      } catch(e) { el.innerHTML = '<span style="color:var(--danger)">Network error</span>'; return; }
+
+      if (!rows.length) { el.innerHTML = '<span style="color:var(--muted)">No users yet.</span>'; return; }
+
+      el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:11px">
+          <th style="text-align:left;padding:6px 8px">Username</th>
+          <th style="text-align:left;padding:6px 8px">Role</th>
+          <th style="text-align:left;padding:6px 8px">Status</th>
+          <th style="text-align:left;padding:6px 8px">Created</th>
+          <th style="text-align:left;padding:6px 8px">By</th>
+          <th style="text-align:left;padding:6px 8px">Actions</th>
+        </tr></thead>
+        <tbody>${rows.map(u => `<tr style="border-bottom:1px solid rgba(48,54,61,.4)">
+          <td style="padding:8px 8px;font-weight:600;font-family:var(--mono)">${escapeHTML(u.username)}</td>
+          <td style="padding:8px 8px"><span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(255,255,255,.07);color:${_ROLE_COLOR[u.role]||'var(--muted)'}">${u.role === 'admin' ? 'Admin' : 'Analyst'}</span></td>
+          <td style="padding:8px 8px"><span style="font-size:11px;color:${u.is_active?'var(--ok)':'var(--danger)'}">${u.is_active ? '● Active' : '○ Inactive'}</span></td>
+          <td style="padding:8px 8px;color:var(--muted);font-size:12px">${toIST(u.created_at)}</td>
+          <td style="padding:8px 8px;color:var(--muted);font-size:12px">${escapeHTML(u.created_by||'—')}</td>
+          <td style="padding:8px 8px">
+            ${u.username !== _authUser() ? (u.is_active
+              ? `<button class="btn" style="font-size:10px;padding:3px 8px;color:var(--danger)" onclick="deactivateUser('${escapeHTML(u.username)}')">Deactivate</button>`
+              : `<button class="btn" style="font-size:10px;padding:3px 8px;color:var(--ok)" onclick="reactivateUser('${escapeHTML(u.username)}')">Reactivate</button>`
+            ) : '<span style="font-size:11px;color:var(--muted)">You</span>'}
+          </td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+    }
+
+    async function createUser() {
+      const u = document.getElementById('nu-user').value.trim();
+      const p = document.getElementById('nu-pass').value;
+      const r = document.getElementById('nu-role').value;
+      const errEl = document.getElementById('nu-err');
+      errEl.style.display = 'none';
+      if (!u || !p) { errEl.textContent = 'Username and password required.'; errEl.style.display = ''; return; }
+      const res = await authPost(AUTH + '/users', { username: u, password: p, role: r });
+      if (res) {
+        toast('User ' + u + ' created (' + r + ')', 'ok');
+        document.getElementById('nu-user').value = '';
+        document.getElementById('nu-pass').value = '';
+        loadUsers();
+      }
+    }
+
+    async function deactivateUser(username) {
+      if (!confirm('Deactivate user "' + username + '"? They will no longer be able to log in.')) return;
+      const t = _authToken();
+      try {
+        const r = await fetch(AUTH + '/users/' + encodeURIComponent(username), {
+          method: 'DELETE', headers: { 'Authorization': 'Bearer ' + t }
+        });
+        const data = await r.json();
+        if (r.ok) { toast(username + ' deactivated', 'warn'); loadUsers(); }
+        else { toast('Error: ' + (data.detail || r.status), 'err'); }
+      } catch(e) { toast('Network error', 'err'); }
+    }
+
+    async function reactivateUser(username) {
+      const t = _authToken();
+      try {
+        const r = await fetch(AUTH + '/users/' + encodeURIComponent(username) + '/reactivate', {
+          method: 'POST', headers: { 'Authorization': 'Bearer ' + t }
+        });
+        const data = await r.json();
+        if (r.ok) { toast(username + ' reactivated', 'ok'); loadUsers(); }
+        else { toast('Error: ' + (data.detail || r.status), 'err'); }
+      } catch(e) { toast('Network error', 'err'); }
+    }
+
+    // ── Login Audit Log ────────────────────────────────────────────────────
+    async function loadAuditLog(filterUser) {
+      const banner = document.getElementById('grafana-banner-audit');
+      if (banner) banner.innerHTML = _grafanaBanner();
+      const summEl = document.getElementById('audit-summary');
+      const evtEl  = document.getElementById('audit-events');
+      summEl.innerHTML = '<span style="color:var(--muted)">Loading…</span>';
+      evtEl.innerHTML  = '<span style="color:var(--muted)">Loading…</span>';
+      const t = _authToken();
+
+      // Summary table
+      try {
+        const r = await fetch(AUTH + '/audit/summary', { headers: { 'Authorization': 'Bearer ' + t } });
+        if (r.ok) {
+          const rows = await r.json();
+          if (!rows.length) { summEl.innerHTML = '<span style="color:var(--muted)">No login history yet.</span>'; }
+          else {
+            summEl.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:11px">
+                <th style="text-align:left;padding:6px 8px">User</th>
+                <th style="text-align:right;padding:6px 8px">Logins</th>
+                <th style="text-align:right;padding:6px 8px">Failures</th>
+                <th style="text-align:left;padding:6px 8px">Last Login</th>
+                <th style="text-align:left;padding:6px 8px">First Login</th>
+              </tr></thead>
+              <tbody>${rows.map(r => `<tr style="border-bottom:1px solid rgba(48,54,61,.4)">
+                <td style="padding:8px;font-weight:600;font-family:var(--mono)">${escapeHTML(r.username)}</td>
+                <td style="padding:8px;text-align:right;color:var(--ok)">${r.logins}</td>
+                <td style="padding:8px;text-align:right;color:${r.failures>0?'var(--danger)':'var(--muted)'}">${r.failures}</td>
+                <td style="padding:8px;color:var(--muted);font-size:12px">${toIST(r.last_login)}</td>
+                <td style="padding:8px;color:var(--muted);font-size:12px">${toIST(r.first_login)}</td>
+              </tr>`).join('')}</tbody>
+            </table>`;
+          }
+        }
+      } catch(e) { summEl.innerHTML = '<span style="color:var(--danger)">Error loading summary</span>'; }
+
+      // Event log
+      const q = filterUser ? '?username=' + encodeURIComponent(filterUser) : '';
+      try {
+        const r = await fetch(AUTH + '/audit' + q, { headers: { 'Authorization': 'Bearer ' + t } });
+        if (r.ok) {
+          const rows = await r.json();
+          if (!rows.length) { evtEl.innerHTML = '<span style="color:var(--muted)">No events.</span>'; return; }
+          evtEl.innerHTML = `<div style="font-family:var(--mono);font-size:12px;display:flex;flex-direction:column;gap:3px">
+            ${rows.map(ev => {
+              const col = _ACTION_COLOR[ev.action] || 'var(--muted)';
+              const icon = ev.action === 'login' ? '→' : ev.action === 'logout' ? '←' : ev.action === 'login_failed' ? '✗' : '·';
+              return `<div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid rgba(48,54,61,.3)">
+                <span style="color:var(--muted);min-width:165px">${toIST(ev.ts)}</span>
+                <span style="color:${col};min-width:18px">${icon}</span>
+                <span style="font-weight:600;min-width:100px">${escapeHTML(ev.username)}</span>
+                <span style="color:${col};min-width:110px">${escapeHTML(ev.action)}</span>
+                <span style="color:var(--muted)">${escapeHTML(ev.client_ip||'')}${ev.extra ? ' · ' + escapeHTML(ev.extra) : ''}</span>
+              </div>`;
+            }).join('')}
+          </div>`;
+        }
+      } catch(e) { evtEl.innerHTML = '<span style="color:var(--danger)">Error loading events</span>'; }
+    }
+
+    async function filterAudit() {
+      const u = document.getElementById('audit-filter-user').value.trim();
+      loadAuditLog(u || undefined);
+    }
   </script>
 </body>
 

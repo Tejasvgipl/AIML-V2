@@ -13,4 +13,6 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Production: NO --reload. (--reload restarts the worker on file changes or
+# crashes the worker on a code error -> intermittent 502s.) Stable single worker.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
