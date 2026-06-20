@@ -2642,8 +2642,11 @@
             <span class="ct" id="nl-result-title">Results</span>
             <button class="btn" style="font-size:11px;padding:3px 10px" onclick="nlExportCSV()">Export CSV</button>
           </div>
-          <div class="cb" style="overflow-x:auto;max-height:500px;overflow-y:auto">
-            <div id="nl-table-wrap"></div>
+          <!-- overflow-x on outer, overflow-y on inner — keeps th position:sticky working in Chrome -->
+          <div class="cb" style="overflow-x:auto;padding:0">
+            <div style="max-height:460px;overflow-y:auto">
+              <div id="nl-table-wrap"></div>
+            </div>
           </div>
         </div>
         <div id="nl-error" style="display:none;padding:12px 16px;background:rgba(255,59,48,.08);border:1px solid var(--danger);border-radius:6px;color:var(--danger);font-size:13px;margin-top:8px"></div>
@@ -4056,9 +4059,11 @@ tr:hover td{background:#161b22}</style></head>
           tableWrap.innerHTML = '<div class="empty" style="padding:16px">No results returned</div>';
           return;
         }
-        let html = '<table class="tbl"><thead><tr>' + data.columns.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+        let html = '<table class="tbl" style="width:100%;border-collapse:collapse"><thead><tr>'
+          + data.columns.map(c => `<th style="position:sticky;top:0;background:#161b22;z-index:3;white-space:nowrap;padding:8px 12px;color:var(--accent);text-align:left;border-bottom:2px solid var(--border)">${c}</th>`).join('')
+          + '</tr></thead><tbody>';
         for (const row of data.rows) {
-          html += '<tr>' + row.map(v => `<td style="white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis" title="${String(v??'').replace(/"/g,'&quot;')}">${v??'—'}</td>`).join('') + '</tr>';
+          html += '<tr>' + row.map(v => `<td style="white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis;padding:6px 12px;border-bottom:1px solid var(--border)" title="${String(v??'').replace(/"/g,'&quot;')}">${v??'—'}</td>`).join('') + '</tr>';
         }
         html += '</tbody></table>';
         tableWrap.innerHTML = html;
@@ -4174,11 +4179,11 @@ tr:hover td{background:#161b22}</style></head>
       }
       document.getElementById('incidents-body').innerHTML = inc.map(i => {
         const pc = i.priority > 70 ? 'var(--danger)' : i.priority > 40 ? 'var(--warn)' : 'var(--ok)';
-        const chips = (i.tactics || []).map(t => `<span class="chip" style="font-size:10px">${t}</span>`).join('');
-        const techs = (i.techniques || []).map(t => `<span style="font-size:11px;color:var(--muted);margin-right:8px">${t.id}</span>`).join('');
+        const chips = (i.tactics || []).map(t => `<span class="chip" style="font-size:10px;white-space:nowrap">${t}</span>`).join('');
+        const techs = (i.techniques || []).map(t => `<span style="font-size:10px;color:var(--accent);background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;white-space:nowrap">${t.id}</span>`).join('');
         const ips = (i.entities?.ips || []).slice(0, 5).map(ip =>
-          `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-            <span style="font-family:var(--mono);font-size:12px;color:var(--accent);min-width:120px">${ip}</span>
+          `<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">
+            <span style="font-family:var(--mono);font-size:12px;color:var(--accent);min-width:130px">${ip}</span>
             <button class="btn" style="font-size:10px;padding:2px 7px" onclick="goTrail('${ip}')">Trail</button>
             <button class="btn" style="font-size:10px;padding:2px 7px" onclick="goKillChain('${ip}')">Kill Chain</button>
           </div>`).join('');
@@ -4189,10 +4194,10 @@ tr:hover td{background:#161b22}</style></head>
             <span style="font-size:24px;font-weight:700;color:${pc}">${i.priority}</span>
           </div>
           <div class="cb">
-            <div style="margin-bottom:8px">${chips}</div>
-            <div style="margin-bottom:8px;font-size:12px">${techs}</div>
-            <div style="margin-bottom:10px">${ips}${i.ip_count > 5 ? `<span style="font-size:11px;color:var(--muted)">+${i.ip_count - 5} more</span>` : ''}</div>
-            <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">${i.narrative || ''}</div>
+            ${chips ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px">${chips}</div>` : ''}
+            ${techs ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">${techs}</div>` : ''}
+            ${ips ? `<div style="margin-bottom:10px">${ips}${i.ip_count > 5 ? `<span style="font-size:11px;color:var(--muted)">+${i.ip_count - 5} more</span>` : ''}</div>` : ''}
+            ${i.narrative ? `<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">${i.narrative}</div>` : ''}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               ${lead ? `<button class="btn ai" style="font-size:11px" onclick="incidentNarrative('${lead}', this)">AI incident report</button>` : ''}
               ${lead ? `<button class="btn" style="font-size:11px" onclick="nav('ueba')">UEBA</button>` : ''}
@@ -4279,11 +4284,11 @@ tr:hover td{background:#161b22}</style></head>
     // ── Kill Chain ────────────────────────────────────────────────────────────
     function goKillChain(ip) { nav('killchain'); document.getElementById('kc-ip').value = ip; loadKillChain(); }
 
-    function kcNodeDetail(type, idx) {
+    function kcNodeDetail(type, idx, el) {
       const d = window._kcData; if (!d) return;
       const panel = document.getElementById('kc-detail-panel'); if (!panel) return;
-      document.querySelectorAll('.kc-node,.kc-stage').forEach(el => el.classList.remove('kc-active'));
-      const clicked = event?.currentTarget; if (clicked) clicked.classList.add('kc-active');
+      document.querySelectorAll('.kc-node,.kc-stage').forEach(n => n.classList.remove('kc-active'));
+      if (el) el.classList.add('kc-active');
 
       let html = '';
 
@@ -4369,8 +4374,12 @@ tr:hover td{background:#161b22}</style></head>
     }
 
     async function loadKillChain() {
-      const ip = document.getElementById('kc-ip').value.trim(); if (!ip) return;
+      const ip = document.getElementById('kc-ip').value.trim(); if (!ip) { toast('Enter an IP address first'); return; }
       const r = await get(`${API}/killchain/${ip}`); if (!r) return;
+      try { _renderKillChain(ip, r); } catch(e) { console.error('KillChain render error:', e); toast('Kill chain render error: ' + e.message); }
+    }
+
+    function _renderKillChain(ip, r) {
       document.getElementById('kc-panel').style.display = 'block';
       document.getElementById('kc-ai-panel').style.display = 'none';
       document.getElementById('kc-title').textContent = `Attack Timeline — ${ip}`;
@@ -4378,8 +4387,8 @@ tr:hover td{background:#161b22}</style></head>
       // ── Summary card ─────────────────────────────────────────────────────
       const net = r.network_path || [];
       const stages = r.stages || [];
-      const fwStage = net.find(n => n.stage.startsWith('Firewall'));
-      const routerStage = net.find(n => n.stage.startsWith('Router'));
+      const fwStage = net.find(n => (n.stage||'').startsWith('Firewall'));
+      const routerStage = net.find(n => (n.stage||'').startsWith('Router'));
       const endpointStage = net.find(n => n.stage === 'Endpoint');
       const firstTs = stages[0]?.first_seen || net[0]?.first_seen || '';
       const lastTs  = stages[stages.length-1]?.last_seen || '';
@@ -4435,7 +4444,7 @@ tr:hover td{background:#161b22}</style></head>
       const tacticColors = { Reconnaissance:'#64b5f6', 'Resource Development':'#64b5f6', 'Initial Access':'#4ade80', Execution:'#facc15', Persistence:'#fb923c', 'Privilege Escalation':'#f87171', 'Defense Evasion':'#a78bfa', 'Credential Access':'#f87171', Discovery:'#c084fc', 'Lateral Movement':'#ef4444', Collection:'#f59e0b', 'Command and Control':'#ef4444', Exfiltration:'#ef4444', Impact:'#dc2626' };
       const netStatusColor = { established:'#00bcd4', allowed:'#4ade80', blocked:'#ef4444', partial:'#facc15', observed:'#94a3b8', routed:'#00bcd4', reached:'#4ade80' };
       const netStatusLabel = { established:'CONNECTED', allowed:'ALLOWED', blocked:'BLOCKED', partial:'PARTIAL BLOCK', observed:'OBSERVED', routed:'ROUTED', reached:'REACHED' };
-      const netNodeIcon = n => n.stage.startsWith('Firewall') ? '🛡' : n.stage.startsWith('Router') ? '🔀' : n.stage === 'Endpoint' ? '💻' : n.stage === 'TCP Connection' ? '🌐' : '📡';
+      const netNodeIcon = n => { const s = n.stage||''; return s.startsWith('Firewall') ? '🛡' : s.startsWith('Router') ? '🔀' : s === 'Endpoint' ? '💻' : s === 'TCP Connection' ? '🌐' : '📡'; };
       const netGlow = { blocked:'0 0 22px rgba(239,68,68,0.35)', partial:'0 0 22px rgba(250,204,21,0.3)', allowed:'0 0 16px rgba(74,222,128,0.2)' };
 
       const netPath    = r.network_path || [];
@@ -4448,7 +4457,7 @@ tr:hover td{background:#161b22}</style></head>
       const netFlowHtml = netPath.length ? `
         <div class="kc-section-label">Network Path · Traffic Topology</div>
         <div class="kc-flow-wrap"><div class="kc-flow-row">
-          <div class="kc-node" style="color:#64b5f6;animation:kcNodeIn .4s ease 0s backwards" onclick="kcNodeDetail('src')">
+          <div class="kc-node" style="color:#64b5f6;animation:kcNodeIn .4s ease 0s backwards" onclick="kcNodeDetail('src',-1,this)">
             <div class="kc-node-icon">🌍</div>
             <div class="kc-node-label">Attacker</div>
             <div class="kc-node-status" style="background:rgba(100,181,246,.15);color:#64b5f6">${ip}</div>
@@ -4465,7 +4474,7 @@ tr:hover td{background:#161b22}</style></head>
               </div>
               <div class="kc-node${n.status==='blocked'?' kc-active':''}"
                    style="color:${col};${glow ? 'box-shadow:'+glow+';border-color:'+col : ''};animation:kcNodeIn .4s ease ${delay}s backwards"
-                   onclick="kcNodeDetail('net',${i})">
+                   onclick="kcNodeDetail('net',${i},this)">
                 <div class="kc-node-icon">${netNodeIcon(n)}</div>
                 <div class="kc-node-label">${n.stage}</div>
                 <div class="kc-node-status" style="background:rgba(0,0,0,.35);color:${col}">${lbl}</div>
@@ -4483,7 +4492,7 @@ tr:hover td{background:#161b22}</style></head>
             const techCnt = (s.techniques||[]).length;
             return `
               ${i > 0 ? `<div class="kc-stage-arrow" style="animation:kcStageIn .3s ease ${i*.08}s backwards">›</div>` : ''}
-              <div class="kc-stage" style="--stage-col:${col};animation:kcStageIn .4s ease ${i*.1}s backwards" onclick="kcNodeDetail('attck',${i})">
+              <div class="kc-stage" style="--stage-col:${col};animation:kcStageIn .4s ease ${i*.1}s backwards" onclick="kcNodeDetail('attck',${i},this)">
                 <div class="kc-stage-num">STAGE ${String(i+1).padStart(2,'0')}</div>
                 <div class="kc-stage-tactic">${s.tactic}</div>
                 <div class="kc-stage-count">${s.events} events</div>
