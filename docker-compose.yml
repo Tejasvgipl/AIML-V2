@@ -1,7 +1,7 @@
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
-    container_name: cs_clickhouse
+    container_name: aiml_clickhouse
     environment:
       - CLICKHOUSE_DB=cybersentinel
     ports:
@@ -36,7 +36,7 @@ services:
   # SQL-only; Grafana gives the histogram + click-to-browse raw logs.
   grafana:
     image: grafana/grafana:11.1.0
-    container_name: cs_grafana
+    container_name: aiml_grafana
     environment:
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       # Login required — set your username/password here
@@ -60,7 +60,7 @@ services:
 
   backend:
     build: ./backend
-    container_name: cs_backend
+    container_name: aiml_backend
     ports:
       - "${BACKEND_HOST_PORT:-18110}:8000"
     environment:
@@ -100,7 +100,7 @@ services:
 
   ml-engine:
     build: ./ml-engine
-    container_name: cs_ml
+    container_name: aiml_ml
     ports:
       - "${ML_ENGINE_HOST_PORT:-18111}:8001"
     environment:
@@ -130,7 +130,7 @@ services:
 
   auth:
     build: ./auth
-    container_name: cs_auth
+    container_name: aiml_auth
     ports:
       - "${AUTH_HOST_PORT:-18113}:8003"
     environment:
@@ -160,7 +160,7 @@ services:
 
   frontend:
     build: ./frontend
-    container_name: cs_frontend
+    container_name: aiml_frontend
     ports:
       - "${FRONTEND_HOST_PORT:-18180}:80"
     depends_on:
@@ -170,7 +170,7 @@ services:
 
   nginx:
     build: ./nginx
-    container_name: cs_nginx
+    container_name: aiml_nginx
     ports:
       - "${NGINX_HOST_PORT:-18888}:80"
     depends_on:
@@ -190,7 +190,7 @@ services:
 
   wazuh-watcher:
     build: ./scripts
-    container_name: cs_wazuh_watcher
+    container_name: aiml_wazuh_watcher
     deploy:
       resources:
         limits:
