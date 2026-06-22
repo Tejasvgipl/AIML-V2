@@ -54,6 +54,19 @@ _topology: dict[str, dict] = _load_topology()
 app = FastAPI(title="CyberSentinel API", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+
+@app.on_event("startup")
+async def _warm_cache():
+    """Pre-populate stats cache so the first browser load is instant."""
+    async def _warm():
+        await asyncio.sleep(5)  # let ClickHouse connections settle
+        try:
+            await asyncio.gather(get_stats(), get_resilience())
+            print("[startup] stats + resilience cache warmed")
+        except Exception as e:
+            print(f"[startup] cache warm failed (non-fatal): {e}")
+    asyncio.create_task(_warm())
+
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "demo")
 AI_API_KEY  = os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", ""))
 AI_MODEL      = os.getenv("AI_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
@@ -67,7 +80,7 @@ VOLUME_SPIKE_MULTIPLIER = 3
 # â”€â”€ Stats cache (avoids 7 ClickHouse queries every 10 s) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _stats_cache: dict = {}
 _stats_cache_ts: float = 0.0
-_STATS_TTL = 15  # seconds
+_STATS_TTL = 60  # seconds — cache for 60s; hot-ips call refreshes independently
 _hot_ips_cache: list = []
 _hot_ips_cache_ts: float = 0.0
 
@@ -2222,19 +2235,24 @@ PRIORITY JUSTIFICATION:"""
 
 @app.get("/api/logs")
 async def get_logs(minutes: int = 0, start: str = "", end: str = "",
-                   severity: str = "", min_level: int = 0, limit: int = 500):
-    """Recent raw logs from ClickHouse with time + severity filters (UI Logs page)."""
+                   severity: str = "", min_level: int = 0, limit: int = 200):
     if not (STORE_ENABLED and osc):
         return {"logs": [], "count": 0, "source": "disabled"}
+    # Default to last 24h when no filter given — avoids full table scan on 1.8M+ rows
+    # ClickHouse partitions by day so ts filter = only 1-2 partitions scanned
+    if not minutes and not start and not end:
+        minutes = 1440  # 24 hours
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
-    logs = osc.get_recent_logs(minutes=minutes, start=start, end=end,
-                               severities=sevs, min_level=min_level, limit=min(limit, 5000))
+    logs = await asyncio.to_thread(
+        osc.get_recent_logs,
+        minutes, start, end, sevs, min_level, min(limit, 1000)
+    )
     return {"logs": logs, "count": len(logs), "source": "clickhouse"}
 
 
 @app.get("/api/search")
 async def search_ip(q: str):
-    ips = osc.search_ips_by_prefix(q, limit=20) if (STORE_ENABLED and osc) else []
+    ips = await asyncio.to_thread(osc.search_ips_by_prefix, q, 20) if (STORE_ENABLED and osc) else []
     return [await trail_summary(ip) for ip in ips]
 
 
@@ -2430,30 +2448,38 @@ SQL:"""
         raise HTTPException(500, f"Query execution failed: {str(e)}")
 
 
+_resilience_cache: dict = {}
+_resilience_cache_ts: float = 0.0
+_RESILIENCE_TTL = 120  # seconds — resilience score changes slowly
+
+
 @app.get("/api/resilience")
 async def get_resilience():
-    def qval(sql: str, default: int = 0) -> int:
-        if not (STORE_ENABLED and osc):
-            return default
-        c = osc.get_client()
-        if not c:
-            return default
-        try:
-            res = c.query(sql)
-            if res.result_rows:
-                v = res.result_rows[0][0]
-                return int(v) if v is not None else default
-        except Exception:
-            pass
-        return default
+    global _resilience_cache, _resilience_cache_ts
+    if _resilience_cache and time.time() - _resilience_cache_ts < _RESILIENCE_TTL:
+        return _resilience_cache
 
-    active_ips   = qval("SELECT count(DISTINCT src_ip) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY")
-    baselined    = qval("SELECT count(DISTINCT ip) FROM cybersentinel.baselines FINAL")
-    ml_scored    = qval("SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL")
-    critical_thr = qval("SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL WHERE risk_score >= 70")
-    blocked      = qval("SELECT count(DISTINCT ip) FROM cybersentinel.blocklist FINAL WHERE active = 1")
-    deviations   = qval("SELECT count(DISTINCT ip) FROM cybersentinel.deviations WHERE ts > now() - INTERVAL 7 DAY")
-    events_7d    = qval("SELECT count(*) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY")
+    if not (STORE_ENABLED and osc):
+        return {"score": 0, "grade": "F", "active_ips": 0, "events_7d": 0, "components": {}, "computed_at": datetime.now(timezone.utc).isoformat()}
+
+    def _qval(sql: str) -> int:
+        try:
+            rows = osc._q(sql)
+            return int(rows[0].get(list(rows[0].keys())[0], 0)) if rows else 0
+        except Exception:
+            return 0
+
+    # Run all 7 ClickHouse counts in parallel
+    (active_ips, baselined, ml_scored, critical_thr,
+     blocked, deviations, events_7d) = await asyncio.gather(
+        asyncio.to_thread(_qval, "SELECT count(DISTINCT src_ip) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY"),
+        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.baselines FINAL"),
+        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL"),
+        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL WHERE risk_score >= 70"),
+        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.blocklist FINAL WHERE active = 1"),
+        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.deviations WHERE ts > now() - INTERVAL 7 DAY"),
+        asyncio.to_thread(_qval, "SELECT count(*) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY"),
+    )
 
     safe_active = max(active_ips, 1)
 
@@ -2473,7 +2499,7 @@ async def get_resilience():
     total = ml_pts + bl_pts + pressure_pts + resp_pts
     grade = "A" if total >= 80 else "B" if total >= 65 else "C" if total >= 50 else "D" if total >= 35 else "F"
 
-    return {
+    result = {
         "score": total,
         "grade": grade,
         "active_ips": active_ips,
@@ -2486,6 +2512,9 @@ async def get_resilience():
         },
         "computed_at": datetime.now(timezone.utc).isoformat(),
     }
+    _resilience_cache = result
+    _resilience_cache_ts = time.time()
+    return result
 
 
 @app.get("/api/health")

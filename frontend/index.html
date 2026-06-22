@@ -2856,7 +2856,12 @@ tr:hover td{background:#161b22}</style></head>
     }
     async function refreshAll() {
       try {
-      const s = await get(`${API}/stats`); if (!s) return;
+      const [s, hot, mlh] = await Promise.all([
+        get(`${API}/stats`),
+        get(`${API}/hot-ips`),
+        get(`${ML}/health`),
+      ]);
+      if (!s) return;
       const totalLogs = Number(s.total_logs || 0);
       const hotCount = (s.hot_ips || []).length;
       const criticalCount = (s.critical_ips || []).length;
@@ -2904,7 +2909,6 @@ tr:hover td{background:#161b22}</style></head>
         : '<span style="width:6px;height:6px;border-radius:50%;background:var(--warn);display:inline-block"></span> AI key missing';
       if (s.threat_counts && Object.keys(s.threat_counts).length) pie('ch-threats', s.threat_counts);
       if (s.alert_type_counts && Object.keys(s.alert_type_counts).length) pie('ch-devtypes', s.alert_type_counts);
-      const hot = await get(`${API}/hot-ips`);
       if (hot) {
         document.getElementById('hot-count').textContent = hot.length + ' IPs';
         document.getElementById('watchlist').innerHTML = hot.length
@@ -2936,7 +2940,6 @@ tr:hover td{background:#161b22}</style></head>
       </tr>`;
         }).join('');
       }
-      const mlh = await get(`${ML}/health`);
       if (mlh) {
         document.getElementById('ml-status').innerHTML = mlh.model_ready
           ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block"></span> ML ready'
@@ -4592,7 +4595,9 @@ tr:hover td{background:#161b22}</style></head>
     document.head.appendChild(fadeStyle);
     refreshReportEndpoints();
     refreshAll();
+    loadResilience();
     setInterval(refreshAll, 10000);
+    setInterval(loadResilience, 120000);
 
     // ── IST timestamp formatter (UTC → Asia/Kolkata) ─────────────────────
     function toIST(ts) {
