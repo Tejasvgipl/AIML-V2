@@ -809,21 +809,20 @@ async def _scan_ip_deviations(ip: str, events_per_ip: int) -> tuple[int, int]:
 
 async def _run_deviation_scan(max_ips: int, events_per_ip: int):
     """Full deviation scan — runs in background, parallelised per IP."""
-    client = osc.get_client()
     active_ips: list[str] = []
-    if client:
+    try:
+        # osc._q uses thread-local client internally — safe to call from any thread
+        rows = await asyncio.to_thread(
+            osc._q,
+            f"SELECT DISTINCT src_ip FROM cybersentinel.logs "
+            f"WHERE ts > now() - INTERVAL 24 HOUR LIMIT {int(max_ips)}",
+        )
+        active_ips = [r["src_ip"] for r in rows if r.get("src_ip")]
+    except Exception:
         try:
-            res = await asyncio.to_thread(
-                client.query,
-                "SELECT DISTINCT src_ip FROM cybersentinel.logs "
-                "WHERE ts > now() - INTERVAL 24 HOUR LIMIT {n:UInt32}",
-                {"n": max_ips},
-            )
-            active_ips = [r[0] for r in res.result_rows if r[0]]
-        except Exception:
             active_ips = (await asyncio.to_thread(osc.get_all_baseline_ips))[:max_ips]
-    else:
-        active_ips = (await asyncio.to_thread(osc.get_all_baseline_ips))[:max_ips]
+        except Exception:
+            active_ips = []
 
     # Process all IPs in parallel — no more sequential 500-query chain
     CONCURRENCY = 20
