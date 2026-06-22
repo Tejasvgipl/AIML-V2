@@ -2001,8 +2001,6 @@
         <div class="ni" onclick="nav('ingest')"><span class="ndot nd-g"></span>Ingest Logs</div>
         <div class="ns">Reporting</div>
         <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Reports</div>
-        <div class="ns">System</div>
-        <div class="ni" onclick="nav('users')"><span class="ndot" style="background:var(--muted)"></span>Settings</div>
       </nav>
       <div class="sfooter">
         <div class="srow"><span class="pulse"></span>Backend API</div>
@@ -2660,34 +2658,6 @@
         </div>
       </div>
 
-      <!-- ── Settings ───────────────────────────────────────────────────────── -->
-      <div id="page-users" class="page">
-        <div style="display:grid;gap:18px;padding:0 4px">
-          <div class="card" style="background:var(--bg2)">
-            <div class="ch"><span class="ct">External Tools</span></div>
-            <div class="cb" style="display:flex;gap:12px;flex-wrap:wrap">
-              <button class="btn" style="border-color:#f46800;color:#f46800" onclick="openGrafana()">📊 Grafana Dashboard ↗</button>
-              <span style="font-size:11px;color:var(--muted);align-self:center">Grafana: <code>admin / tejas@123</code></span>
-            </div>
-          </div>
-          <div class="card">
-            <div class="ch"><span class="ct">Network Topology</span><span style="font-size:11px;color:var(--muted)">Upload Excel/CSV to enrich Kill Chain with real device names, switches, floors, owners</span></div>
-            <div class="cb">
-              <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-                Required column: <code>ip</code> or <code>ip_address</code>. Optional: <code>hostname</code>, <code>device_type</code>, <code>floor</code>, <code>department</code>, <code>switch_name</code>, <code>switch_port</code>, <code>vlan</code>, <code>owner</code>
-              </div>
-              <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-                <input type="file" id="topo-file" accept=".xlsx,.xls,.csv" style="display:none" onchange="uploadTopology(this)"/>
-                <button class="btn pri" onclick="document.getElementById('topo-file').click()">📂 Upload Excel / CSV</button>
-                <button class="btn" onclick="loadTopologyStatus()">↻ Status</button>
-                <button class="btn" style="color:var(--danger);border-color:var(--danger)" onclick="clearTopology()">🗑 Clear</button>
-              </div>
-              <div id="topo-status" style="margin-top:10px;font-size:12px;color:var(--muted)">Loading status…</div>
-              <div id="topo-preview" style="margin-top:10px"></div>
-            </div>
-          </div>
-        </div>
-      </div>
     </main>
   </div>
   <div class="toast-wrap" id="toast-wrap"></div>
@@ -2758,7 +2728,6 @@ tr:hover td{background:#161b22}</style></head>
         aiinvestigate: 'AI Investigator', nlquery: 'SOC Query', ml: 'ML Anomaly',
         incidents: 'Incident Triage', ueba: 'UEBA — Users & Entities', killchain: 'ATT&CK Kill Chain',
         ingest: 'Ingest Logs', reports: 'Reports',
-        users: 'Settings'
       };
       document.getElementById('page-title').textContent = T[name] || name;
       document.body.dataset.page = name;
