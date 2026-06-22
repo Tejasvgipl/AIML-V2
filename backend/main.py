@@ -78,21 +78,26 @@ async def _start_background_refresh():
     Every browser request is served instantly from memory — no waiting for ClickHouse.
     This is how Grafana/Datadog achieve fast dashboards.
     """
-    async def _refresh_loop():
-        await asyncio.sleep(2)  # let ClickHouse settle on boot
+    async def _refresh_fast():
+        """Stats, hot-ips, resilience every 30s — lightweight."""
+        await asyncio.sleep(2)
+        while True:
+            await asyncio.gather(get_stats(), get_hot_ips(), get_resilience(),
+                                 return_exceptions=True)
+            await asyncio.sleep(30)
+
+    async def _refresh_incidents():
+        """Incidents are heavier — refresh every 60s, first run at 10s."""
+        await asyncio.sleep(10)
         while True:
             try:
-                await asyncio.gather(
-                    get_stats(),
-                    get_hot_ips(),
-                    get_resilience(),
-                    return_exceptions=True,
-                )
+                await _gather_incidents()
             except Exception:
                 pass
-            await asyncio.sleep(30)  # refresh every 30 seconds
+            await asyncio.sleep(60)
 
-    asyncio.create_task(_refresh_loop())
+    asyncio.create_task(_refresh_fast())
+    asyncio.create_task(_refresh_incidents())
 
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "demo")
 AI_API_KEY  = os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", ""))
@@ -1582,7 +1587,7 @@ async def kill_chain(ip: str):
 
     if not (STORE_ENABLED and osc):
         return {"ip": ip, "stages": [], "source": "disabled"}
-    events = await _to_thread(osc.get_ip_events, ip, 2000)
+    events = await _to_thread(osc.get_ip_events, ip, 500)
     if not events:
         return {"ip": ip, "stages": [], "max_stage": None, "total_events": 0}
 
@@ -2170,7 +2175,7 @@ async def _signal_for_ip(ip: str, risk: int, ueba_by_ip: dict) -> Optional[dict]
     }
 
 
-async def _gather_incidents(max_ips: int = 30) -> list[dict]:
+async def _gather_incidents(max_ips: int = 15) -> list[dict]:
     global _incidents_cache, _incidents_cache_ts
     if not (STORE_ENABLED and osc and inc):
         return []
