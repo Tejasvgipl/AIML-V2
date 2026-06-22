@@ -2364,14 +2364,18 @@ SQL:"""
     if not sql.upper().lstrip().startswith("SELECT"):
         raise HTTPException(400, "Safety check failed: only SELECT queries are allowed")
 
-    client = osc.get_client() if osc else None
-    if not client:
+    if not osc:
         raise HTTPException(503, "ClickHouse not available")
 
     import time as _time
-    t0 = _time.time()
-    try:
-        res = client.query(sql)
+
+    def _run_query():
+        # Runs in a worker thread — gets its OWN thread-local ClickHouse client
+        c = osc.get_client()
+        if not c:
+            raise RuntimeError("ClickHouse not available")
+        t0 = _time.time()
+        res = c.query(sql)
         elapsed = round((_time.time() - t0) * 1000)
         cols = list(res.column_names)
         rows = []
@@ -2383,6 +2387,9 @@ SQL:"""
             ])
         return {"sql": sql, "columns": cols, "rows": rows[:200],
                 "row_count": len(res.result_rows), "elapsed_ms": elapsed}
+
+    try:
+        return await asyncio.to_thread(_run_query)
     except Exception as e:
         raise HTTPException(500, f"Query execution failed: {str(e)}")
 
