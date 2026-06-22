@@ -3619,7 +3619,7 @@ tr:hover td{background:#161b22}</style></head>
       document.getElementById('ai-inv-model').textContent = '';
       aiLoading(body);
 
-      const fetchDirect = async url => { try { const r = await fetch(url, { headers: _ah() }); return r.ok ? await r.json() : null; } catch { return null; } };
+      const fetchDirect = async url => { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch { return null; } };
 
       const [intel, bslRes, alr, sum, mlRes, aiRes] = await Promise.all([
         fetchDirect(`${API}/intel/${ip}`),
@@ -3719,9 +3719,9 @@ tr:hover td{background:#161b22}</style></head>
       document.getElementById('ai-inv-model').textContent = '';
       aiLoading(body);
       // Score first so explain endpoint always has data
-      try { await fetch(`${ML}/score/${ip}`, { headers: _ah() }); } catch (_) {}
+      try { await fetch(`${ML}/score/${ip}`, {}); } catch (_) {}
       try {
-        const resp = await fetch(`${API}/explain/ml/${ip}`, { headers: _ah() });
+        const resp = await fetch(`${API}/explain/ml/${ip}`, {});
         if (!resp.ok) {
           body.innerHTML = `<span style="color:var(--warn)">Error ${resp.status} — ${resp.status===404?'No ML score found. Use the ML page to score this IP first.':'Could not generate explanation.'}</span>`;
           return;
@@ -3753,7 +3753,7 @@ tr:hover td{background:#161b22}</style></head>
 
       // Score the IP first (direct fetch so we don't silently fail)
       try {
-        const sr = await fetch(`${ML}/score/${ip}`, { headers: _ah() });
+        const sr = await fetch(`${ML}/score/${ip}`, {});
         if (sr.ok) {
           const sd = await sr.json();
           if (sd && sd.risk_score !== undefined) {
@@ -3772,7 +3772,7 @@ tr:hover td{background:#161b22}</style></head>
 
       // Now call the AI explain endpoint
       try {
-        const resp = await fetch(`${API}/explain/ml/${ip}`, { headers: _ah() });
+        const resp = await fetch(`${API}/explain/ml/${ip}`, {});
         if (!resp.ok) {
           aiBody.innerHTML = `<span style="color:var(--warn)">Error ${resp.status} — ${resp.status===404?'No ML score found. Try scoring the IP first.':'Could not generate explanation.'}</span>`;
           return;
@@ -3824,7 +3824,7 @@ tr:hover td{background:#161b22}</style></head>
       try {
         const resp = await fetch(`${API}/nl/query`, {
           method: 'POST',
-          headers: { ..._ah(), 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question: q })
         });
         const data = await resp.json();
@@ -4402,7 +4402,7 @@ tr:hover td{background:#161b22}</style></head>
       document.getElementById('kc-ai-body').innerHTML = '<span style="color:var(--muted)">Generating grounded brief — calling AI… (may take 10–20 s)</span>';
       document.getElementById('kc-ai-model').textContent = '';
       try {
-        const resp = await fetch(`${API}/explain/grounded/${ip}`, { headers: _ah() });
+        const resp = await fetch(`${API}/explain/grounded/${ip}`, {});
         if (!resp.ok) { document.getElementById('kc-ai-body').textContent = `Error ${resp.status} from server.`; return; }
         const r = await resp.json();
         document.getElementById('kc-ai-model').textContent = (r.model || '') + (r.generated_at ? ' · ' + toIST(r.generated_at) : '');
@@ -4698,7 +4698,7 @@ tr:hover td{background:#161b22}</style></head>
       el.textContent = 'Uploading…';
       const fd = new FormData(); fd.append('file', file);
       try {
-        const resp = await fetch(`${API}/network/topology/upload`, { method:'POST', headers: _ah(), body: fd });
+        const resp = await fetch(`${API}/network/topology/upload`, { method:'POST', body: fd });
         const r = await resp.json();
         if (!resp.ok) { el.innerHTML = `<span style="color:var(--danger)">Error: ${r.detail||resp.status}</span>`; return; }
         el.innerHTML = `<span style="color:var(--ok)">✔ Loaded ${r.loaded} IP entries. Columns: ${r.columns.join(', ')}</span>`;
@@ -4709,7 +4709,7 @@ tr:hover td{background:#161b22}</style></head>
     }
     async function clearTopology() {
       if (!confirm('Clear all topology data?')) return;
-      await fetch(`${API}/network/topology`, { method:'DELETE', headers: _ah() });
+      await fetch(`${API}/network/topology`, { method:'DELETE' });
       toast('Topology cleared', 'ok');
       await loadTopologyStatus();
     }
