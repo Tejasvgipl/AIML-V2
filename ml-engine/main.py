@@ -514,13 +514,35 @@ def _start_scheduler():
     _log.info(f"[scheduler] started — retrain every {RETRAIN_HOURS}h or {NEW_LOG_THRESHOLD:,} new logs")
 
 
+async def _load_persisted_anomalies():
+    """Load the last anomalies snapshot from ClickHouse so the ML page is warm
+    immediately after a rebuild instead of querying cold."""
+    global _anomalies_cache, _anomalies_cache_ts
+    if not (STORE_ENABLED and osc and hasattr(osc, "cache_get")):
+        return
+    try:
+        await _to_thread(osc.ensure_cache_table)
+        got = await _to_thread(osc.cache_get, "ml_anomalies")
+        if got:
+            value, age = got
+            if isinstance(value, list):
+                _anomalies_cache = value
+                _anomalies_cache_ts = time.time() - age
+    except Exception:
+        pass
+
+
 @app.on_event("startup")
 async def _start_background_refresh():
+    await _load_persisted_anomalies()
+
     async def _loop():
         await asyncio.sleep(3)
         while True:
             try:
                 await asyncio.gather(ml_health(), list_anomalies(), return_exceptions=True)
+                if STORE_ENABLED and osc and hasattr(osc, "cache_set") and _anomalies_cache:
+                    await _to_thread(osc.cache_set, "ml_anomalies", _anomalies_cache)
             except Exception:
                 pass
             await asyncio.sleep(30)

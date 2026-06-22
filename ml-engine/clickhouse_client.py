@@ -85,6 +85,62 @@ def _q(sql: str, params: Optional[dict] = None):
         return []
 
 
+# ── Persistent dashboard cache (survives rebuilds; shared with backend) ───────
+CACHE_TABLE = f"{CLICKHOUSE_DB}.dashboard_cache"
+
+
+def ensure_cache_table() -> bool:
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.command(
+            f"CREATE TABLE IF NOT EXISTS {CACHE_TABLE} ("
+            f"  `key` String,"
+            f"  `value` String,"
+            f"  `updated_at` DateTime64(3) DEFAULT now64(3)"
+            f") ENGINE = ReplacingMergeTree(updated_at) ORDER BY `key`"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"cache table ensure failed: {e}")
+        return False
+
+
+def cache_set(key: str, value) -> bool:
+    client = get_client()
+    if not client:
+        return False
+    try:
+        payload = json.dumps(value, default=str)
+        client.insert(
+            CACHE_TABLE,
+            [[key, payload, datetime.now(timezone.utc)]],
+            column_names=["key", "value", "updated_at"],
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"cache_set({key}) failed: {e}")
+        return False
+
+
+def cache_get(key: str):
+    try:
+        rows = _q(
+            f"SELECT value, updated_at FROM {CACHE_TABLE} FINAL "
+            f"WHERE `key` = {{k:String}} ORDER BY updated_at DESC LIMIT 1",
+            {"k": key},
+        )
+        if not rows:
+            return None
+        value = json.loads(rows[0]["value"])
+        age = max(0.0, datetime.now(timezone.utc).timestamp() - _ts_float(rows[0]["updated_at"]))
+        return value, age
+    except Exception as e:
+        logger.warning(f"cache_get({key}) failed: {e}")
+        return None
+
+
 def _iso(dt) -> str:
     """Normalise a value to an ISO-8601 string."""
     if isinstance(dt, datetime):
