@@ -127,7 +127,7 @@ async def ask_groq(prompt: str, max_tokens: int = 700) -> str:
     if not AI_API_KEY:
         return "AI API key is not configured. Add the AI_API_KEY to .env and restart the backend."
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 AI_BASE_URL,
                 headers={
@@ -1851,9 +1851,12 @@ async def explain_grounded(ip: str):
     if not (STORE_ENABLED and osc):
         raise HTTPException(503, "Store disabled")
 
-    chain = await kill_chain(ip)
-    events = osc.get_ip_events_desc(ip, limit=40)
-    threat_counts = osc.get_ip_threat_counts(ip)
+    # Run all ClickHouse fetches in parallel — saves 5-10s vs sequential
+    chain, events, threat_counts = await asyncio.gather(
+        kill_chain(ip),
+        asyncio.to_thread(osc.get_ip_events_desc, ip, 20),
+        asyncio.to_thread(osc.get_ip_threat_counts, ip),
+    )
 
     # Retrieve KB entries for every technique seen across the chain.
     seen_ids: list[str] = []
@@ -1906,7 +1909,7 @@ RECOMMENDED ACTIONS (with mitigation IDs):"""
 
     return {
         **brief,
-        "explanation": await ask_groq(prompt, max_tokens=850),
+        "explanation": await ask_groq(prompt, max_tokens=600),
         "model": AI_MODEL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
