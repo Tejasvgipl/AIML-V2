@@ -715,13 +715,13 @@ async def ingest_single(log: dict):
 
 @app.get("/api/trail/{ip}")
 async def get_trail(ip: str, limit: int = 100):
-    """Recent trail for an IP. Reads from OpenSearch when enabled."""
     if STORE_ENABLED and osc:
-        events = osc.get_ip_events_desc(ip, limit=limit)
-        total  = osc.get_ip_total_count(ip)
-        threat_counts = osc.get_ip_threat_counts(ip)
+        events, total, threat_counts = await asyncio.gather(
+            asyncio.to_thread(osc.get_ip_events_desc, ip, limit),
+            asyncio.to_thread(osc.get_ip_total_count, ip),
+            asyncio.to_thread(osc.get_ip_threat_counts, ip),
+        )
         return {"ip": ip, "events": events, "stats": threat_counts, "total": total, "source": "opensearch"}
-    # Fallback: in-process cache
     recent = _get_recent(ip, limit=limit)
     events = [e for _, e in recent]
     return {"ip": ip, "events": events, "stats": {}, "total": len(events), "source": "cache"}
@@ -731,12 +731,14 @@ async def get_trail(ip: str, limit: int = 100):
 async def trail_summary(ip: str):
     """IP summary: threat types, severities, first/last seen."""
     if STORE_ENABLED and osc:
-        total = osc.get_ip_total_count(ip)
-        if total == 0:
+        total, threat_types, severities, (first_seen, last_seen) = await asyncio.gather(
+            asyncio.to_thread(osc.get_ip_total_count, ip),
+            asyncio.to_thread(osc.get_ip_threat_counts, ip),
+            asyncio.to_thread(osc.get_ip_severity_counts, ip),
+            asyncio.to_thread(osc.get_ip_first_last_seen, ip),
+        )
+        if not total:
             return {"ip": ip, "found": False}
-        threat_types  = osc.get_ip_threat_counts(ip)
-        severities    = osc.get_ip_severity_counts(ip)
-        first_seen, last_seen = osc.get_ip_first_last_seen(ip)
         return {
             "ip":           ip,
             "found":        True,
@@ -1448,14 +1450,21 @@ async def get_hot_ips():
 
 @app.get("/api/overview")
 async def get_overview():
-    """Combined endpoint: stats + hot-ips + ml-health in one round trip.
-    Eliminates 3 extra browser→server fetches on page load."""
-    stats, hot, ml_health = await asyncio.gather(
-        get_stats(),
-        get_hot_ips(),
-        _get_ml_health(),
-    )
-    return {"stats": stats, "hot_ips": hot, "ml_health": ml_health}
+    """Combined endpoint: stats + hot-ips + ml-health in one round trip."""
+    try:
+        stats, hot, ml_health = await asyncio.gather(
+            get_stats(),
+            get_hot_ips(),
+            _get_ml_health(),
+            return_exceptions=True,
+        )
+        return {
+            "stats":     stats if isinstance(stats, dict) else (_stats_cache or {}),
+            "hot_ips":   hot if isinstance(hot, list) else (_hot_ips_cache or []),
+            "ml_health": ml_health if isinstance(ml_health, dict) else {},
+        }
+    except Exception:
+        return {"stats": _stats_cache or {}, "hot_ips": _hot_ips_cache or [], "ml_health": {}}
 
 
 async def _get_ml_health() -> dict:
@@ -1484,7 +1493,7 @@ async def get_intel(ip: str):
 
     if ABUSEIPDB_KEY and ABUSEIPDB_KEY != "demo":
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
+            async with httpx.AsyncClient(timeout=3) as client:
                 resp = await client.get(
                     "https://api.abuseipdb.com/api/v2/check",
                     params={"ipAddress":ip,"maxAgeInDays":90},
@@ -1502,7 +1511,7 @@ async def get_intel(ip: str):
                     }
                     result["source"] = "abuseipdb"
         except Exception:
-            pass
+            pass  # AbuseIPDB unavailable — return local result immediately
 
     _intel_set(ip, result, ttl=900)
     return result
@@ -2278,7 +2287,7 @@ async def get_logs(minutes: int = 0, start: str = "", end: str = "",
 @app.get("/api/search")
 async def search_ip(q: str):
     ips = await asyncio.to_thread(osc.search_ips_by_prefix, q, 20) if (STORE_ENABLED and osc) else []
-    return [await trail_summary(ip) for ip in ips]
+    return list(await asyncio.gather(*[trail_summary(ip) for ip in ips]))
 
 
 # â”€â”€ Network Topology endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

@@ -2856,12 +2856,14 @@ tr:hover td{background:#161b22}</style></head>
     }
     async function refreshAll() {
       try {
-      // Single round trip instead of 3 separate fetches
-      const ov = await get(`${API}/overview`);
-      if (!ov) return;
-      const s = ov.stats;
-      const hot = ov.hot_ips;
-      const mlh = ov.ml_health;
+      // Single round trip — falls back to separate calls if overview endpoint unavailable
+      let s, hot, mlh;
+      const ov = await fetch(`${API}/overview`).then(r => r.ok ? r.json() : null).catch(() => null);
+      if (ov && ov.stats) {
+        s = ov.stats; hot = ov.hot_ips || []; mlh = ov.ml_health || {};
+      } else {
+        [s, hot, mlh] = await Promise.all([get(`${API}/stats`), get(`${API}/hot-ips`), get(`${ML}/health`)]);
+      }
       if (!s) return;
       const totalLogs = Number(s.total_logs || 0);
       const hotCount = (s.hot_ips || []).length;
