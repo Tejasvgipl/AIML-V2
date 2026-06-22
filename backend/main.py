@@ -69,6 +69,15 @@ _STATS_TTL = 15  # seconds
 _hot_ips_cache: list = []
 _hot_ips_cache_ts: float = 0.0
 
+# ── Kill-chain cache (shared by incidents + AI investigator) ──────────────────
+_kc_cache: dict[str, tuple[float, dict]] = {}
+_KC_TTL = 60  # seconds — kill chain rarely changes in under a minute
+
+# ── Incidents cache ───────────────────────────────────────────────────────────
+_incidents_cache: list = []
+_incidents_cache_ts: float = 0.0
+_INCIDENTS_TTL = 60  # seconds
+
 # ── Log store (ClickHouse) ────────────────────────────────────────────────────
 # STORE_ENABLED gates all log-derived reads (trail, stats, hot-ips, baselines,
 # ML features). The `osc` module is now the ClickHouse client.
@@ -867,13 +876,15 @@ async def get_ip_alerts(ip: str):
 # ── AI explanations ──────────────────────────────────────────────────────────
 
 async def collect_ip_context(ip: str) -> dict:
-    # Pull recent events + state from ClickHouse for AI explanations
     if STORE_ENABLED and osc:
-        events = osc.get_ip_events_desc(ip, limit=40)
-        alerts = osc.get_deviations(ip=ip, limit=200)   # server-side IP filter
-        baseline = osc.get_baseline(ip) or {}
+        events, alerts, baseline = await asyncio.gather(
+            asyncio.to_thread(osc.get_ip_events_desc, ip, 20),
+            asyncio.to_thread(osc.get_deviations, None, 50, ip),
+            asyncio.to_thread(osc.get_baseline, ip),
+        )
+        baseline = baseline or {}
     else:
-        events = [e for _, e in _get_recent(ip, limit=40)]
+        events = [e for _, e in _get_recent(ip, limit=20)]
         alerts = []
         baseline = {}
     alerts.sort(key=lambda x: x.get("ts",""), reverse=True)
@@ -882,7 +893,7 @@ async def collect_ip_context(ip: str) -> dict:
         "events": events,
         "alerts": alerts,
         "baseline": baseline,
-        "ml": {},          # ML scores now live in ml-engine, not the backend store
+        "ml": {},
         "stats": {"total": str(_ipcnt.get(ip, 0))},
     }
 
@@ -1487,9 +1498,14 @@ def _event_tactic(ev: dict) -> tuple[str, str, str]:
 async def kill_chain(ip: str):
     """Lay an entity's activity out along the ATT&CK kill chain, ordered by tactic
     stage, with first/last seen and event counts per stage."""
+    # Serve from short-lived cache — incidents calls this for 30+ IPs simultaneously
+    cached = _kc_cache.get(ip)
+    if cached and time.time() - cached[0] < _KC_TTL:
+        return cached[1]
+
     if not (STORE_ENABLED and osc):
         return {"ip": ip, "stages": [], "source": "disabled"}
-    events = osc.get_ip_events(ip, limit=5000)
+    events = await asyncio.to_thread(osc.get_ip_events, ip, 2000)
     if not events:
         return {"ip": ip, "stages": [], "max_stage": None, "total_events": 0}
 
@@ -1812,7 +1828,7 @@ async def kill_chain(ip: str):
         "velocity": velocity,
     }
 
-    return {
+    result = {
         "ip": ip,
         "total_events": len(events),
         "network_path": network_path,
@@ -1822,6 +1838,8 @@ async def kill_chain(ip: str):
         "reached_impact": bool(deepest and deepest["rank"] >= ti.TACTIC_ORDER.index("Lateral Movement")) if ti else False,
         "correlation": correlation,
     }
+    _kc_cache[ip] = (time.time(), result)
+    return result
 
 
 @app.get("/api/attack/techniques")
@@ -1999,16 +2017,14 @@ async def list_host_entities(limit: int = 100):
 
 @app.get("/api/ueba/account-takeover")
 async def ueba_account_takeover(days: int = 0):
-    """Sweep recent auth activity for suspected account-takeover across all users."""
     if not (STORE_ENABLED and osc):
         return {"findings": [], "total": 0}
-    events = osc.get_recent_login_events(limit=20000, days=days)
+    events = await asyncio.to_thread(osc.get_recent_login_events, 5000, days)
     by_user: dict[str, list] = {}
     for ev in events:
         u = (ev.get("username") or "").strip()
         if u:
             by_user.setdefault(u, []).append(ev)
-
     findings = []
     for user, evs in by_user.items():
         for f in (ub.detect_account_takeover(evs, historical_countries=set()) if ub else []):
@@ -2019,10 +2035,9 @@ async def ueba_account_takeover(days: int = 0):
 
 @app.get("/api/ueba/impossible-travel")
 async def ueba_impossible_travel(days: int = 0):
-    """Sweep for impossible-travel across users with geo data."""
     if not (STORE_ENABLED and osc):
         return {"findings": [], "total": 0}
-    events = osc.get_recent_login_events(limit=20000, days=days)
+    events = await asyncio.to_thread(osc.get_recent_login_events, 5000, days)
     by_user: dict[str, list] = {}
     for ev in events:
         u = (ev.get("username") or "").strip()
@@ -2037,11 +2052,10 @@ async def ueba_impossible_travel(days: int = 0):
 
 @app.get("/api/ueba/peer-outliers")
 async def ueba_peer_outliers(field: str = "username", limit: int = 500):
-    """Entities deviating sharply from their peer group (population z-score)."""
     if not (STORE_ENABLED and osc):
         return {"outliers": [], "population": 0}
     fld = field if field in ("username", "agent") else "username"
-    rows = osc.get_entity_aggregates(fld, limit=limit)
+    rows = await asyncio.to_thread(osc.get_entity_aggregates, fld, limit)
     return {"field": fld, "population": len(rows),
             "outliers": ub.peer_outliers(rows) if ub else []}
 
@@ -2079,44 +2093,57 @@ async def _signal_for_ip(ip: str, risk: int, ueba_by_ip: dict) -> Optional[dict]
     }
 
 
-async def _gather_incidents(max_ips: int = 60) -> list[dict]:
+async def _gather_incidents(max_ips: int = 30) -> list[dict]:
+    global _incidents_cache, _incidents_cache_ts
     if not (STORE_ENABLED and osc and inc):
         return []
+    if _incidents_cache and time.time() - _incidents_cache_ts < _INCIDENTS_TTL:
+        return _incidents_cache
 
-    # 1) UEBA findings, indexed by the IP(s) they touch.
+    # 1) UEBA + candidate IPs fetched in parallel
     ueba_by_ip: dict[str, list] = {}
-    ato = await ueba_account_takeover()
+    ato, travel, ml_scores, hot_ips = await asyncio.gather(
+        ueba_account_takeover(),
+        ueba_impossible_travel(),
+        asyncio.to_thread(osc.get_all_ml_scores, max_ips),
+        asyncio.to_thread(osc.get_hot_ips_from_os, max_ips),
+    )
     for f in ato.get("findings", []):
         if f.get("src_ip"):
             ueba_by_ip.setdefault(f["src_ip"], []).append(f)
-    travel = await ueba_impossible_travel()
     for f in travel.get("findings", []):
         for side in ("from", "to"):
             ip = (f.get(side) or {}).get("ip")
             if ip:
                 ueba_by_ip.setdefault(ip, []).append(f)
 
-    # 2) Candidate IPs: risk-scored + hot + any IP carrying a UEBA finding.
+    # 2) Candidate IPs
     candidates: dict[str, int] = {}
-    for s in osc.get_all_ml_scores(limit=max_ips):
+    for s in ml_scores:
         candidates[s["ip"]] = max(candidates.get(s["ip"], 0), s.get("risk_score", 0))
-    for ip in osc.get_hot_ips_from_os(size=max_ips):
+    for ip in hot_ips:
         candidates.setdefault(ip, 0)
     for ip in ueba_by_ip:
         candidates.setdefault(ip, 0)
 
-    # 3) Build signals, keeping only the ones worth a SOC's attention.
-    signals = []
-    for ip, risk in list(candidates.items())[: max_ips * 2]:
-        sig = await _signal_for_ip(ip, risk, ueba_by_ip)
-        if not sig:
-            continue
-        interesting = (sig["risk"] >= 50 or len(sig["progression"]) >= 2 or sig["ueba"]
-                       or sig["severity_counts"].get("critical") or sig["severity_counts"].get("high"))
-        if interesting:
-            signals.append(sig)
+    # 3) Build signals in parallel (batches of 10 — kill_chain is heavy)
+    ip_risk_pairs = list(candidates.items())[:max_ips]
+    CONCURRENCY = 10
+    all_sigs = []
+    for i in range(0, len(ip_risk_pairs), CONCURRENCY):
+        chunk = ip_risk_pairs[i:i + CONCURRENCY]
+        results = await asyncio.gather(*[_signal_for_ip(ip, risk, ueba_by_ip) for ip, risk in chunk])
+        for sig in results:
+            if not sig:
+                continue
+            if (sig["risk"] >= 50 or len(sig["progression"]) >= 2 or sig["ueba"]
+                    or sig["severity_counts"].get("critical") or sig["severity_counts"].get("high")):
+                all_sigs.append(sig)
 
-    return inc.correlate(signals)
+    result = inc.correlate(all_sigs)
+    _incidents_cache = result
+    _incidents_cache_ts = time.time()
+    return result
 
 
 @app.get("/api/incidents")
@@ -2352,17 +2379,23 @@ Analyst question: {question}
 SQL:"""
 
     raw = await ask_groq(prompt, max_tokens=500)
+    # Extract the SQL — the model sometimes wraps it in markdown or adds preamble
     sql = raw.strip()
     for tag in ["```sql", "```SQL", "```"]:
-        if sql.startswith(tag):
-            sql = sql[len(tag):]
+        if tag in sql:
+            sql = sql[sql.index(tag) + len(tag):]
+            if "```" in sql:
+                sql = sql[:sql.index("```")]
             break
-    if sql.endswith("```"):
-        sql = sql[:-3]
     sql = sql.strip()
-
+    # If there's still no SELECT at the start, find the first line starting with SELECT
     if not sql.upper().lstrip().startswith("SELECT"):
-        raise HTTPException(400, "Safety check failed: only SELECT queries are allowed")
+        for line in sql.splitlines():
+            if line.strip().upper().startswith("SELECT"):
+                sql = line.strip()
+                break
+    if not sql.upper().lstrip().startswith("SELECT"):
+        raise HTTPException(400, "AI returned an unexpected response. Try rephrasing your question.")
 
     if not osc:
         raise HTTPException(503, "ClickHouse not available")

@@ -246,14 +246,9 @@ async def score_ip(ip: str):
 async def list_anomalies():
     if not (STORE_ENABLED and osc):
         return {"anomalies": []}
-    anomalies = osc.get_ml_anomalies(limit=500)
-    if not anomalies and MODEL_PATH.exists():
-        features = get_all_ip_features()
-        if features:
-            model = joblib.load(MODEL_PATH)
-            scaler = joblib.load(SCALER_PATH)
-            score_features(model, scaler, features)
-            anomalies = osc.get_ml_anomalies(limit=500)
+    # Just read stored scores — on-demand re-scoring was too slow (minutes)
+    # Use /api/ml/train to score all IPs; this endpoint only reads results
+    anomalies = await asyncio.to_thread(osc.get_ml_anomalies, 500)
     return {"anomalies": anomalies}
 
 
