@@ -2175,57 +2175,90 @@ async def _signal_for_ip(ip: str, risk: int, ueba_by_ip: dict) -> Optional[dict]
     }
 
 
+_incidents_computing = False  # guard against concurrent recomputes
+
+
+async def _compute_incidents_bg(max_ips: int = 15):
+    “””Does the actual heavy work — always runs in background, never blocks a request.”””
+    global _incidents_cache, _incidents_cache_ts, _incidents_computing
+    if _incidents_computing:
+        return
+    _incidents_computing = True
+    try:
+        ueba_by_ip: dict[str, list] = {}
+        ato, travel, ml_scores, hot_ips = await asyncio.gather(
+            ueba_account_takeover(),
+            ueba_impossible_travel(),
+            _to_thread(osc.get_all_ml_scores, max_ips),
+            _to_thread(osc.get_hot_ips_from_os, max_ips),
+            return_exceptions=True,
+        )
+        if isinstance(ato, dict):
+            for f in ato.get(“findings”, []):
+                if f.get(“src_ip”):
+                    ueba_by_ip.setdefault(f[“src_ip”], []).append(f)
+        if isinstance(travel, dict):
+            for f in travel.get(“findings”, []):
+                for side in (“from”, “to”):
+                    ip = (f.get(side) or {}).get(“ip”)
+                    if ip:
+                        ueba_by_ip.setdefault(ip, []).append(f)
+
+        candidates: dict[str, int] = {}
+        if isinstance(ml_scores, list):
+            for s in ml_scores:
+                candidates[s[“ip”]] = max(candidates.get(s[“ip”], 0), s.get(“risk_score”, 0))
+        if isinstance(hot_ips, list):
+            for ip in hot_ips:
+                candidates.setdefault(ip, 0)
+        for ip in ueba_by_ip:
+            candidates.setdefault(ip, 0)
+
+        ip_risk_pairs = list(candidates.items())[:max_ips]
+        CONCURRENCY = 10
+        all_sigs = []
+        for i in range(0, len(ip_risk_pairs), CONCURRENCY):
+            chunk = ip_risk_pairs[i:i + CONCURRENCY]
+            results = await asyncio.gather(
+                *[_signal_for_ip(ip, risk, ueba_by_ip) for ip, risk in chunk],
+                return_exceptions=True,
+            )
+            for sig in results:
+                if not sig or isinstance(sig, Exception):
+                    continue
+                if (sig[“risk”] >= 50 or len(sig[“progression”]) >= 2 or sig[“ueba”]
+                        or sig[“severity_counts”].get(“critical”) or sig[“severity_counts”].get(“high”)):
+                    all_sigs.append(sig)
+
+        result = inc.correlate(all_sigs)
+        _incidents_cache = result
+        _incidents_cache_ts = time.time()
+    except Exception:
+        pass
+    finally:
+        _incidents_computing = False
+
+
 async def _gather_incidents(max_ips: int = 15) -> list[dict]:
     global _incidents_cache, _incidents_cache_ts
     if not (STORE_ENABLED and osc and inc):
         return []
-    if _incidents_cache and time.time() - _incidents_cache_ts < _INCIDENTS_TTL:
+
+    now = time.time()
+    age = now - _incidents_cache_ts
+
+    # Fresh — serve immediately
+    if _incidents_cache and age < _INCIDENTS_TTL:
         return _incidents_cache
 
-    # 1) UEBA + candidate IPs fetched in parallel
-    ueba_by_ip: dict[str, list] = {}
-    ato, travel, ml_scores, hot_ips = await asyncio.gather(
-        ueba_account_takeover(),
-        ueba_impossible_travel(),
-        _to_thread(osc.get_all_ml_scores, max_ips),
-        _to_thread(osc.get_hot_ips_from_os, max_ips),
-    )
-    for f in ato.get("findings", []):
-        if f.get("src_ip"):
-            ueba_by_ip.setdefault(f["src_ip"], []).append(f)
-    for f in travel.get("findings", []):
-        for side in ("from", "to"):
-            ip = (f.get(side) or {}).get("ip")
-            if ip:
-                ueba_by_ip.setdefault(ip, []).append(f)
+    # Stale (up to 10 min) — return immediately, refresh silently in background
+    if _incidents_cache and age < 600:
+        asyncio.create_task(_compute_incidents_bg(max_ips))
+        return _incidents_cache
 
-    # 2) Candidate IPs
-    candidates: dict[str, int] = {}
-    for s in ml_scores:
-        candidates[s["ip"]] = max(candidates.get(s["ip"], 0), s.get("risk_score", 0))
-    for ip in hot_ips:
-        candidates.setdefault(ip, 0)
-    for ip in ueba_by_ip:
-        candidates.setdefault(ip, 0)
-
-    # 3) Build signals in parallel (batches of 10 â€” kill_chain is heavy)
-    ip_risk_pairs = list(candidates.items())[:max_ips]
-    CONCURRENCY = 10
-    all_sigs = []
-    for i in range(0, len(ip_risk_pairs), CONCURRENCY):
-        chunk = ip_risk_pairs[i:i + CONCURRENCY]
-        results = await asyncio.gather(*[_signal_for_ip(ip, risk, ueba_by_ip) for ip, risk in chunk])
-        for sig in results:
-            if not sig:
-                continue
-            if (sig["risk"] >= 50 or len(sig["progression"]) >= 2 or sig["ueba"]
-                    or sig["severity_counts"].get("critical") or sig["severity_counts"].get("high")):
-                all_sigs.append(sig)
-
-    result = inc.correlate(all_sigs)
-    _incidents_cache = result
-    _incidents_cache_ts = time.time()
-    return result
+    # Cache empty (first ever boot) — compute once, then cache
+    await _compute_incidents_bg(max_ips)
+    return _incidents_cache or []
 
 
 @app.get("/api/incidents")
@@ -2464,7 +2497,7 @@ Analyst question: {question}
 
 SQL:"""
 
-    raw = await ask_groq(prompt, max_tokens=500)
+    raw = await ask_groq(prompt, max_tokens=500, model=AI_FAST_MODEL)
     # Extract the SQL â€” the model sometimes wraps it in markdown or adds preamble
     sql = raw.strip()
     for tag in ["```sql", "```SQL", "```"]:
