@@ -95,6 +95,10 @@ async def _load_persisted_caches():
             if got:
                 value, age = got
                 apply(value, time.time() - age)
+        # Default Logs-tab view (so the Logs page is instant on a fresh device)
+        got = await _to_thread(osc.cache_get, "logs_default")
+        if got and isinstance(got[0], dict):
+            _logs_cache["10080:1:1000"] = (time.time() - got[1], got[0])
         print("[startup] persistent cache loaded — first load is warm")
     except Exception as e:
         print(f"[startup] persistent cache load failed (non-fatal): {e}")
@@ -134,6 +138,9 @@ async def _persist_caches():
             await _to_thread(osc.cache_set, "resilience", _resilience_cache)
         if _incidents_cache is not None:
             await _to_thread(osc.cache_set, "incidents", _incidents_cache)
+        default_logs = _logs_cache.get("10080:1:1000")
+        if default_logs and default_logs[1].get("logs"):
+            await _to_thread(osc.cache_set, "logs_default", default_logs[1])
     except Exception:
         pass
 
@@ -149,11 +156,14 @@ async def _start_background_refresh():
     await _load_persisted_caches()
 
     async def _refresh_fast():
-        """Stats, hot-ips, resilience every 30s — lightweight."""
+        """Stats, hot-ips, resilience + default logs view every 30s — lightweight."""
         await asyncio.sleep(2)
         while True:
-            await asyncio.gather(get_stats(), get_hot_ips(), get_resilience(),
-                                 return_exceptions=True)
+            await asyncio.gather(
+                get_stats(), get_hot_ips(), get_resilience(),
+                get_logs(min_level=1, limit=1000),   # warm the Logs tab default view
+                return_exceptions=True,
+            )
             await _persist_caches()
             await asyncio.sleep(30)
 
@@ -2405,6 +2415,10 @@ PRIORITY JUSTIFICATION:"""
 
 # â”€â”€ search + health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+_logs_cache: dict[str, tuple[float, dict]] = {}
+_LOGS_TTL = 30  # seconds — default log view is refreshed by the background loop
+
+
 @app.get("/api/logs")
 async def get_logs(minutes: int = 0, start: str = "", end: str = "",
                    severity: str = "", min_level: int = 0, limit: int = 500):
@@ -2413,12 +2427,25 @@ async def get_logs(minutes: int = 0, start: str = "", end: str = "",
     # Default to last 7 days — uses partition pruning, avoids full table scan
     if not minutes and not start and not end:
         minutes = 10080  # 7 days
+    capped = min(limit, 1000)
+
+    # Cache the default browsing view (no custom date range / severity filter).
+    # This is what the Logs tab requests on every open — serve it from memory.
+    cacheable = not start and not end and not severity
+    ckey = f"{minutes}:{min_level}:{capped}"
+    if cacheable:
+        hit = _logs_cache.get(ckey)
+        if hit and time.time() - hit[0] < _LOGS_TTL:
+            return hit[1]
+
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
     logs = await _to_thread(
-        osc.get_recent_logs,
-        minutes, start, end, sevs, min_level, min(limit, 1000)
+        osc.get_recent_logs, minutes, start, end, sevs, min_level, capped
     )
-    return {"logs": logs, "count": len(logs), "source": "clickhouse"}
+    result = {"logs": logs, "count": len(logs), "source": "clickhouse"}
+    if cacheable and logs:
+        _logs_cache[ckey] = (time.time(), result)
+    return result
 
 
 @app.get("/api/search")
