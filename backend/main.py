@@ -2179,7 +2179,7 @@ _incidents_computing = False  # guard against concurrent recomputes
 
 
 async def _compute_incidents_bg(max_ips: int = 15):
-    “””Does the actual heavy work — always runs in background, never blocks a request.”””
+    """Does the actual heavy work; always runs in background, never blocks a request."""
     global _incidents_cache, _incidents_cache_ts, _incidents_computing
     if _incidents_computing:
         return
@@ -2194,20 +2194,20 @@ async def _compute_incidents_bg(max_ips: int = 15):
             return_exceptions=True,
         )
         if isinstance(ato, dict):
-            for f in ato.get(“findings”, []):
-                if f.get(“src_ip”):
-                    ueba_by_ip.setdefault(f[“src_ip”], []).append(f)
+            for f in ato.get("findings", []):
+                if f.get("src_ip"):
+                    ueba_by_ip.setdefault(f["src_ip"], []).append(f)
         if isinstance(travel, dict):
-            for f in travel.get(“findings”, []):
-                for side in (“from”, “to”):
-                    ip = (f.get(side) or {}).get(“ip”)
+            for f in travel.get("findings", []):
+                for side in ("from", "to"):
+                    ip = (f.get(side) or {}).get("ip")
                     if ip:
                         ueba_by_ip.setdefault(ip, []).append(f)
 
         candidates: dict[str, int] = {}
         if isinstance(ml_scores, list):
             for s in ml_scores:
-                candidates[s[“ip”]] = max(candidates.get(s[“ip”], 0), s.get(“risk_score”, 0))
+                candidates[s["ip"]] = max(candidates.get(s["ip"], 0), s.get("risk_score", 0))
         if isinstance(hot_ips, list):
             for ip in hot_ips:
                 candidates.setdefault(ip, 0)
@@ -2226,8 +2226,8 @@ async def _compute_incidents_bg(max_ips: int = 15):
             for sig in results:
                 if not sig or isinstance(sig, Exception):
                     continue
-                if (sig[“risk”] >= 50 or len(sig[“progression”]) >= 2 or sig[“ueba”]
-                        or sig[“severity_counts”].get(“critical”) or sig[“severity_counts”].get(“high”)):
+                if (sig["risk"] >= 50 or len(sig["progression"]) >= 2 or sig["ueba"]
+                        or sig["severity_counts"].get("critical") or sig["severity_counts"].get("high")):
                     all_sigs.append(sig)
 
         result = inc.correlate(all_sigs)
