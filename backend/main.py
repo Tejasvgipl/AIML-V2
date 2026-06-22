@@ -6,6 +6,7 @@ Handles: log ingestion, IP trail, threat intel, stats, behavioural baselines,
 import os, json, time, statistics, logging, asyncio, html, textwrap
 from collections import deque, OrderedDict
 import threading
+from concurrent.futures import ThreadPoolExecutor
 try:
     import clickhouse_client as osc   # ClickHouse is the log store (mirrors old osc API)
 except Exception:
@@ -53,6 +54,21 @@ _topology: dict[str, dict] = _load_topology()
 
 app = FastAPI(title="CyberSentinel API", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Explicit thread pool — default is only cpu_count+4 (6-8 threads on most servers).
+# With 2 uvicorn workers and multiple concurrent users, the default exhausts fast.
+_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="cs-worker")
+
+# Semaphore caps concurrent ClickHouse threads per worker so heavy pages
+# (kill_chain, incidents) don't starve simple requests (overview, stats).
+_ch_sem = asyncio.Semaphore(8)
+
+
+async def _to_thread(fn, *args):
+    """asyncio.to_thread replacement that uses our explicit pool + semaphore."""
+    async with _ch_sem:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_executor, fn, *args)
 
 
 @app.on_event("startup")
@@ -717,9 +733,9 @@ async def ingest_single(log: dict):
 async def get_trail(ip: str, limit: int = 100):
     if STORE_ENABLED and osc:
         events, total, threat_counts = await asyncio.gather(
-            asyncio.to_thread(osc.get_ip_events_desc, ip, limit),
-            asyncio.to_thread(osc.get_ip_total_count, ip),
-            asyncio.to_thread(osc.get_ip_threat_counts, ip),
+            _to_thread(osc.get_ip_events_desc, ip, limit),
+            _to_thread(osc.get_ip_total_count, ip),
+            _to_thread(osc.get_ip_threat_counts, ip),
         )
         return {"ip": ip, "events": events, "stats": threat_counts, "total": total, "source": "opensearch"}
     recent = _get_recent(ip, limit=limit)
@@ -732,10 +748,10 @@ async def trail_summary(ip: str):
     """IP summary: threat types, severities, first/last seen."""
     if STORE_ENABLED and osc:
         total, threat_types, severities, (first_seen, last_seen) = await asyncio.gather(
-            asyncio.to_thread(osc.get_ip_total_count, ip),
-            asyncio.to_thread(osc.get_ip_threat_counts, ip),
-            asyncio.to_thread(osc.get_ip_severity_counts, ip),
-            asyncio.to_thread(osc.get_ip_first_last_seen, ip),
+            _to_thread(osc.get_ip_total_count, ip),
+            _to_thread(osc.get_ip_threat_counts, ip),
+            _to_thread(osc.get_ip_severity_counts, ip),
+            _to_thread(osc.get_ip_first_last_seen, ip),
         )
         if not total:
             return {"ip": ip, "found": False}
@@ -815,8 +831,8 @@ async def _scan_ip_deviations(ip: str, events_per_ip: int) -> tuple[int, int]:
     """Scan one IP for deviations. Returns (ips_with_devs, total_devs)."""
     try:
         baseline, events = await asyncio.gather(
-            asyncio.to_thread(osc.get_baseline, ip),
-            asyncio.to_thread(osc.get_ip_events, ip, events_per_ip, 1),
+            _to_thread(osc.get_baseline, ip),
+            _to_thread(osc.get_ip_events, ip, events_per_ip, 1),
         )
         if not baseline:
             return 0, 0
@@ -841,7 +857,7 @@ async def _run_deviation_scan(max_ips: int, events_per_ip: int):
     active_ips: list[str] = []
     try:
         # osc._q uses thread-local client internally â€” safe to call from any thread
-        rows = await asyncio.to_thread(
+        rows = await _to_thread(
             osc._q,
             f"SELECT DISTINCT src_ip FROM cybersentinel.logs "
             f"WHERE ts > now() - INTERVAL 24 HOUR LIMIT {int(max_ips)}",
@@ -849,7 +865,7 @@ async def _run_deviation_scan(max_ips: int, events_per_ip: int):
         active_ips = [r["src_ip"] for r in rows if r.get("src_ip")]
     except Exception:
         try:
-            active_ips = (await asyncio.to_thread(osc.get_all_baseline_ips))[:max_ips]
+            active_ips = (await _to_thread(osc.get_all_baseline_ips))[:max_ips]
         except Exception:
             active_ips = []
 
@@ -896,9 +912,9 @@ async def get_ip_alerts(ip: str):
 async def collect_ip_context(ip: str) -> dict:
     if STORE_ENABLED and osc:
         events, alerts, baseline = await asyncio.gather(
-            asyncio.to_thread(osc.get_ip_events_desc, ip, 20),
-            asyncio.to_thread(osc.get_deviations, None, 50, ip),
-            asyncio.to_thread(osc.get_baseline, ip),
+            _to_thread(osc.get_ip_events_desc, ip, 20),
+            _to_thread(osc.get_deviations, None, 50, ip),
+            _to_thread(osc.get_baseline, ip),
         )
         baseline = baseline or {}
     else:
@@ -1400,13 +1416,13 @@ async def get_stats():
         # Run all 7 ClickHouse queries in parallel via thread pool
         (total_logs, unique_ips, threat_counts, hot_ips,
          total_alerts, critical_ips, alert_counts) = await asyncio.gather(
-            asyncio.to_thread(osc.get_total_doc_count),
-            asyncio.to_thread(osc.get_unique_ip_count),
-            asyncio.to_thread(osc.get_global_threat_counts),
-            asyncio.to_thread(lambda: osc.get_hot_ips_from_os(size=100)),
-            asyncio.to_thread(osc.get_deviation_total),
-            asyncio.to_thread(osc.get_critical_ips),
-            asyncio.to_thread(osc.get_alert_type_counts),
+            _to_thread(osc.get_total_doc_count),
+            _to_thread(osc.get_unique_ip_count),
+            _to_thread(osc.get_global_threat_counts),
+            _to_thread(lambda: osc.get_hot_ips_from_os(size=100)),
+            _to_thread(osc.get_deviation_total),
+            _to_thread(osc.get_critical_ips),
+            _to_thread(osc.get_alert_type_counts),
         )
     else:
         total_logs = unique_ips = total_alerts = 0
@@ -1441,7 +1457,7 @@ async def get_hot_ips():
     if not (STORE_ENABLED and osc):
         return _hot_ips_cache or []
     # One batch query replaces N×4 per-IP queries (was 200 ClickHouse queries for 50 IPs)
-    result = await asyncio.to_thread(osc.get_hot_ip_summaries, 30)
+    result = await _to_thread(osc.get_hot_ip_summaries, 30)
     if result:
         _hot_ips_cache = result
         _hot_ips_cache_ts = time.time()
@@ -1555,7 +1571,7 @@ async def kill_chain(ip: str):
 
     if not (STORE_ENABLED and osc):
         return {"ip": ip, "stages": [], "source": "disabled"}
-    events = await asyncio.to_thread(osc.get_ip_events, ip, 2000)
+    events = await _to_thread(osc.get_ip_events, ip, 2000)
     if not events:
         return {"ip": ip, "stages": [], "max_stage": None, "total_events": 0}
 
@@ -1922,8 +1938,8 @@ async def explain_grounded(ip: str):
     # Run all ClickHouse fetches in parallel â€” saves 5-10s vs sequential
     chain, events, threat_counts = await asyncio.gather(
         kill_chain(ip),
-        asyncio.to_thread(osc.get_ip_events_desc, ip, 20),
-        asyncio.to_thread(osc.get_ip_threat_counts, ip),
+        _to_thread(osc.get_ip_events_desc, ip, 20),
+        _to_thread(osc.get_ip_threat_counts, ip),
     )
 
     # Retrieve KB entries for every technique seen across the chain.
@@ -2069,7 +2085,7 @@ async def list_host_entities(limit: int = 100):
 async def ueba_account_takeover(days: int = 0):
     if not (STORE_ENABLED and osc):
         return {"findings": [], "total": 0}
-    events = await asyncio.to_thread(osc.get_recent_login_events, 5000, days)
+    events = await _to_thread(osc.get_recent_login_events, 5000, days)
     by_user: dict[str, list] = {}
     for ev in events:
         u = (ev.get("username") or "").strip()
@@ -2087,7 +2103,7 @@ async def ueba_account_takeover(days: int = 0):
 async def ueba_impossible_travel(days: int = 0):
     if not (STORE_ENABLED and osc):
         return {"findings": [], "total": 0}
-    events = await asyncio.to_thread(osc.get_recent_login_events, 5000, days)
+    events = await _to_thread(osc.get_recent_login_events, 5000, days)
     by_user: dict[str, list] = {}
     for ev in events:
         u = (ev.get("username") or "").strip()
@@ -2105,7 +2121,7 @@ async def ueba_peer_outliers(field: str = "username", limit: int = 500):
     if not (STORE_ENABLED and osc):
         return {"outliers": [], "population": 0}
     fld = field if field in ("username", "agent") else "username"
-    rows = await asyncio.to_thread(osc.get_entity_aggregates, fld, limit)
+    rows = await _to_thread(osc.get_entity_aggregates, fld, limit)
     return {"field": fld, "population": len(rows),
             "outliers": ub.peer_outliers(rows) if ub else []}
 
@@ -2155,8 +2171,8 @@ async def _gather_incidents(max_ips: int = 30) -> list[dict]:
     ato, travel, ml_scores, hot_ips = await asyncio.gather(
         ueba_account_takeover(),
         ueba_impossible_travel(),
-        asyncio.to_thread(osc.get_all_ml_scores, max_ips),
-        asyncio.to_thread(osc.get_hot_ips_from_os, max_ips),
+        _to_thread(osc.get_all_ml_scores, max_ips),
+        _to_thread(osc.get_hot_ips_from_os, max_ips),
     )
     for f in ato.get("findings", []):
         if f.get("src_ip"):
@@ -2277,7 +2293,7 @@ async def get_logs(minutes: int = 0, start: str = "", end: str = "",
     if not minutes and not start and not end:
         minutes = 1440  # 24 hours
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
-    logs = await asyncio.to_thread(
+    logs = await _to_thread(
         osc.get_recent_logs,
         minutes, start, end, sevs, min_level, min(limit, 1000)
     )
@@ -2286,7 +2302,7 @@ async def get_logs(minutes: int = 0, start: str = "", end: str = "",
 
 @app.get("/api/search")
 async def search_ip(q: str):
-    ips = await asyncio.to_thread(osc.search_ips_by_prefix, q, 20) if (STORE_ENABLED and osc) else []
+    ips = await _to_thread(osc.search_ips_by_prefix, q, 20) if (STORE_ENABLED and osc) else []
     return list(await asyncio.gather(*[trail_summary(ip) for ip in ips]))
 
 
@@ -2477,7 +2493,7 @@ SQL:"""
                 "row_count": len(res.result_rows), "elapsed_ms": elapsed}
 
     try:
-        return await asyncio.to_thread(_run_query)
+        return await _to_thread(_run_query)
     except Exception as e:
         raise HTTPException(500, f"Query execution failed: {str(e)}")
 
@@ -2506,13 +2522,13 @@ async def get_resilience():
     # Run all 7 ClickHouse counts in parallel
     (active_ips, baselined, ml_scored, critical_thr,
      blocked, deviations, events_7d) = await asyncio.gather(
-        asyncio.to_thread(_qval, "SELECT count(DISTINCT src_ip) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY"),
-        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.baselines FINAL"),
-        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL"),
-        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL WHERE risk_score >= 70"),
-        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.blocklist FINAL WHERE active = 1"),
-        asyncio.to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.deviations WHERE ts > now() - INTERVAL 7 DAY"),
-        asyncio.to_thread(_qval, "SELECT count(*) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY"),
+        _to_thread(_qval, "SELECT count(DISTINCT src_ip) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY"),
+        _to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.baselines FINAL"),
+        _to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL"),
+        _to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.ml_scores FINAL WHERE risk_score >= 70"),
+        _to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.blocklist FINAL WHERE active = 1"),
+        _to_thread(_qval, "SELECT count(DISTINCT ip) FROM cybersentinel.deviations WHERE ts > now() - INTERVAL 7 DAY"),
+        _to_thread(_qval, "SELECT count(*) FROM cybersentinel.logs WHERE ts > now() - INTERVAL 7 DAY"),
     )
 
     safe_active = max(active_ips, 1)
@@ -2589,10 +2605,10 @@ async def archive_run(retain_days: int = 90):
             f"SELECT count() FROM {osc.LOGS_TABLE} "
             f"WHERE ts < now() - INTERVAL {int(retain_days)} DAY"
         )
-        rows = await asyncio.to_thread(osc._q, count_sql)
+        rows = await _to_thread(osc._q, count_sql)
         old_count = rows[0].get("count()", 0) if rows else 0
         if old_count > 0:
-            await asyncio.to_thread(osc.get_client().command, cutoff_sql)
+            await _to_thread(osc.get_client().command, cutoff_sql)
         return {"status": "ok", "archived": old_count, "retain_days": retain_days}
     except Exception as e:
         logger.error(f"Archive run failed: {e}")
@@ -2616,6 +2632,7 @@ async def storage_stats():
         },
         "recommendation": "storage is healthy â€” ClickHouse TTL manages retention automatically",
     }
+
 
 
 
