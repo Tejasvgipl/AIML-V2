@@ -199,7 +199,8 @@ services:
           memory: 512M
     environment:
       - PYTHONUNBUFFERED=1
-      - WAZUH_ALERTS_PATH=/wazuh/alerts.json
+      - WAZUH_ALERTS_DIR=/wazuh/alerts
+      - WAZUH_ALERTS_FILENAME=alerts.json
       # Sink: write alerts straight into ClickHouse (no backend round-trip)
       - WATCHER_SINK=${WATCHER_SINK:-clickhouse}
       - CLICKHOUSE_HOST=clickhouse
@@ -223,8 +224,8 @@ services:
       - WAZUH_MAX_PER_MINUTE=${WAZUH_MAX_PER_MINUTE:-0}
       - WAZUH_STALE_SECONDS=${WAZUH_STALE_SECONDS:-600}
     volumes:
-      # READ-ONLY mount of alerts.json — cannot modify the original
-      - ${WAZUH_ALERTS_PATH:-/var/ossec/logs/alerts/alerts.json}:/wazuh/alerts.json:ro
+      # Mount the DIRECTORY (not the file) so midnight Wazuh rotation doesn't break the watcher
+      - ${WAZUH_ALERTS_DIR:-/var/ossec/logs/alerts}:/wazuh/alerts:ro
       # Persist offset + spool between restarts
       - watcher_data:/app/data
     depends_on:

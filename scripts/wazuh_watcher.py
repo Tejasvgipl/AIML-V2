@@ -32,7 +32,9 @@ import requests
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-ALERTS_PATH = Path(os.getenv("WAZUH_ALERTS_PATH", "/var/ossec/logs/alerts/alerts.json"))
+# Mount the DIRECTORY (not the file) so rotation is transparent to the container
+ALERTS_DIR  = Path(os.getenv("WAZUH_ALERTS_DIR", "/wazuh/alerts"))
+ALERTS_PATH = ALERTS_DIR / os.getenv("WAZUH_ALERTS_FILENAME", "alerts.json")
 API_BASE = os.getenv("WAZUH_API_URL", "http://backend:8000").rstrip("/")
 ML_API_BASE = os.getenv("WAZUH_ML_API_URL", "http://ml-engine:8001").rstrip("/")
 OFFSET_FILE = Path(os.getenv("WAZUH_OFFSET_FILE", "/app/data/wazuh_offset.json"))
@@ -506,16 +508,24 @@ def tail_alerts():
         replay_spool()
 
         try:
-            file_size = ALERTS_PATH.stat().st_size
+            st = ALERTS_PATH.stat()
+            file_size  = st.st_size
+            file_inode = st.st_ino
         except Exception:
             time.sleep(INTERVAL)
             continue
 
-        if file_size < state["byte_offset"]:
-            print("[Watcher] File rotated — resetting offset")
+        # Detect rotation: inode changed (Wazuh replaced the file) OR file shrank
+        saved_inode = state.get("file_inode")
+        if (saved_inode and saved_inode != file_inode) or file_size < state["byte_offset"]:
+            reason = "inode changed" if (saved_inode and saved_inode != file_inode) else "file shrank"
+            print(f"[Watcher] File rotated ({reason}) — resetting offset to 0")
             state["byte_offset"] = 0
+            state["file_inode"]  = file_inode
             save_offset(state)
             last_progress_ts = time.time()
+        else:
+            state["file_inode"] = file_inode
 
         if file_size > state["byte_offset"] and time.time() - last_progress_ts > STALE_SECONDS:
             print(f"[Watcher] Stale {STALE_SECONDS}s with unread data — exiting for Docker restart")
@@ -638,7 +648,7 @@ if __name__ == "__main__":
     print("║   CyberSentinel — Wazuh alerts.json Streamer v3        ║")
     print("║   Sink: ClickHouse (direct, batched, spooled)         ║")
     print("╚══════════════════════════════════════════════════════════╝")
-    print(f"  File       : {ALERTS_PATH}")
+    print(f"  File       : {ALERTS_PATH} (dir-mounted, rotation-safe)")
     print(f"  ClickHouse : {CH_HOST}:{CH_PORT} → {CH_TABLE}")
     print(f"  Backend    : {API_BASE} (triggers only)")
     print(f"  Batch      : {BATCH_SIZE} | Chunk: {CHUNK_LINES:,} lines | Spool: {SPOOL_DIR}")
