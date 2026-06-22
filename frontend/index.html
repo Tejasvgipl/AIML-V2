@@ -4692,6 +4692,12 @@ tr:hover td{background:#161b22}</style></head>
     }
 
   </script>
+  <script>
+    // Service worker — caches /api/overview so page feels instant on repeat loads
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
 </body>
 
 </html>

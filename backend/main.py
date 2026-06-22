@@ -72,16 +72,27 @@ async def _to_thread(fn, *args):
 
 
 @app.on_event("startup")
-async def _warm_cache():
-    """Pre-populate stats cache so the first browser load is instant."""
-    async def _warm():
-        await asyncio.sleep(5)  # let ClickHouse connections settle
-        try:
-            await asyncio.gather(get_stats(), get_resilience(), get_hot_ips())
-            print("[startup] stats + resilience + hot-ips cache warmed")
-        except Exception as e:
-            print(f"[startup] cache warm failed (non-fatal): {e}")
-    asyncio.create_task(_warm())
+async def _start_background_refresh():
+    """
+    Continuously pre-computes all dashboard data in the background.
+    Every browser request is served instantly from memory — no waiting for ClickHouse.
+    This is how Grafana/Datadog achieve fast dashboards.
+    """
+    async def _refresh_loop():
+        await asyncio.sleep(5)  # let ClickHouse settle on boot
+        while True:
+            try:
+                await asyncio.gather(
+                    get_stats(),
+                    get_hot_ips(),
+                    get_resilience(),
+                    return_exceptions=True,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(30)  # refresh every 30 seconds
+
+    asyncio.create_task(_refresh_loop())
 
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "demo")
 AI_API_KEY  = os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", ""))
