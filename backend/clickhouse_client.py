@@ -196,6 +196,58 @@ def get_hot_ips_from_os(size: int = 100) -> list[str]:
     return [r["src_ip"] for r in rows]
 
 
+def get_hot_ip_summaries(size: int = 30) -> list[dict]:
+    """Get hot IPs + their threat/severity breakdown in ONE query.
+    Replaces N×4 per-IP ClickHouse queries with a single aggregated scan.
+    Uses agg_ip_daily (materialized view) — tiny row count, very fast."""
+    # Step 1: identify hot IPs by critical/high event count
+    hot_rows = _q(
+        f"SELECT src_ip, sum(events) AS total FROM {AGG_TABLE} "
+        f"WHERE severity IN ('critical','high') "
+        f"GROUP BY src_ip ORDER BY total DESC LIMIT {int(size)}"
+    )
+    if not hot_rows:
+        return []
+    hot_ips = [r["src_ip"] for r in hot_rows]
+    ip_totals = {r["src_ip"]: int(r["total"]) for r in hot_rows}
+
+    # Step 2: one batch query for all stats — threat/severity breakdown + first/last seen
+    placeholders = ",".join(f"'{ip}'" for ip in hot_ips)
+    detail_rows = _q(
+        f"SELECT src_ip, threat_type, severity, sum(events) AS cnt "
+        f"FROM {AGG_TABLE} WHERE src_ip IN ({placeholders}) "
+        f"GROUP BY src_ip, threat_type, severity"
+    )
+    # Also get first/last seen in one query from the raw logs (partitioned, fast with src_ip filter)
+    time_rows = _q(
+        f"SELECT src_ip, min(ts) AS first_seen, max(ts) AS last_seen "
+        f"FROM cybersentinel.logs WHERE src_ip IN ({placeholders}) "
+        f"GROUP BY src_ip"
+    )
+    time_map = {r["src_ip"]: (_iso(r["first_seen"]), _iso(r["last_seen"])) for r in time_rows}
+
+    # Aggregate in Python
+    by_ip: dict[str, dict] = {}
+    for r in detail_rows:
+        ip = r["src_ip"]
+        if ip not in by_ip:
+            by_ip[ip] = {"ip": ip, "found": True, "total": ip_totals.get(ip, 0),
+                         "threat_types": {}, "severities": {}, "source": "clickhouse"}
+        by_ip[ip]["threat_types"][r["threat_type"]] = by_ip[ip]["threat_types"].get(r["threat_type"], 0) + int(r["cnt"])
+        by_ip[ip]["severities"][r["severity"]] = by_ip[ip]["severities"].get(r["severity"], 0) + int(r["cnt"])
+
+    results = []
+    for ip in hot_ips:
+        s = by_ip.get(ip, {"ip": ip, "found": True, "total": ip_totals.get(ip, 0),
+                           "threat_types": {}, "severities": {}, "source": "clickhouse"})
+        first, last = time_map.get(ip, (None, None))
+        s["first_seen"] = first
+        s["last_seen"] = last
+        s["is_hot"] = True
+        results.append(s)
+    return results
+
+
 def get_global_threat_counts() -> dict:
     rows = _q(f"SELECT threat_type, sum(events) AS c FROM {AGG_TABLE} "
               f"GROUP BY threat_type ORDER BY c DESC LIMIT 50")

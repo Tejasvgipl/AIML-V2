@@ -2856,11 +2856,12 @@ tr:hover td{background:#161b22}</style></head>
     }
     async function refreshAll() {
       try {
-      const [s, hot, mlh] = await Promise.all([
-        get(`${API}/stats`),
-        get(`${API}/hot-ips`),
-        get(`${ML}/health`),
-      ]);
+      // Single round trip instead of 3 separate fetches
+      const ov = await get(`${API}/overview`);
+      if (!ov) return;
+      const s = ov.stats;
+      const hot = ov.hot_ips;
+      const mlh = ov.ml_health;
       if (!s) return;
       const totalLogs = Number(s.total_logs || 0);
       const hotCount = (s.hot_ips || []).length;

@@ -61,8 +61,8 @@ async def _warm_cache():
     async def _warm():
         await asyncio.sleep(5)  # let ClickHouse connections settle
         try:
-            await asyncio.gather(get_stats(), get_resilience())
-            print("[startup] stats + resilience cache warmed")
+            await asyncio.gather(get_stats(), get_resilience(), get_hot_ips())
+            print("[startup] stats + resilience + hot-ips cache warmed")
         except Exception as e:
             print(f"[startup] cache warm failed (non-fatal): {e}")
     asyncio.create_task(_warm())
@@ -1428,18 +1428,43 @@ async def get_stats():
     return _stats_cache if _stats_cache else result
 
 
+_HOT_IPS_TTL = 60  # seconds
+
+
 @app.get("/api/hot-ips")
 async def get_hot_ips():
     global _hot_ips_cache, _hot_ips_cache_ts
-    hot = osc.get_hot_ips_from_os(size=50) if (STORE_ENABLED and osc) else []
-    if not hot and _hot_ips_cache:
+    if _hot_ips_cache and time.time() - _hot_ips_cache_ts < _HOT_IPS_TTL:
         return _hot_ips_cache
-    result = list(await asyncio.gather(*[trail_summary(ip) for ip in hot]))
-    result.sort(key=lambda x: x.get("total", 0), reverse=True)
+    if not (STORE_ENABLED and osc):
+        return _hot_ips_cache or []
+    # One batch query replaces N×4 per-IP queries (was 200 ClickHouse queries for 50 IPs)
+    result = await asyncio.to_thread(osc.get_hot_ip_summaries, 30)
     if result:
         _hot_ips_cache = result
         _hot_ips_cache_ts = time.time()
     return result if result else (_hot_ips_cache or [])
+
+
+@app.get("/api/overview")
+async def get_overview():
+    """Combined endpoint: stats + hot-ips + ml-health in one round trip.
+    Eliminates 3 extra browser→server fetches on page load."""
+    stats, hot, ml_health = await asyncio.gather(
+        get_stats(),
+        get_hot_ips(),
+        _get_ml_health(),
+    )
+    return {"stats": stats, "hot_ips": hot, "ml_health": ml_health}
+
+
+async def _get_ml_health() -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=3) as hc:
+            r = await hc.get("http://ml-engine:8001/api/ml/health")
+            return r.json() if r.status_code == 200 else {}
+    except Exception:
+        return {}
 
 
 # â”€â”€ threat intel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
