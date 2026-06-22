@@ -782,34 +782,15 @@ async def build_all_baselines():
     return {"status": "done", "baselines_built": len(ips)}
 
 
-@app.post("/api/baseline/scan-deviations")
-async def scan_deviations(events_per_ip: int = 100, max_ips: int = 500):
-    """Re-run baseline-deviation detection — only for IPs active in the last 24h."""
-    if not (STORE_ENABLED and osc):
-        return {"status": "disabled"}
-    # Only scan IPs seen recently — avoids looping all historical IPs
-    client = osc.get_client()
-    active_ips: list[str] = []
-    if client:
-        try:
-            res = client.query(
-                "SELECT DISTINCT src_ip FROM cybersentinel.logs "
-                "WHERE ts > now() - INTERVAL 24 HOUR LIMIT {n:UInt32}",
-                parameters={"n": max_ips}
-            )
-            active_ips = [r[0] for r in res.result_rows if r[0]]
-        except Exception:
-            active_ips = osc.get_all_baseline_ips()[:max_ips]
-    else:
-        active_ips = osc.get_all_baseline_ips()[:max_ips]
-
-    ips_with_devs = 0
-    total = 0
-    for ip in active_ips:
-        baseline = osc.get_baseline(ip)
+async def _scan_ip_deviations(ip: str, events_per_ip: int) -> tuple[int, int]:
+    """Scan one IP for deviations. Returns (ips_with_devs, total_devs)."""
+    try:
+        baseline, events = await asyncio.gather(
+            asyncio.to_thread(osc.get_baseline, ip),
+            asyncio.to_thread(osc.get_ip_events, ip, events_per_ip, 1),
+        )
         if not baseline:
-            continue
-        events = osc.get_ip_events(ip, limit=events_per_ip, days=1)  # last 24h only
+            return 0, 0
         collected: dict[str, dict] = {}
         for ev in events:
             ts = ev.get("_ts") or 0.0
@@ -820,10 +801,50 @@ async def scan_deviations(events_per_ip: int = 100, max_ips: int = 500):
                 continue
         if collected:
             await save_alerts(ip, list(collected.values()))
-            ips_with_devs += 1
-            total += len(collected)
-    return {"status": "done", "ips_scanned": len(active_ips),
-            "ips_with_deviations": ips_with_devs, "deviations_written": total}
+            return 1, len(collected)
+    except Exception:
+        pass
+    return 0, 0
+
+
+async def _run_deviation_scan(max_ips: int, events_per_ip: int):
+    """Full deviation scan — runs in background, parallelised per IP."""
+    client = osc.get_client()
+    active_ips: list[str] = []
+    if client:
+        try:
+            res = await asyncio.to_thread(
+                client.query,
+                "SELECT DISTINCT src_ip FROM cybersentinel.logs "
+                "WHERE ts > now() - INTERVAL 24 HOUR LIMIT {n:UInt32}",
+                {"n": max_ips},
+            )
+            active_ips = [r[0] for r in res.result_rows if r[0]]
+        except Exception:
+            active_ips = (await asyncio.to_thread(osc.get_all_baseline_ips))[:max_ips]
+    else:
+        active_ips = (await asyncio.to_thread(osc.get_all_baseline_ips))[:max_ips]
+
+    # Process all IPs in parallel — no more sequential 500-query chain
+    CONCURRENCY = 20
+    ips_with_devs = total = 0
+    for i in range(0, len(active_ips), CONCURRENCY):
+        chunk = active_ips[i:i + CONCURRENCY]
+        results = await asyncio.gather(*[_scan_ip_deviations(ip, events_per_ip) for ip in chunk])
+        for w, t in results:
+            ips_with_devs += w
+            total += t
+
+    logger.info(f"Deviation scan done: {len(active_ips)} IPs, {ips_with_devs} with deviations, {total} written")
+
+
+@app.post("/api/baseline/scan-deviations")
+async def scan_deviations(background_tasks: BackgroundTasks, events_per_ip: int = 100, max_ips: int = 300):
+    """Kick off baseline-deviation detection in the background — returns immediately."""
+    if not (STORE_ENABLED and osc):
+        return {"status": "disabled"}
+    background_tasks.add_task(_run_deviation_scan, max_ips, events_per_ip)
+    return {"status": "started", "max_ips": max_ips}
 
 
 # ── alerts ────────────────────────────────────────────────────────────────────
