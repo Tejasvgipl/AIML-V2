@@ -2,28 +2,17 @@
 // Shows cached data INSTANTLY on page open, refreshes in background.
 // Cache lasts 2 minutes — stale data is always better than a blank screen.
 
-const CACHE = 'cs-api-v2';
+const CACHE = 'cs-api-v1';
 const MAX_AGE_MS = 120_000; // 2 minutes
 
 // API paths to cache (fast-changing data with short TTL)
 const CACHE_PATHS = [
   '/api/overview',
   '/api/resilience',
-  '/api/stats',
-  '/api/hot-ips',
-  '/api/logs',
-  '/api/incidents',
-  '/api/ml/anomalies',
 ];
 
 self.addEventListener('install', e => { self.skipWaiting(); });
-self.addEventListener('activate', e => {
-  e.waitUntil((async () => {
-    const keys = await caches.keys();
-    await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
-    await clients.claim();
-  })());
-});
+self.addEventListener('activate', e => { e.waitUntil(clients.claim()); });
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);

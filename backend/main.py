@@ -71,101 +71,19 @@ async def _to_thread(fn, *args):
         return await loop.run_in_executor(_executor, fn, *args)
 
 
-async def _load_persisted_caches():
-    """
-    Load the last-saved dashboard snapshot from ClickHouse into the in-memory
-    caches on boot. This is what makes the FIRST page load after a rebuild
-    instant — instead of recomputing heavy aggregations cold, we serve the
-    snapshot that survived in the clickhouse_data volume.
-    """
-    global _stats_cache, _stats_cache_ts, _hot_ips_cache, _hot_ips_cache_ts
-    global _resilience_cache, _resilience_cache_ts, _incidents_cache, _incidents_cache_ts
-    if not (osc and STORE_ENABLED):
-        return
-    try:
-        await _to_thread(osc.ensure_cache_table)
-        loaders = {
-            "stats":      lambda v, ts: _set_stats(v, ts),
-            "hot_ips":    lambda v, ts: _set_hot(v, ts),
-            "resilience": lambda v, ts: _set_resil(v, ts),
-            "incidents":  lambda v, ts: _set_inc(v, ts),
-        }
-        for key, apply in loaders.items():
-            got = await _to_thread(osc.cache_get, key)
-            if got:
-                value, age = got
-                apply(value, time.time() - age)
-        # Default Logs-tab view (so the Logs page is instant on a fresh device)
-        got = await _to_thread(osc.cache_get, "logs_default")
-        if got and isinstance(got[0], dict):
-            _logs_cache["10080:1:1000"] = (time.time() - got[1], got[0])
-        print("[startup] persistent cache loaded — first load is warm")
-    except Exception as e:
-        print(f"[startup] persistent cache load failed (non-fatal): {e}")
-
-
-def _set_stats(v, ts):
-    global _stats_cache, _stats_cache_ts
-    if isinstance(v, dict) and v:
-        _stats_cache, _stats_cache_ts = v, ts
-
-def _set_hot(v, ts):
-    global _hot_ips_cache, _hot_ips_cache_ts
-    if isinstance(v, list) and v:
-        _hot_ips_cache, _hot_ips_cache_ts = v, ts
-
-def _set_resil(v, ts):
-    global _resilience_cache, _resilience_cache_ts
-    if isinstance(v, dict) and v:
-        _resilience_cache, _resilience_cache_ts = v, ts
-
-def _set_inc(v, ts):
-    global _incidents_cache, _incidents_cache_ts
-    if isinstance(v, list):
-        _incidents_cache, _incidents_cache_ts = v, ts
-
-
-async def _persist_caches():
-    """Save the current in-memory snapshot to ClickHouse so it survives restarts."""
-    if not (osc and STORE_ENABLED):
-        return
-    try:
-        if _stats_cache:
-            await _to_thread(osc.cache_set, "stats", _stats_cache)
-        if _hot_ips_cache:
-            await _to_thread(osc.cache_set, "hot_ips", _hot_ips_cache)
-        if _resilience_cache:
-            await _to_thread(osc.cache_set, "resilience", _resilience_cache)
-        if _incidents_cache is not None:
-            await _to_thread(osc.cache_set, "incidents", _incidents_cache)
-        default_logs = _logs_cache.get("10080:1:1000")
-        if default_logs and default_logs[1].get("logs"):
-            await _to_thread(osc.cache_set, "logs_default", default_logs[1])
-    except Exception:
-        pass
-
-
 @app.on_event("startup")
 async def _start_background_refresh():
     """
     Continuously pre-computes all dashboard data in the background.
     Every browser request is served instantly from memory — no waiting for ClickHouse.
-    Snapshots are persisted to ClickHouse so a rebuild stays warm (Grafana-style).
+    This is how Grafana/Datadog achieve fast dashboards.
     """
-    # Load the surviving snapshot in the BACKGROUND — must never block startup,
-    # or uvicorn won't signal ready and nginx returns 502 while ClickHouse warms up.
-    asyncio.create_task(_load_persisted_caches())
-
     async def _refresh_fast():
-        """Stats, hot-ips, resilience + default logs view every 30s — lightweight."""
+        """Stats, hot-ips, resilience every 30s — lightweight."""
         await asyncio.sleep(2)
         while True:
-            await asyncio.gather(
-                get_stats(), get_hot_ips(), get_resilience(),
-                get_logs(min_level=1, limit=1000),   # warm the Logs tab default view
-                return_exceptions=True,
-            )
-            await _persist_caches()
+            await asyncio.gather(get_stats(), get_hot_ips(), get_resilience(),
+                                 return_exceptions=True)
             await asyncio.sleep(30)
 
     async def _refresh_incidents():
@@ -174,8 +92,6 @@ async def _start_background_refresh():
         while True:
             try:
                 await _gather_incidents()
-                if osc and STORE_ENABLED and _incidents_cache is not None:
-                    await _to_thread(osc.cache_set, "incidents", _incidents_cache)
             except Exception:
                 pass
             await asyncio.sleep(60)
@@ -2416,10 +2332,6 @@ PRIORITY JUSTIFICATION:"""
 
 # â”€â”€ search + health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-_logs_cache: dict[str, tuple[float, dict]] = {}
-_LOGS_TTL = 30  # seconds — default log view is refreshed by the background loop
-
-
 @app.get("/api/logs")
 async def get_logs(minutes: int = 0, start: str = "", end: str = "",
                    severity: str = "", min_level: int = 0, limit: int = 500):
@@ -2428,25 +2340,12 @@ async def get_logs(minutes: int = 0, start: str = "", end: str = "",
     # Default to last 7 days — uses partition pruning, avoids full table scan
     if not minutes and not start and not end:
         minutes = 10080  # 7 days
-    capped = min(limit, 1000)
-
-    # Cache the default browsing view (no custom date range / severity filter).
-    # This is what the Logs tab requests on every open — serve it from memory.
-    cacheable = not start and not end and not severity
-    ckey = f"{minutes}:{min_level}:{capped}"
-    if cacheable:
-        hit = _logs_cache.get(ckey)
-        if hit and time.time() - hit[0] < _LOGS_TTL:
-            return hit[1]
-
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
     logs = await _to_thread(
-        osc.get_recent_logs, minutes, start, end, sevs, min_level, capped
+        osc.get_recent_logs,
+        minutes, start, end, sevs, min_level, min(limit, 1000)
     )
-    result = {"logs": logs, "count": len(logs), "source": "clickhouse"}
-    if cacheable and logs:
-        _logs_cache[ckey] = (time.time(), result)
-    return result
+    return {"logs": logs, "count": len(logs), "source": "clickhouse"}
 
 
 @app.get("/api/search")
