@@ -534,7 +534,8 @@ async def _load_persisted_anomalies():
 
 @app.on_event("startup")
 async def _start_background_refresh():
-    await _load_persisted_anomalies()
+    # Load in the background — never block startup on ClickHouse (causes 502).
+    asyncio.create_task(_load_persisted_anomalies())
 
     async def _loop():
         await asyncio.sleep(3)

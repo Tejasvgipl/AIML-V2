@@ -152,8 +152,9 @@ async def _start_background_refresh():
     Every browser request is served instantly from memory — no waiting for ClickHouse.
     Snapshots are persisted to ClickHouse so a rebuild stays warm (Grafana-style).
     """
-    # Load the surviving snapshot FIRST so early requests are instant.
-    await _load_persisted_caches()
+    # Load the surviving snapshot in the BACKGROUND — must never block startup,
+    # or uvicorn won't signal ready and nginx returns 502 while ClickHouse warms up.
+    asyncio.create_task(_load_persisted_caches())
 
     async def _refresh_fast():
         """Stats, hot-ips, resilience + default logs view every 30s — lightweight."""
