@@ -79,7 +79,7 @@ async def _start_background_refresh():
     This is how Grafana/Datadog achieve fast dashboards.
     """
     async def _refresh_loop():
-        await asyncio.sleep(5)  # let ClickHouse settle on boot
+        await asyncio.sleep(2)  # let ClickHouse settle on boot
         while True:
             try:
                 await asyncio.gather(

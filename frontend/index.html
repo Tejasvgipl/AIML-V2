@@ -1959,6 +1959,18 @@
       font-size: 11px; color: var(--muted);
     }
     .kc-topo-cell b { color: var(--accent); display: block; font-size: 10px; margin-bottom: 2px; }
+
+    /* ── Skeleton shimmer — shows while API data loads ───────────────────── */
+    @keyframes shimmer { 0%{background-position:-400px 0} 100%{background-position:400px 0} }
+    .skel {
+      background: linear-gradient(90deg, var(--bg2) 25%, var(--bg3) 50%, var(--bg2) 75%);
+      background-size: 800px 100%;
+      animation: shimmer 1.4s infinite linear;
+      border-radius: 4px;
+      display: inline-block;
+      min-width: 60px;
+      color: transparent !important;
+    }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
   <link rel="stylesheet" href="theme.css?v=8">
@@ -2865,6 +2877,7 @@ tr:hover td{background:#161b22}</style></head>
         [s, hot, mlh] = await Promise.all([get(`${API}/stats`), get(`${API}/hot-ips`), get(`${ML}/health`)]);
       }
       if (!s) return;
+      document.querySelectorAll('.skel').forEach(el => el.classList.remove('skel'));
       const totalLogs = Number(s.total_logs || 0);
       const hotCount = (s.hot_ips || []).length;
       const criticalCount = (s.critical_ips || []).length;
@@ -4596,6 +4609,12 @@ tr:hover td{background:#161b22}</style></head>
     const fadeStyle = document.createElement('style');
     fadeStyle.textContent = '.fade-in-visible { opacity: 1 !important; transform: translateY(0) !important; transition: opacity 0.45s cubic-bezier(0.4,0,0.2,1), transform 0.45s cubic-bezier(0.4,0,0.2,1); transition-delay: var(--delay, 0s); }';
     document.head.appendChild(fadeStyle);
+    // Show skeleton shimmer instantly — page feels loaded before API responds
+    ['m-total','m-ips','m-hot','m-balerts','m-crit','ops-total','ops-critical',
+     'threat-index','hot-count'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('skel');
+    });
     refreshReportEndpoints();
     refreshAll();
     loadResilience();
