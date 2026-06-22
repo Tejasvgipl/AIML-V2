@@ -128,38 +128,6 @@ services:
           memory: 512M
     restart: unless-stopped
 
-  auth:
-    build: ./auth
-    container_name: aiml_auth
-    ports:
-      - "${AUTH_HOST_PORT:-18113}:8003"
-    environment:
-      - JWT_SECRET=${JWT_SECRET:-cs-jwt-secret-CHANGE-IN-PROD-2026}
-      - JWT_EXPIRE_HOURS=${JWT_EXPIRE_HOURS:-8}
-      - SEED_ADMIN_USER=${SEED_ADMIN_USER:-Tejas}
-      - SEED_ADMIN_PASS=${SEED_ADMIN_PASS:-tejas@123}
-      - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_PORT=8123
-      - CLICKHOUSE_DB=cybersentinel
-      - CLICKHOUSE_USER=default
-      - CLICKHOUSE_PASS=${CLICKHOUSE_PASS:-tejas@123}
-      # SIEM SSO — set SSO_SECRET in .env to enable (must match SIEM config)
-      - SSO_SECRET=${SSO_SECRET:-}
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8003/api/auth/health"]
-      interval: 10s
-      timeout: 8s
-      retries: 8
-      start_period: 45s
-
   frontend:
     build: ./frontend
     container_name: aiml_frontend
@@ -179,8 +147,6 @@ services:
       frontend:
         condition: service_started
       backend:
-        condition: service_healthy
-      auth:
         condition: service_healthy
     restart: unless-stopped
 

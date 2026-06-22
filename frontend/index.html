@@ -1965,176 +1965,6 @@
 </head>
 
 <body>
-  <!-- ── Sign-in gate ─────────────────────────────────────────────────── -->
-  <div id="login-screen">
-    <div class="login-brand">
-      <div class="login-logo">
-        <!-- Drop your logo as frontend/logo.png to replace this mark -->
-        <img src="logo.png" alt="logo" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='logo.svg'}else{this.style.display='none';this.nextElementSibling.style.display='block'}">
-        <svg style="display:none" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/><path d="M9 12l2 2 4-4"/>
-        </svg>
-      </div>
-      <h1>CyberSentinel<br>SOC Platform</h1>
-      <p>AI-driven threat intelligence and behavioural analytics — live log ingestion, anomaly detection, and analyst tooling in one console.</p>
-      <div class="login-feats">
-        <div class="login-feat"><span class="dot"></span>Real-time log ingestion at scale</div>
-        <div class="login-feat"><span class="dot"></span>Behavioural baselines &amp; anomaly ML</div>
-        <div class="login-feat"><span class="dot"></span>AI-assisted investigation</div>
-      </div>
-      <div class="login-brandfoot">
-        <div class="lf-mark">
-          <img src="logo.png" alt="" onerror="if(!this.dataset.f){this.dataset.f=1;this.src='logo.svg'}else{this.style.display='none';this.nextElementSibling.style.display='block'}">
-          <svg style="display:none" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z"/><path d="M9 12l2 2 4-4"/></svg>
-        </div>
-        <div class="lf-txt">
-          <div class="lf-title">CyberSentinel</div>
-          <div class="lf-sub">AI&nbsp;·&nbsp;ML&nbsp;Driven Threat Intelligence</div>
-        </div>
-      </div>
-    </div>
-    <div class="login-form-wrap">
-      <form class="login-card" onsubmit="return doLogin(event)">
-        <div class="eyebrow">Welcome back</div>
-        <h2>Sign in</h2>
-        <div class="sub">Enter your credentials to access the console.</div>
-        <div class="field">
-          <label>Username</label>
-          <input id="login-user" autocomplete="username" placeholder="admin" required>
-        </div>
-        <div class="field">
-          <label>Password</label>
-          <input id="login-pass" type="password" autocomplete="current-password" placeholder="••••••••" required>
-        </div>
-        <button class="login-btn" type="submit">Sign in →</button>
-        <div class="login-error" id="login-error">Invalid username or password</div>
-        <div class="login-foot">CyberSentinel · Secure SOC Console</div>
-      </form>
-    </div>
-  </div>
-  <script>
-    // ── JWT auth gate ─────────────────────────────────────────────────────────
-    const AUTH = '/api/auth';
-
-    function _authToken() { return localStorage.getItem('cs_token') || ''; }
-    function _authRole()  { return localStorage.getItem('cs_role')  || 'user'; }
-    function _authUser()  { return localStorage.getItem('cs_user')  || ''; }
-
-    function _applyAdminUI() {
-      var role = _authRole(), user = _authUser();
-      var el = document.getElementById('current-user-display');
-      if (el) el.textContent = user;
-      var badge = document.getElementById('current-user-badge');
-      if (badge) { badge.textContent = role === 'admin' ? 'Admin' : 'Analyst'; badge.style.color = role === 'admin' ? 'var(--warn)' : 'var(--ok)'; }
-      document.querySelectorAll('.admin-only').forEach(function(e) {
-        e.style.display = role === 'admin' ? '' : 'none';
-      });
-    }
-
-    // ── SIEM SSO handler — intercepts /auth/sso?token=<jwt> before anything ───
-    (function() {
-      var path = window.location.pathname;
-      var params = new URLSearchParams(window.location.search);
-
-      // SIEM redirects to: <AIML_URL>/auth/sso?token=<exchangeToken>
-      if (path === '/auth/sso') {
-        var token = params.get('token');
-        // Show a loading screen instead of the login form
-        document.addEventListener('DOMContentLoaded', function() {
-          var ls = document.getElementById('login-screen');
-          if (ls) ls.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;color:#e6edf3;font-family:monospace"><div style="font-size:22px;margin-bottom:16px">CyberSentinel</div><div style="color:#58a6ff;font-size:14px">Authenticating via SIEM SSO…</div></div>';
-        });
-        if (!token) {
-          history.replaceState(null, '', '/');
-          return;
-        }
-        fetch('/api/auth/sso/validate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: token })
-        }).then(function(r) { return r.json(); }).then(function(data) {
-          if (data.access_token) {
-            localStorage.setItem('cs_token', data.access_token);
-            localStorage.setItem('cs_role',  data.role || 'user');
-            localStorage.setItem('cs_user',  data.username || '');
-            window.location.replace('/');   // clean redirect to dashboard
-          } else {
-            window.location.replace('/?sso_error=' + encodeURIComponent(data.detail || 'SSO validation failed'));
-          }
-        }).catch(function(e) {
-          window.location.replace('/?sso_error=' + encodeURIComponent('Network error: ' + e.message));
-        });
-        return; // stop remaining IIFE — page will redirect
-      }
-
-      // Handle sso_error query param on the main page (bounced back from /auth/sso)
-      var ssoError = params.get('sso_error');
-      if (ssoError) {
-        history.replaceState(null, '', '/');
-        document.addEventListener('DOMContentLoaded', function() {
-          var errEl = document.getElementById('login-error');
-          if (errEl) { errEl.textContent = 'SSO failed: ' + decodeURIComponent(ssoError); errEl.classList.add('show'); }
-        });
-      }
-    })();
-
-    (function() {
-      var t = _authToken();
-      if (t) {
-        var s = document.getElementById('login-screen');
-        if (s) s.classList.add('hidden');
-        // Validate token async; if expired, bounce back to login
-        fetch(AUTH + '/me', { headers: { 'Authorization': 'Bearer ' + t } })
-          .then(function(r) {
-            if (!r.ok) { localStorage.clear(); location.reload(); }
-            else { _applyAdminUI(); setTimeout(function(){ if(typeof refreshAll==='function') refreshAll(); }, 100); }
-          }).catch(function() {});
-      }
-    })();
-
-    async function doLogin(e) {
-      e.preventDefault();
-      var u = document.getElementById('login-user').value.trim();
-      var p = document.getElementById('login-pass').value;
-      var btn = document.querySelector('.login-btn');
-      var errEl = document.getElementById('login-error');
-      errEl.classList.remove('show');
-      btn.textContent = 'Signing in…'; btn.disabled = true;
-      try {
-        var r = await fetch(AUTH + '/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username: u, password: p })
-        });
-        if (r.ok) {
-          var data = await r.json();
-          localStorage.setItem('cs_token', data.access_token);
-          localStorage.setItem('cs_role',  data.role);
-          localStorage.setItem('cs_user',  data.username);
-          document.getElementById('login-screen').classList.add('hidden');
-          _applyAdminUI();
-          setTimeout(function(){ if(typeof refreshAll==='function') refreshAll(); }, 100);
-        } else {
-          errEl.classList.add('show');
-        }
-      } catch(err) {
-        errEl.classList.add('show');
-      }
-      btn.textContent = 'Sign in →'; btn.disabled = false;
-      return false;
-    }
-
-    async function csLogout() {
-      var t = _authToken();
-      if (t) {
-        try { await fetch(AUTH + '/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } }); } catch(e) {}
-      }
-      localStorage.removeItem('cs_token');
-      localStorage.removeItem('cs_role');
-      localStorage.removeItem('cs_user');
-      location.reload();
-    }
-  </script>
 
   <div class="shell">
     <aside class="sidebar">
@@ -2171,18 +2001,10 @@
         <div class="ni" onclick="nav('ingest')"><span class="ndot nd-g"></span>Ingest Logs</div>
         <div class="ns">Reporting</div>
         <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Reports</div>
-        <div class="ns admin-only" style="display:none">Admin</div>
-        <div class="ni admin-only" style="display:none" onclick="nav('users')"><span class="ndot" style="background:var(--warn)"></span>User Management</div>
-        <div class="ni admin-only" style="display:none" onclick="nav('auditlog')"><span class="ndot nd-w"></span>Login Audit</div>
+        <div class="ns">System</div>
+        <div class="ni" onclick="nav('users')"><span class="ndot" style="background:var(--muted)"></span>Settings</div>
       </nav>
       <div class="sfooter">
-        <div class="srow" style="flex-direction:column;align-items:flex-start;gap:2px;padding-bottom:6px;border-bottom:1px solid var(--border);margin-bottom:6px">
-          <span style="font-size:10px;color:var(--muted)">Signed in as</span>
-          <div style="display:flex;align-items:center;gap:6px">
-            <span id="current-user-display" style="font-size:12px;font-weight:600">—</span>
-            <span id="current-user-badge" style="font-size:10px;padding:1px 6px;border-radius:10px;background:rgba(255,255,255,.07)">—</span>
-          </div>
-        </div>
         <div class="srow"><span class="pulse"></span>Backend API</div>
         <div class="srow" id="ml-status"><span
             style="width:6px;height:6px;border-radius:50%;background:var(--muted);display:inline-block"></span> ML
@@ -2191,7 +2013,6 @@
             style="width:6px;height:6px;border-radius:50%;background:var(--muted);display:inline-block"></span> AI
           Engine</div>
         <div style="font-size:10px;color:var(--muted);margin-top:6px" id="last-ref">—</div>
-        <button class="btn-logout" onclick="csLogout()">Sign out</button>
       </div>
     </aside>
     <main class="main">
@@ -2839,11 +2660,11 @@
         </div>
       </div>
 
-      <!-- ── User Management (admin only) ──────────────────────────────────── -->
+      <!-- ── Settings ───────────────────────────────────────────────────────── -->
       <div id="page-users" class="page">
         <div style="display:grid;gap:18px;padding:0 4px">
           <div class="card" style="background:var(--bg2)">
-            <div class="ch"><span class="ct">External Tools</span><span style="font-size:11px;color:var(--muted)">Admin access only</span></div>
+            <div class="ch"><span class="ct">External Tools</span></div>
             <div class="cb" style="display:flex;gap:12px;flex-wrap:wrap">
               <button class="btn" style="border-color:#f46800;color:#f46800" onclick="openGrafana()">📊 Grafana Dashboard ↗</button>
               <span style="font-size:11px;color:var(--muted);align-self:center">Grafana: <code>admin / tejas@123</code></span>
@@ -2864,64 +2685,6 @@
               <div id="topo-status" style="margin-top:10px;font-size:12px;color:var(--muted)">Loading status…</div>
               <div id="topo-preview" style="margin-top:10px"></div>
             </div>
-          </div>
-          <div class="card">
-            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
-              <span class="ct">Registered Users</span>
-              <button class="btn pri" onclick="loadUsers()">↻ Refresh</button>
-            </div>
-            <div class="cb">
-              <div id="users-list"><span style="color:var(--muted)">Loading…</span></div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="ch"><span class="ct">Create New User</span></div>
-            <div class="cb">
-              <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end">
-                <div>
-                  <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Username</label>
-                  <input id="nu-user" class="inp" placeholder="username" style="width:100%">
-                </div>
-                <div>
-                  <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Password</label>
-                  <input id="nu-pass" class="inp" type="password" placeholder="min 6 chars" style="width:100%">
-                </div>
-                <div>
-                  <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:4px">Role</label>
-                  <select id="nu-role" class="inp" style="width:110px">
-                    <option value="user">Analyst</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                </div>
-                <button class="btn pri" onclick="createUser()" style="margin-top:0">Create User</button>
-              </div>
-              <div id="nu-err" style="color:var(--danger);font-size:12px;margin-top:8px;display:none"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ── Login Audit Log (admin only) ──────────────────────────────────── -->
-      <div id="page-auditlog" class="page">
-        <div style="display:grid;gap:18px;padding:0 4px">
-          <div id="grafana-banner-audit"></div>
-          <div class="card">
-            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
-              <span class="ct">User Activity Summary</span>
-              <button class="btn" onclick="loadAuditLog()">↻ Refresh</button>
-            </div>
-            <div class="cb" id="audit-summary"><span style="color:var(--muted)">Loading…</span></div>
-          </div>
-          <div class="card">
-            <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
-              <span class="ct">Login Event Log</span>
-              <div style="display:flex;gap:8px">
-                <input id="audit-filter-user" class="inp" placeholder="Filter by user…" style="width:160px;font-size:12px">
-                <button class="btn" onclick="filterAudit()">Filter</button>
-                <button class="btn" onclick="loadAuditLog()">All</button>
-              </div>
-            </div>
-            <div class="cb" id="audit-events"><span style="color:var(--muted)">Loading…</span></div>
           </div>
         </div>
       </div>
@@ -2995,7 +2758,7 @@ tr:hover td{background:#161b22}</style></head>
         aiinvestigate: 'AI Investigator', nlquery: 'SOC Query', ml: 'ML Anomaly',
         incidents: 'Incident Triage', ueba: 'UEBA — Users & Entities', killchain: 'ATT&CK Kill Chain',
         ingest: 'Ingest Logs', reports: 'Reports',
-        users: 'User Management', auditlog: 'Login Audit Log'
+        users: 'Settings'
       };
       document.getElementById('page-title').textContent = T[name] || name;
       document.body.dataset.page = name;
@@ -3016,58 +2779,34 @@ tr:hover td{background:#161b22}</style></head>
       el.className = 'toast ' + type; el.textContent = msg;
       w.appendChild(el); setTimeout(() => el.remove(), 3500);
     }
-    function _ah() {
-      const t = _authToken();
-      return t ? { 'Authorization': 'Bearer ' + t } : {};
-    }
     async function get(url) {
       try {
-        const r = await fetch(url, { headers: _ah() });
-        if (r.status === 401) { csLogout(); return null; }
+        const r = await fetch(url);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return await r.json();
       } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
     async function post(url, body = null) {
       try {
-        const opts = { method: 'POST', headers: { ..._ah() } };
+        const opts = { method: 'POST', headers: {} };
         if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
         const r = await fetch(url, opts);
-        if (r.status === 401) { csLogout(); return null; }
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return await r.json();
       } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
     async function postForm(url, fd) {
       try {
-        const r = await fetch(url, { method: 'POST', body: fd, headers: _ah() });
+        const r = await fetch(url, { method: 'POST', body: fd });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return await r.json();
       } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
     async function del(url) {
       try {
-        const r = await fetch(url, { method: 'DELETE', headers: _ah() });
+        const r = await fetch(url, { method: 'DELETE' });
         return await r.json();
       } catch (e) { toast('API: ' + e.message, 'err'); return null; }
-    }
-    async function authPost(url, body = null) {
-      const t = _authToken();
-      try {
-        const opts = { method: 'POST', headers: { 'Authorization': 'Bearer ' + t } };
-        if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-        const r = await fetch(url, opts);
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'HTTP ' + r.status); }
-        return await r.json();
-      } catch (e) { toast('Auth: ' + e.message, 'err'); return null; }
-    }
-    async function authDel(url) {
-      const t = _authToken();
-      try {
-        const r = await fetch(url, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + t } });
-        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'HTTP ' + r.status); }
-        return await r.json();
-      } catch (e) { toast('Auth: ' + e.message, 'err'); return null; }
     }
     const COLORS = ['#f85149', '#e3b341', '#58a6ff', '#3fb950', '#bc8cff', '#f0883e', '#39d353', '#ffa657', '#79c0ff', '#d2a8ff'];
     function pie(id, counts) {
@@ -4975,152 +4714,6 @@ tr:hover td{background:#161b22}</style></head>
       await loadTopologyStatus();
     }
 
-    async function loadUsers() {
-      const banner = document.getElementById('grafana-banner-users');
-      if (banner) banner.innerHTML = _grafanaBanner();
-      const el = document.getElementById('users-list');
-      el.innerHTML = '<span style="color:var(--muted)">Loading…</span>';
-      const t = _authToken();
-      let rows;
-      try {
-        const r = await fetch(AUTH + '/users', { headers: { 'Authorization': 'Bearer ' + t } });
-        if (!r.ok) { el.innerHTML = '<span style="color:var(--danger)">Error: ' + r.status + '</span>'; return; }
-        rows = await r.json();
-      } catch(e) { el.innerHTML = `<span style="color:var(--danger)">Network error: ${e.message} — check docker logs aiml_auth</span>`; return; }
-
-      if (!rows.length) { el.innerHTML = '<span style="color:var(--muted)">No users yet.</span>'; return; }
-
-      el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:11px">
-          <th style="text-align:left;padding:6px 8px">Username</th>
-          <th style="text-align:left;padding:6px 8px">Role</th>
-          <th style="text-align:left;padding:6px 8px">Status</th>
-          <th style="text-align:left;padding:6px 8px">Created</th>
-          <th style="text-align:left;padding:6px 8px">By</th>
-          <th style="text-align:left;padding:6px 8px">Actions</th>
-        </tr></thead>
-        <tbody>${rows.map(u => `<tr style="border-bottom:1px solid rgba(48,54,61,.4)">
-          <td style="padding:8px 8px;font-weight:600;font-family:var(--mono)">${escapeHTML(u.username)}</td>
-          <td style="padding:8px 8px"><span style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(255,255,255,.07);color:${_ROLE_COLOR[u.role]||'var(--muted)'}">${u.role === 'admin' ? 'Admin' : 'Analyst'}</span></td>
-          <td style="padding:8px 8px"><span style="font-size:11px;color:${u.is_active?'var(--ok)':'var(--danger)'}">${u.is_active ? '● Active' : '○ Inactive'}</span></td>
-          <td style="padding:8px 8px;color:var(--muted);font-size:12px">${toIST(u.created_at)}</td>
-          <td style="padding:8px 8px;color:var(--muted);font-size:12px">${escapeHTML(u.created_by||'—')}</td>
-          <td style="padding:8px 8px">
-            ${u.username !== _authUser() ? (u.is_active
-              ? `<button class="btn" style="font-size:10px;padding:3px 8px;color:var(--danger)" onclick="deactivateUser('${escapeHTML(u.username)}')">Deactivate</button>`
-              : `<button class="btn" style="font-size:10px;padding:3px 8px;color:var(--ok)" onclick="reactivateUser('${escapeHTML(u.username)}')">Reactivate</button>`
-            ) : '<span style="font-size:11px;color:var(--muted)">You</span>'}
-          </td>
-        </tr>`).join('')}</tbody>
-      </table>`;
-    }
-
-    async function createUser() {
-      const u = document.getElementById('nu-user').value.trim();
-      const p = document.getElementById('nu-pass').value;
-      const r = document.getElementById('nu-role').value;
-      const errEl = document.getElementById('nu-err');
-      errEl.style.display = 'none';
-      if (!u || !p) { errEl.textContent = 'Username and password required.'; errEl.style.display = ''; return; }
-      const res = await authPost(AUTH + '/users', { username: u, password: p, role: r });
-      if (res) {
-        toast('User ' + u + ' created (' + r + ')', 'ok');
-        document.getElementById('nu-user').value = '';
-        document.getElementById('nu-pass').value = '';
-        loadUsers();
-      }
-    }
-
-    async function deactivateUser(username) {
-      if (!confirm('Deactivate user "' + username + '"? They will no longer be able to log in.')) return;
-      const t = _authToken();
-      try {
-        const r = await fetch(AUTH + '/users/' + encodeURIComponent(username), {
-          method: 'DELETE', headers: { 'Authorization': 'Bearer ' + t }
-        });
-        const data = await r.json();
-        if (r.ok) { toast(username + ' deactivated', 'warn'); loadUsers(); }
-        else { toast('Error: ' + (data.detail || r.status), 'err'); }
-      } catch(e) { toast('Network error', 'err'); }
-    }
-
-    async function reactivateUser(username) {
-      const t = _authToken();
-      try {
-        const r = await fetch(AUTH + '/users/' + encodeURIComponent(username) + '/reactivate', {
-          method: 'POST', headers: { 'Authorization': 'Bearer ' + t }
-        });
-        const data = await r.json();
-        if (r.ok) { toast(username + ' reactivated', 'ok'); loadUsers(); }
-        else { toast('Error: ' + (data.detail || r.status), 'err'); }
-      } catch(e) { toast('Network error', 'err'); }
-    }
-
-    // ── Login Audit Log ────────────────────────────────────────────────────
-    async function loadAuditLog(filterUser) {
-      const banner = document.getElementById('grafana-banner-audit');
-      if (banner) banner.innerHTML = _grafanaBanner();
-      const summEl = document.getElementById('audit-summary');
-      const evtEl  = document.getElementById('audit-events');
-      summEl.innerHTML = '<span style="color:var(--muted)">Loading…</span>';
-      evtEl.innerHTML  = '<span style="color:var(--muted)">Loading…</span>';
-      const t = _authToken();
-
-      // Summary table
-      try {
-        const r = await fetch(AUTH + '/audit/summary', { headers: { 'Authorization': 'Bearer ' + t } });
-        if (r.ok) {
-          const rows = await r.json();
-          if (!rows.length) { summEl.innerHTML = '<span style="color:var(--muted)">No login history yet.</span>'; }
-          else {
-            summEl.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
-              <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted);font-size:11px">
-                <th style="text-align:left;padding:6px 8px">User</th>
-                <th style="text-align:right;padding:6px 8px">Logins</th>
-                <th style="text-align:right;padding:6px 8px">Failures</th>
-                <th style="text-align:left;padding:6px 8px">Last Login</th>
-                <th style="text-align:left;padding:6px 8px">First Login</th>
-              </tr></thead>
-              <tbody>${rows.map(r => `<tr style="border-bottom:1px solid rgba(48,54,61,.4)">
-                <td style="padding:8px;font-weight:600;font-family:var(--mono)">${escapeHTML(r.username)}</td>
-                <td style="padding:8px;text-align:right;color:var(--ok)">${r.logins}</td>
-                <td style="padding:8px;text-align:right;color:${r.failures>0?'var(--danger)':'var(--muted)'}">${r.failures}</td>
-                <td style="padding:8px;color:var(--muted);font-size:12px">${toIST(r.last_login)}</td>
-                <td style="padding:8px;color:var(--muted);font-size:12px">${toIST(r.first_login)}</td>
-              </tr>`).join('')}</tbody>
-            </table>`;
-          }
-        }
-      } catch(e) { summEl.innerHTML = '<span style="color:var(--danger)">Error loading summary</span>'; }
-
-      // Event log
-      const q = filterUser ? '?username=' + encodeURIComponent(filterUser) : '';
-      try {
-        const r = await fetch(AUTH + '/audit' + q, { headers: { 'Authorization': 'Bearer ' + t } });
-        if (r.ok) {
-          const rows = await r.json();
-          if (!rows.length) { evtEl.innerHTML = '<span style="color:var(--muted)">No events.</span>'; return; }
-          evtEl.innerHTML = `<div style="font-family:var(--mono);font-size:12px;display:flex;flex-direction:column;gap:3px">
-            ${rows.map(ev => {
-              const col = _ACTION_COLOR[ev.action] || 'var(--muted)';
-              const icon = ev.action === 'login' ? '→' : ev.action === 'logout' ? '←' : ev.action === 'login_failed' ? '✗' : '·';
-              return `<div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid rgba(48,54,61,.3)">
-                <span style="color:var(--muted);min-width:165px">${toIST(ev.ts)}</span>
-                <span style="color:${col};min-width:18px">${icon}</span>
-                <span style="font-weight:600;min-width:100px">${escapeHTML(ev.username)}</span>
-                <span style="color:${col};min-width:110px">${escapeHTML(ev.action)}</span>
-                <span style="color:var(--muted)">${escapeHTML(ev.client_ip||'')}${ev.extra ? ' · ' + escapeHTML(ev.extra) : ''}</span>
-              </div>`;
-            }).join('')}
-          </div>`;
-        }
-      } catch(e) { evtEl.innerHTML = '<span style="color:var(--danger)">Error loading events</span>'; }
-    }
-
-    async function filterAudit() {
-      const u = document.getElementById('audit-filter-user').value.trim();
-      loadAuditLog(u || undefined);
-    }
   </script>
 </body>
 
