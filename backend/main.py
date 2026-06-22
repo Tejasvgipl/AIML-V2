@@ -66,6 +66,8 @@ VOLUME_SPIKE_MULTIPLIER = 3
 _stats_cache: dict = {}
 _stats_cache_ts: float = 0.0
 _STATS_TTL = 15  # seconds
+_hot_ips_cache: list = []
+_hot_ips_cache_ts: float = 0.0
 
 # ── Log store (ClickHouse) ────────────────────────────────────────────────────
 # STORE_ENABLED gates all log-derived reads (trail, stats, hot-ips, baselines,
@@ -1392,17 +1394,25 @@ async def get_stats():
         "alert_type_counts":alert_counts,
         "ai_configured":    bool(AI_API_KEY),
     }
-    _stats_cache = result
-    _stats_cache_ts = time.time()
-    return result
+    # Only update cache if we got real data — never overwrite good cache with zeros
+    if total_logs or not _stats_cache:
+        _stats_cache = result
+        _stats_cache_ts = time.time()
+    return _stats_cache if _stats_cache else result
 
 
 @app.get("/api/hot-ips")
 async def get_hot_ips():
+    global _hot_ips_cache, _hot_ips_cache_ts
     hot = osc.get_hot_ips_from_os(size=50) if (STORE_ENABLED and osc) else []
+    if not hot and _hot_ips_cache:
+        return _hot_ips_cache
     result = list(await asyncio.gather(*[trail_summary(ip) for ip in hot]))
     result.sort(key=lambda x: x.get("total", 0), reverse=True)
-    return result
+    if result:
+        _hot_ips_cache = result
+        _hot_ips_cache_ts = time.time()
+    return result if result else (_hot_ips_cache or [])
 
 
 # ── threat intel ──────────────────────────────────────────────────────────────
