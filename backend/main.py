@@ -2296,13 +2296,12 @@ PRIORITY JUSTIFICATION:"""
 
 @app.get("/api/logs")
 async def get_logs(minutes: int = 0, start: str = "", end: str = "",
-                   severity: str = "", min_level: int = 0, limit: int = 200):
+                   severity: str = "", min_level: int = 0, limit: int = 500):
     if not (STORE_ENABLED and osc):
         return {"logs": [], "count": 0, "source": "disabled"}
-    # Default to last 24h when no filter given — avoids full table scan on 1.8M+ rows
-    # ClickHouse partitions by day so ts filter = only 1-2 partitions scanned
+    # Default to last 7 days — uses partition pruning, avoids full table scan
     if not minutes and not start and not end:
-        minutes = 1440  # 24 hours
+        minutes = 10080  # 7 days
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
     logs = await _to_thread(
         osc.get_recent_logs,
