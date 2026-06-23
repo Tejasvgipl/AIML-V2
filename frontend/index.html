@@ -2946,7 +2946,7 @@ tr:hover td{background:#161b22}</style></head>
         </div>`;
           }).join('')
           : '<div class="empty" style="padding:18px">No hot IPs in the current index</div>';
-        document.getElementById('hot-tbody').innerHTML = hot.slice(0, 30).map(h => {
+        document.getElementById('hot-tbody').innerHTML = hot.map(h => {
           const tt = topThreat(h.threat_types);
           const sv = severityRank(h.severities);
           return `<tr onclick="goTrail('${h.ip}')" style="cursor:pointer">
