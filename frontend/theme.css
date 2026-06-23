@@ -377,6 +377,38 @@ body { background:
 .logs-sev { margin-left: auto; }
 .logs-count { font-size: 12px; color: var(--muted); padding: 4px 2px 12px; font-weight: 600; }
 
+/* Log-source platform badges (flaw #2 — show what generated each log) */
+.src-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 10px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted); white-space: nowrap; }
+.src-linux    { color: #7dd3fc; border-color: rgba(14,165,233,.5); }
+.src-windows  { color: #93c5fd; border-color: rgba(59,130,246,.5); }
+.src-macos    { color: #d8b4fe; border-color: rgba(168,85,247,.5); }
+.src-firewall { color: #fca5a5; border-color: rgba(239,68,68,.5); }
+.src-web      { color: #fcd34d; border-color: rgba(245,158,11,.5); }
+.src-network  { color: #6ee7b7; border-color: rgba(16,185,129,.5); }
+.src-endpoint { color: #cbd5e1; border-color: rgba(100,116,139,.5); }
+
+/* IP Trail — rich per-event cards (flaw #3) */
+.tev { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: 10px; padding: 11px 14px; margin-bottom: 9px; }
+.tev-block { border-left-color: var(--danger); }
+.tev-allow { border-left-color: var(--ok); }
+.tev-obs   { border-left-color: #64748b; }
+.tev-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 7px; }
+.tev-head .tts { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.tev-threat { font-weight: 700; font-size: 13px; color: var(--text); margin-left: 2px; }
+.tev-body { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 22px; }
+@media (max-width: 760px){ .tev-body { grid-template-columns: 1fr; } }
+.tev-row { display: flex; gap: 8px; font-size: 12px; line-height: 1.6; }
+.tev-k { color: var(--muted); font-weight: 600; min-width: 92px; flex-shrink: 0; }
+.tev-v { color: var(--text); word-break: break-word; }
+.tev-etype { font-size: 10px; text-transform: uppercase; color: var(--muted); background: var(--surface);
+  padding: 1px 6px; border-radius: 5px; margin-left: 4px; }
+.tev-warn { color: #fbbf24; font-size: 11px; font-weight: 600; margin-left: 4px; cursor: help; }
+.tev-id { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+.mitre-tag { background: rgba(188,140,255,.15); color: #bc8cff; font-size: 11px; padding: 1px 7px; border-radius: 5px; }
+
 /* ── Login brand footer (logo + AI·ML tagline) ─────────────────────────── */
 .login-brandfoot {
   display: flex; align-items: center; gap: 13px; margin-top: 40px;
