@@ -41,8 +41,12 @@ OFFSET_FILE = Path(os.getenv("WAZUH_OFFSET_FILE", "/app/data/wazuh_offset.json")
 SPOOL_DIR = Path(os.getenv("WAZUH_SPOOL_DIR", "/app/data/spool"))
 INTERVAL = int(os.getenv("WAZUH_POLL_INTERVAL", "5"))
 BATCH_SIZE = int(os.getenv("WAZUH_BATCH_SIZE", "5000"))
-TRAIN_THRESHOLD = int(os.getenv("WAZUH_TRAIN_THRESHOLD", "500"))
-ARCHIVE_THRESHOLD = int(os.getenv("WAZUH_ARCHIVE_THRESHOLD", "5000"))
+TRAIN_THRESHOLD = int(os.getenv("WAZUH_TRAIN_THRESHOLD", "20000"))
+ARCHIVE_THRESHOLD = int(os.getenv("WAZUH_ARCHIVE_THRESHOLD", "100000"))
+# Minimum seconds between heavy retrain/baseline/deviation runs. On a high-volume
+# feed the event threshold is crossed constantly; this cooldown stops the
+# baseline-rebuild storm from pinning ClickHouse. Override via WAZUH_TRAIN_COOLDOWN.
+TRAIN_COOLDOWN = int(os.getenv("WAZUH_TRAIN_COOLDOWN", "900"))
 
 # ClickHouse
 CH_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse")
@@ -502,6 +506,7 @@ def tail_alerts():
     since_last_train = 0
     since_last_archive = 0
     last_progress_ts = time.time()
+    last_train_ts = 0.0   # epoch of last heavy retrain (for TRAIN_COOLDOWN gating)
 
     while True:
         # Always try to drain the spool first (ClickHouse may have recovered)
@@ -628,12 +633,13 @@ def tail_alerts():
                   f"{chunk_dropped:,} dropped{rl} "
                   f"(total: {state['total_ingested']:,}{pct})")
 
-        if since_last_train >= TRAIN_THRESHOLD:
+        if since_last_train >= TRAIN_THRESHOLD and (time.time() - last_train_ts) >= TRAIN_COOLDOWN:
             print(f"[Watcher] Triggering ML train ({since_last_train:,} new)...")
             trigger_deviation_scan()    # detect novelty vs the PRIOR baseline first
             trigger_baseline_build()    # then refresh baselines to absorb new data
             trigger_ml_train()
             since_last_train = 0
+            last_train_ts = time.time()
 
         if since_last_archive >= ARCHIVE_THRESHOLD:
             print(f"[Watcher] Triggering archive ({since_last_archive:,} new)...")

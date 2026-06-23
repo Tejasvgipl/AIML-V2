@@ -78,23 +78,28 @@ async def _start_background_refresh():
     Every browser request is served instantly from memory - no waiting for ClickHouse.
     This is how Grafana/Datadog achieve fast dashboards.
     """
+    # Refresh cadences are env-tunable so a busy production ClickHouse (.23)
+    # isn't hammered. Defaults are gentle; lower them on a lightly-loaded box.
+    _fast_every = int(os.getenv("WARM_FAST_SECONDS", "60"))
+    _inc_every = int(os.getenv("WARM_INCIDENTS_SECONDS", "180"))
+
     async def _refresh_fast():
-        """Stats, hot-ips, resilience every 30s - lightweight."""
+        """Stats, hot-ips, resilience - lightweight."""
         await asyncio.sleep(2)
         while True:
             await asyncio.gather(get_stats(), get_hot_ips(), get_resilience(),
                                  return_exceptions=True)
-            await asyncio.sleep(30)
+            await asyncio.sleep(_fast_every)
 
     async def _refresh_incidents():
-        """Incidents are heavier - refresh every 60s, first run at 10s."""
+        """Incidents are heavier - first run at 10s, then every _inc_every."""
         await asyncio.sleep(10)
         while True:
             try:
                 await _gather_incidents()
             except Exception:
                 pass
-            await asyncio.sleep(60)
+            await asyncio.sleep(_inc_every)
 
     asyncio.create_task(_refresh_fast())
     asyncio.create_task(_refresh_incidents())

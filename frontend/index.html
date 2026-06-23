@@ -4618,8 +4618,8 @@ tr:hover td{background:#161b22}</style></head>
     refreshReportEndpoints();
     refreshAll();
     loadResilience();
-    setInterval(refreshAll, 10000);
-    setInterval(loadResilience, 120000);
+    setInterval(refreshAll, 30000);
+    setInterval(loadResilience, 180000);
 
     // ── Background prefetch: warm every section so clicking a tab is instant ──
     // Each loader writes into its (hidden) page div on success and never blanks
@@ -4632,8 +4632,9 @@ tr:hover td{background:#161b22}</style></head>
       jobs.forEach((job, i) => setTimeout(() => { try { job(); } catch (e) {} }, 250 * (i + 1)));
     }
     // Warm shortly after first paint, then keep warm in the background.
-    setTimeout(prefetchAll, 800);
-    setInterval(prefetchAll, 45000);
+    // Spaced out so we don't pile heavy section queries onto a busy ClickHouse.
+    setTimeout(prefetchAll, 1500);
+    setInterval(prefetchAll, 120000);
 
     // ── IST timestamp formatter (UTC → Asia/Kolkata) ─────────────────────
     function toIST(ts) {

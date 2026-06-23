@@ -19,9 +19,12 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          # Production-scale ClickHouse needs real RAM. 4G strangles it into
+          # constant disk-spilling + merges on a high-volume feed. Override via
+          # CLICKHOUSE_MEM_LIMIT in .env (recommend 24G on the .23 server).
+          memory: ${CLICKHOUSE_MEM_LIMIT:-8G}
         reservations:
-          memory: 1G
+          memory: 2G
     restart: unless-stopped
     healthcheck:
       # /ping is unauthenticated, so the password doesn't break the check
