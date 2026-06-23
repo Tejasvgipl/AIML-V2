@@ -2519,12 +2519,47 @@ Tables in database: cybersentinel
 """
 
 
-@app.post("/api/nl/query")
-async def nl_query(payload: dict):
-    question = payload.get("question", "").strip()
-    if not question:
-        raise HTTPException(400, "Question required")
+def _normalize_q(q: str) -> str:
+    """Lowercase, collapse whitespace, drop trailing punctuation for preset match."""
+    return " ".join((q or "").split()).lower().rstrip("?.! ")
 
+
+# Hardcoded SQL for the demo's preset questions -> runs INSTANTLY, no Groq call
+# (free-tier latency was making "Generating SQL..." hang). Time windows anchor to
+# the LATEST ts in the data (not now()) so they always return rows even when the
+# dataset is days old. Verified against the live schema.
+_M = "(SELECT max(ts) FROM cybersentinel.logs)"
+_NL_PRESETS = {
+    _normalize_q("Show all brute force attacks from outside India in the last 6 hours"):
+        f"SELECT formatDateTime(ts,'%Y-%m-%d %H:%i:%S') AS time, src_ip, country, threat_type, severity, rule "
+        f"FROM cybersentinel.logs WHERE threat_type ILIKE '%brute%' AND country NOT IN ('India','') "
+        f"AND src_ip NOT LIKE '10.%' AND src_ip NOT LIKE '192.168.%' "
+        f"AND ts >= {_M} - INTERVAL 6 HOUR ORDER BY ts DESC LIMIT 200",
+    _normalize_q("Which IPs have the most events in the last 24 hours? Show top 20"):
+        f"SELECT src_ip, count() AS events, countIf(severity='critical') AS critical, "
+        f"uniq(threat_type) AS threat_types FROM cybersentinel.logs "
+        f"WHERE ts >= {_M} - INTERVAL 24 HOUR GROUP BY src_ip ORDER BY events DESC LIMIT 20",
+    _normalize_q("Show all lateral movement events in the last 24 hours"):
+        f"SELECT formatDateTime(ts,'%Y-%m-%d %H:%i:%S') AS time, src_ip, dst_ip, threat_type, severity, rule "
+        f"FROM cybersentinel.logs WHERE threat_type IN ('rdp_relay','privilege_escalation') "
+        f"AND ts >= {_M} - INTERVAL 24 HOUR ORDER BY ts DESC LIMIT 200",
+    _normalize_q("Which accounts are being targeted most in the last 7 days?"):
+        f"SELECT username AS account, count() AS events, uniq(src_ip) AS source_ips, "
+        f"countIf(severity IN ('critical','high')) AS high_severity FROM cybersentinel.logs "
+        f"WHERE username != '' AND ts >= {_M} - INTERVAL 7 DAY GROUP BY username ORDER BY events DESC LIMIT 20",
+    _normalize_q("List IPs with ML risk score 50 or above that are not in the blocklist"):
+        "SELECT ip, risk_score, is_anomaly FROM cybersentinel.ml_scores FINAL "
+        "WHERE risk_score >= 50 AND ip NOT IN (SELECT ip FROM cybersentinel.blocklist FINAL WHERE active=1) "
+        "ORDER BY risk_score DESC LIMIT 200",
+    _normalize_q("Show all events in the last hour with severity critical or high"):
+        f"SELECT formatDateTime(ts,'%Y-%m-%d %H:%i:%S') AS time, src_ip, country, threat_type, severity, rule "
+        f"FROM cybersentinel.logs WHERE severity IN ('critical','high') "
+        f"AND ts >= {_M} - INTERVAL 1 HOUR ORDER BY ts DESC LIMIT 200",
+}
+
+
+async def _nl_sql_from_ai(question: str) -> str:
+    """Fallback for free-form (non-preset) questions: ask Groq to write the SQL."""
     prompt = f"""You are a ClickHouse SQL expert for a bank's cybersecurity SIEM system.
 
 Convert the analyst's natural language question into a valid ClickHouse SELECT query.
@@ -2567,6 +2602,19 @@ SQL:"""
                 break
     if not sql.upper().lstrip().startswith("SELECT"):
         raise HTTPException(400, "AI returned an unexpected response. Try rephrasing your question.")
+    return sql
+
+
+@app.post("/api/nl/query")
+async def nl_query(payload: dict):
+    question = payload.get("question", "").strip()
+    if not question:
+        raise HTTPException(400, "Question required")
+
+    # Preset demo questions run instantly from hardcoded SQL; anything else -> AI.
+    sql = _NL_PRESETS.get(_normalize_q(question))
+    if not sql:
+        sql = await _nl_sql_from_ai(question)
 
     if not osc:
         raise HTTPException(503, "ClickHouse not available")
