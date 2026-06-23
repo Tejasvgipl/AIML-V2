@@ -30,6 +30,48 @@ PEER_Z_THRESHOLD = 2.5          # max per-feature z-score to flag a peer outlier
 _FAILURE_TYPES = {"brute_force", "ssh_bruteforce", "vpn_bruteforce", "rdp_relay"}
 _SUCCESS_TYPES = {"login_success"}
 
+# Representative lat/lon per country (GeoIP gives country-level location far more
+# often than exact coordinates). Used as a fallback so impossible-travel works on
+# the `country` field even when geo_lat/geo_lon are absent. Names match the
+# `country` values produced by the watcher (data.srccountry / GeoLocation).
+COUNTRY_CENTROIDS = {
+    "Brazil": (-14.2, -51.9), "Nigeria": (9.1, 8.7), "Russia": (61.5, 105.3),
+    "China": (35.9, 104.2), "Iran": (32.4, 53.7), "India": (22.4, 78.7),
+    "United States": (39.8, -98.6), "United States of America": (39.8, -98.6),
+    "USA": (39.8, -98.6), "Germany": (51.2, 10.4), "France": (46.2, 2.2),
+    "United Kingdom": (55.4, -3.4), "UK": (55.4, -3.4), "Netherlands": (52.1, 5.3),
+    "Ukraine": (48.4, 31.2), "Romania": (45.9, 24.9), "Turkey": (39.0, 35.2),
+    "Vietnam": (14.1, 108.3), "Indonesia": (-0.8, 113.9), "Pakistan": (30.4, 69.3),
+    "North Korea": (40.3, 127.5), "South Korea": (35.9, 127.8), "Japan": (36.2, 138.3),
+    "Canada": (56.1, -106.3), "Mexico": (23.6, -102.6), "Spain": (40.5, -3.7),
+    "Italy": (41.9, 12.6), "Poland": (51.9, 19.1), "Singapore": (1.35, 103.8),
+    "Hong Kong": (22.3, 114.2), "Taiwan": (23.7, 121.0), "Thailand": (15.9, 100.99),
+    "South Africa": (-30.6, 22.9), "Egypt": (26.8, 30.8), "Saudi Arabia": (23.9, 45.1),
+    "Bangladesh": (23.7, 90.4), "Australia": (-25.3, 133.8), "Argentina": (-38.4, -63.6),
+    "Colombia": (4.6, -74.3), "Bulgaria": (42.7, 25.5), "Czech Republic": (49.8, 15.5),
+    "Sweden": (60.1, 18.6), "Switzerland": (46.8, 8.2), "Israel": (31.0, 34.9),
+    "Kenya": (-0.02, 37.9), "Belarus": (53.7, 27.95), "Kazakhstan": (48.0, 66.9),
+}
+
+
+def _country_geo(country: str):
+    """Representative (lat, lon) for a country name, or None if unknown."""
+    if not country:
+        return None
+    return COUNTRY_CENTROIDS.get(country.strip())
+
+
+def _geo_of(ev: dict):
+    """Best available (lat, lon) for an event: exact coords if present, else the
+    country centroid. Returns None when neither is available."""
+    try:
+        lat, lon = float(ev.get("geo_lat", 0) or 0), float(ev.get("geo_lon", 0) or 0)
+        if abs(lat) > 0.01 or abs(lon) > 0.01:
+            return (lat, lon)
+    except (ValueError, TypeError):
+        pass
+    return _country_geo((ev.get("country") or "").strip())
+
 
 def _parse_ts(value) -> float:
     """ISO string / datetime → epoch seconds (0.0 on failure)."""
@@ -111,38 +153,114 @@ def detect_account_takeover(events: list[dict],
 
 
 def detect_impossible_travel(events: list[dict]) -> list[dict]:
-    """Flag consecutive events for one entity whose geo separation requires a
-    speed above TRAVEL_MAX_KMH (faster than air travel)."""
-    geo_evs = sorted((e for e in events if _has_geo(e)),
-                     key=lambda e: _parse_ts(e.get("@timestamp")))
+    """Flag the same entity appearing in two locations too far apart for the time
+    elapsed (geo-velocity faster than air travel). Works on exact coordinates when
+    present, otherwise on country centroids (country is far more often populated).
+    Same-instant appearances in different countries are treated as impossible
+    (infinite velocity) -- the strongest signal of a distributed/shared account.
+
+    To keep output readable we collapse runs of the same country and emit at most
+    one finding per distinct ordered country pair (worst case kept)."""
+    # Attach resolved geo + country; drop events we cannot place at all.
+    placed = []
+    for e in events:
+        geo = _geo_of(e)
+        if geo is None:
+            continue
+        placed.append((e, geo, (e.get("country") or "").strip()))
+    placed.sort(key=lambda x: _parse_ts(x[0].get("@timestamp")))
+
+    SIMUL_WINDOW_S = 5.0   # appearances within 5s are "simultaneous"
     findings: list[dict] = []
-    prev = None
-    for ev in geo_evs:
-        if prev is not None:
-            t1, t2 = _parse_ts(prev.get("@timestamp")), _parse_ts(ev.get("@timestamp"))
-            dt_h = (t2 - t1) / 3600.0
-            if dt_h > 0:
-                dist = haversine_km(float(prev["geo_lat"]), float(prev["geo_lon"]),
-                                    float(ev["geo_lat"]), float(ev["geo_lon"]))
-                speed = dist / dt_h if dt_h > 0 else float("inf")
-                if dist >= TRAVEL_MIN_KM and speed > TRAVEL_MAX_KMH:
-                    findings.append({
-                        "type": "impossible_travel",
-                        "severity": "high",
-                        "ts": ev.get("@timestamp"),
-                        "username": ev.get("username", ""),
-                        "from": {"country": prev.get("country", ""), "ip": prev.get("src_ip", ""),
-                                 "lat": prev["geo_lat"], "lon": prev["geo_lon"], "ts": prev.get("@timestamp")},
-                        "to": {"country": ev.get("country", ""), "ip": ev.get("src_ip", ""),
-                               "lat": ev["geo_lat"], "lon": ev["geo_lon"], "ts": ev.get("@timestamp")},
-                        "message": (f"Impossible travel: {dist:,.0f} km in {dt_h:.2f} h "
-                                    f"(~{speed:,.0f} km/h) between {prev.get('country','?')} and "
-                                    f"{ev.get('country','?')}"),
-                        "evidence": {"distance_km": round(dist, 1), "hours": round(dt_h, 3),
-                                     "speed_kmh": round(speed, 1)},
-                    })
-        prev = ev
-    return findings
+
+    # --- 1) Simultaneous multi-country: cluster events into short time windows;
+    #         a cluster spanning >=2 distinct far-apart countries is impossible. ---
+    handled = [False] * len(placed)
+    i = 0
+    while i < len(placed):
+        t0 = _parse_ts(placed[i][0].get("@timestamp"))
+        j = i
+        members = []
+        while j < len(placed) and _parse_ts(placed[j][0].get("@timestamp")) - t0 <= SIMUL_WINDOW_S:
+            members.append(placed[j]); j += 1
+        by_country = {}
+        for ev, geo, country in members:
+            by_country.setdefault(country, (ev, geo))
+        if len(by_country) >= 2:
+            cs = list(by_country.items())
+            max_d, pair = 0.0, None
+            for a in range(len(cs)):
+                for b in range(a + 1, len(cs)):
+                    d = haversine_km(cs[a][1][1][0], cs[a][1][1][1],
+                                     cs[b][1][1][0], cs[b][1][1][1])
+                    if d > max_d:
+                        max_d, pair = d, (cs[a], cs[b])
+            if max_d >= TRAVEL_MIN_KM and pair:
+                for k in range(i, j):
+                    handled[k] = True
+                clist = sorted(by_country.keys())
+                (fc, (fev, fgeo)), (tc, (tev, tgeo)) = pair
+                findings.append({
+                    "type": "impossible_travel",
+                    "severity": "critical",
+                    "ts": fev.get("@timestamp"),
+                    "username": fev.get("username", ""),
+                    "from": {"country": fc, "ip": fev.get("src_ip", ""),
+                             "lat": fgeo[0], "lon": fgeo[1], "ts": fev.get("@timestamp")},
+                    "to": {"country": tc, "ip": tev.get("src_ip", ""),
+                           "lat": tgeo[0], "lon": tgeo[1], "ts": tev.get("@timestamp")},
+                    "message": (f"Impossible travel: account active from {len(by_country)} "
+                                f"countries within {SIMUL_WINDOW_S:.0f}s "
+                                f"({', '.join(clist)}); widest separation {max_d:,.0f} km "
+                                f"({fc}-{tc}) -- single identity cannot be in all at once"),
+                    "evidence": {"countries": clist, "distance_km": round(max_d, 1),
+                                 "window_s": SIMUL_WINDOW_S, "same_instant": True},
+                })
+        i = j
+
+    # --- 2) Sequential impossible travel: among remaining events, collapse
+    #         consecutive same-country runs and flag hops faster than any flight. ---
+    seq = [placed[k] for k in range(len(placed)) if not handled[k]]
+    segments = []
+    for ev, geo, country in seq:
+        if segments and segments[-1][2] == country:
+            continue
+        segments.append((ev, geo, country))
+    best: dict[frozenset, dict] = {}
+    for k in range(1, len(segments)):
+        pe, pgeo, pc = segments[k - 1]
+        ce, cgeo, cc = segments[k]
+        if pc == cc:
+            continue
+        t1, t2 = _parse_ts(pe.get("@timestamp")), _parse_ts(ce.get("@timestamp"))
+        dt_h = max(0.0, (t2 - t1) / 3600.0)
+        dist = haversine_km(pgeo[0], pgeo[1], cgeo[0], cgeo[1])
+        if dist < TRAVEL_MIN_KM or dt_h <= (1.0 / 3600.0):
+            continue
+        speed = dist / dt_h
+        if speed <= TRAVEL_MAX_KMH:
+            continue
+        finding = {
+            "type": "impossible_travel", "severity": "high",
+            "ts": ce.get("@timestamp"), "username": ce.get("username", ""),
+            "from": {"country": pc, "ip": pe.get("src_ip", ""),
+                     "lat": pgeo[0], "lon": pgeo[1], "ts": pe.get("@timestamp")},
+            "to": {"country": cc, "ip": ce.get("src_ip", ""),
+                   "lat": cgeo[0], "lon": cgeo[1], "ts": ce.get("@timestamp")},
+            "message": (f"Impossible travel: {dist:,.0f} km in {dt_h:.2f} h "
+                        f"(~{speed:,.0f} km/h) between {pc or '?'} and {cc or '?'} "
+                        f"-- faster than any flight"),
+            "evidence": {"distance_km": round(dist, 1), "hours": round(dt_h, 4),
+                         "speed_kmh": round(speed, 1), "same_instant": False},
+        }
+        key = frozenset((pc, cc))
+        if key not in best or dist > best[key]["evidence"]["distance_km"]:
+            best[key] = finding
+    findings.extend(best.values())
+
+    findings.sort(key=lambda f: (f["severity"] != "critical",
+                                 -f["evidence"]["distance_km"]))
+    return findings[:25]
 
 
 # ── peer-group anomaly ─────────────────────────────────────────────────────────

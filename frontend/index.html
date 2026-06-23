@@ -4621,6 +4621,20 @@ tr:hover td{background:#161b22}</style></head>
     setInterval(refreshAll, 10000);
     setInterval(loadResilience, 120000);
 
+    // ── Background prefetch: warm every section so clicking a tab is instant ──
+    // Each loader writes into its (hidden) page div on success and never blanks
+    // to a spinner, so by the time the user clicks, the content is already there
+    // and nav() just refreshes it. Only sections needing no user input are
+    // prefetched (trail/killchain/AI/SOC-query need a selected IP or a query).
+    function prefetchAll() {
+      const jobs = [loadLogs, loadIncidents, loadUEBA, loadAnomalies, loadDeviations];
+      // Stagger so we don't fire them all in the same tick (gentle on the backend).
+      jobs.forEach((job, i) => setTimeout(() => { try { job(); } catch (e) {} }, 250 * (i + 1)));
+    }
+    // Warm shortly after first paint, then keep warm in the background.
+    setTimeout(prefetchAll, 800);
+    setInterval(prefetchAll, 45000);
+
     // ── IST timestamp formatter (UTC → Asia/Kolkata) ─────────────────────
     function toIST(ts) {
       if (!ts || ts === '—') return '—';

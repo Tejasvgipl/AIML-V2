@@ -1,5 +1,5 @@
 ﻿"""
-CyberSentinel Backend â€” FastAPI v2.2
+CyberSentinel Backend - FastAPI v2.2
 Handles: log ingestion, IP trail, threat intel, stats, behavioural baselines,
          ATT&CK kill-chain, UEBA, incident correlation.
 """
@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 logger = logging.getLogger("cybersentinel.backend")
 
-# â”€â”€ Network topology store (uploaded Excel/CSV) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Network topology store (uploaded Excel/CSV) ----------------------------
 _TOPO_FILE = Path("/app/data/network_topology.json")
 _TOPO_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -55,7 +55,7 @@ _topology: dict[str, dict] = _load_topology()
 app = FastAPI(title="CyberSentinel API", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Explicit thread pool — default is only cpu_count+4 (6-8 threads on most servers).
+# Explicit thread pool - default is only cpu_count+4 (6-8 threads on most servers).
 # With 2 uvicorn workers and multiple concurrent users, the default exhausts fast.
 _executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="cs-worker")
 
@@ -75,11 +75,11 @@ async def _to_thread(fn, *args):
 async def _start_background_refresh():
     """
     Continuously pre-computes all dashboard data in the background.
-    Every browser request is served instantly from memory — no waiting for ClickHouse.
+    Every browser request is served instantly from memory - no waiting for ClickHouse.
     This is how Grafana/Datadog achieve fast dashboards.
     """
     async def _refresh_fast():
-        """Stats, hot-ips, resilience every 30s — lightweight."""
+        """Stats, hot-ips, resilience every 30s - lightweight."""
         await asyncio.sleep(2)
         while True:
             await asyncio.gather(get_stats(), get_hot_ips(), get_resilience(),
@@ -87,7 +87,7 @@ async def _start_background_refresh():
             await asyncio.sleep(30)
 
     async def _refresh_incidents():
-        """Incidents are heavier — refresh every 60s, first run at 10s."""
+        """Incidents are heavier - refresh every 60s, first run at 10s."""
         await asyncio.sleep(10)
         while True:
             try:
@@ -102,44 +102,44 @@ async def _start_background_refresh():
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "demo")
 AI_API_KEY  = os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", ""))
 AI_MODEL      = os.getenv("AI_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
-# Fast model for explanations â€” 8b-instant is sub-second on Groq vs 10-15s for 70b
+# Fast model for explanations - 8b-instant is sub-second on Groq vs 10-15s for 70b
 AI_FAST_MODEL = os.getenv("AI_FAST_MODEL", "llama-3.1-8b-instant")
 AI_BASE_URL = os.getenv("AI_BASE_URL", os.getenv("GROQ_URL", "https://api.groq.com/openai/v1/chat/completions"))
 BASELINE_TTL  = 60 * 60 * 24 * 90
 MIN_EVENTS_FOR_BASELINE = 10
 VOLUME_SPIKE_MULTIPLIER = 3
 
-# â”€â”€ Stats cache (avoids 7 ClickHouse queries every 10 s) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Stats cache (avoids 7 ClickHouse queries every 10 s) ---------------------
 _stats_cache: dict = {}
 _stats_cache_ts: float = 0.0
-_STATS_TTL = 60  # seconds — cache for 60s; hot-ips call refreshes independently
+_STATS_TTL = 60  # seconds - cache for 60s; hot-ips call refreshes independently
 _hot_ips_cache: list = []
 _hot_ips_cache_ts: float = 0.0
 
-# â”€â”€ Kill-chain cache (shared by incidents + AI investigator) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Kill-chain cache (shared by incidents + AI investigator) ------------------
 _kc_cache: dict[str, tuple[float, dict]] = {}
-_KC_TTL = 60  # seconds â€” kill chain rarely changes in under a minute
+_KC_TTL = 60  # seconds - kill chain rarely changes in under a minute
 
-# â”€â”€ Incidents cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Incidents cache -----------------------------------------------------------
 _incidents_cache: list = []
 _incidents_cache_ts: float = 0.0
 _INCIDENTS_TTL = 60  # seconds
 
-# â”€â”€ Log store (ClickHouse) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Log store (ClickHouse) ----------------------------------------------------
 # STORE_ENABLED gates all log-derived reads (trail, stats, hot-ips, baselines,
 # ML features). The `osc` module is now the ClickHouse client.
 STORE_ENABLED = bool(osc and getattr(osc, "CLICKHOUSE_ENABLED", False))
 
-# â”€â”€ In-process recent-events LRU cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- In-process recent-events LRU cache ---------------------------------------
 # Keeps last RECENT_PER_IP events per IP in Python process memory (NOT Redis).
-# Bounded by RECENT_MAX_IPS active IPs â€” evicts LRU IP when exceeded.
+# Bounded by RECENT_MAX_IPS active IPs - evicts LRU IP when exceeded.
 # Used by deviation detection (target_shift, automated_tool).
-# Lost on container restart â€” acceptable: needs a few events to warm up.
+# Lost on container restart - acceptable: needs a few events to warm up.
 
 RECENT_PER_IP  = 50           # events kept per IP
 RECENT_MAX_IPS = 3000         # max IPs tracked; LRU eviction beyond this
 
-_recent: OrderedDict[str, deque] = OrderedDict()   # ip â†’ deque of (score, event)
+_recent: OrderedDict[str, deque] = OrderedDict()   # ip -> deque of (score, event)
 
 def _push_recent(ip: str, score: float, event: dict) -> None:
     """Append an event to the in-process recent-events cache."""
@@ -159,7 +159,7 @@ def _get_recent(ip: str, limit: int = 50) -> list[tuple[float, dict]]:
     items = list(dq)
     return items[-limit:]
 
-# â”€â”€ In-process ephemeral state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- In-process ephemeral state --------------------------------------------
 _daily_counts: dict[str, dict] = {}                 # ip -> {day: count}  (volume spike)
 _ipcnt: dict[str, int] = {}                         # ip -> events seen   (rebuild trigger)
 _intel_cache: "OrderedDict[str, tuple]" = OrderedDict()   # ip -> (expiry_epoch, data)
@@ -211,7 +211,7 @@ async def ask_groq(prompt: str, max_tokens: int = 700, model: str | None = None)
     except Exception as e:
         return f"AI provider unavailable: {e}"
 
-# â”€â”€ constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- constants -----------------------------------------------------------------
 
 KNOWN_BAD_SUBNETS = [
     "85.11.182.","85.11.183.","85.11.187.",
@@ -238,7 +238,7 @@ SEVERITY_MAP = {
     "information":"low","notice":"medium",
 }
 
-# â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- helpers -------------------------------------------------------------------
 
 def extract_src_ip(row: dict) -> Optional[str]:
     for col in [
@@ -321,7 +321,7 @@ def get_subnet24(ip: str) -> str:
     parts = ip.split(".")
     return ".".join(parts[:3]) if len(parts) == 4 else ""
 
-# â”€â”€ baseline builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- baseline builder ----------------------------------------------------------
 
 async def build_baseline(ip: str):
     """
@@ -411,7 +411,7 @@ async def build_baseline(ip: str):
     if STORE_ENABLED and osc:
         osc.save_baseline(ip, baseline)
 
-# â”€â”€ deviation detector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- deviation detector --------------------------------------------------------
 
 async def detect_deviations(ip: str, event: dict, ts: float) -> list:
     b = osc.get_baseline(ip) if (STORE_ENABLED and osc) else None
@@ -459,7 +459,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
             f"External IP now reaching internal host {dip}",
             "critical", {"internal_dst":dip}))
 
-    # 5. TARGET SHIFT â€” unique dst IPs spiking (uses in-process LRU cache)
+    # 5. TARGET SHIFT - unique dst IPs spiking (uses in-process LRU cache)
     if b.get("usual_dst_ips"):
         usual_unique = len(b["usual_dst_ips"])
         recent_dsts  = set()
@@ -469,7 +469,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
                 recent_dsts.add(d)
         if len(recent_dsts) > usual_unique * 2 and len(recent_dsts) > 5:
             alerts.append(alert("target_shift",
-                f"Now targeting {len(recent_dsts)} unique IPs â€” baseline was {usual_unique}",
+                f"Now targeting {len(recent_dsts)} unique IPs - baseline was {usual_unique}",
                 "critical", {"current_unique":len(recent_dsts),"baseline_unique":usual_unique}))
 
     # 6. GEOGRAPHIC SHIFT
@@ -477,7 +477,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
     if country and country not in ("","None","nan") and b.get("usual_countries"):
         if country not in b["usual_countries"] and len(b["usual_countries"]) >= 2:
             alerts.append(alert("country_shift",
-                f"Now from {country} â€” usual: {', '.join(list(b['usual_countries'].keys())[:3])}",
+                f"Now from {country} - usual: {', '.join(list(b['usual_countries'].keys())[:3])}",
                 "medium", {"new_country":country,"usual":list(b["usual_countries"].keys())[:3]}))
 
     # 7. OFF-HOURS ACTIVITY
@@ -488,7 +488,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
 
         if b.get("usual_hours") and str(hour) not in b["usual_hours"] and len(b["usual_hours"]) >= 5:
             alerts.append(alert("off_hours_activity",
-                f"Activity at {hour:02d}:00 UTC â€” this hour never seen before",
+                f"Activity at {hour:02d}:00 UTC - this hour never seen before",
                 "high", {"hour":hour,"usual_hours":list(b["usual_hours"].keys())}))
 
         # 8. WEEKEND ANOMALY
@@ -496,7 +496,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
             usual_wdays = [int(w) for w in b["usual_weekdays"].keys()]
             if wday >= 5 and all(w < 5 for w in usual_wdays):
                 alerts.append(alert("weekend_anomaly",
-                    f"Activity on {'Saturday' if wday==5 else 'Sunday'} â€” only ever weekdays before",
+                    f"Activity on {'Saturday' if wday==5 else 'Sunday'} - only ever weekdays before",
                     "high", {"weekday":wday}))
     except Exception:
         pass
@@ -510,7 +510,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
         avg_daily = b.get("avg_daily_events", 0)
         if avg_daily > 5 and today_cnt > avg_daily * VOLUME_SPIKE_MULTIPLIER:
             alerts.append(alert("volume_spike",
-                f"Today: {today_cnt} events â€” avg: {avg_daily}/day (x{round(today_cnt/avg_daily,1)})",
+                f"Today: {today_cnt} events - avg: {avg_daily}/day (x{round(today_cnt/avg_daily,1)})",
                 "critical", {"today":today_cnt,"avg_daily":avg_daily}))
     except Exception:
         pass
@@ -520,7 +520,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
     if b.get("usual_rule_groups") and tt not in b["usual_rule_groups"] and tt != "unknown":
         sev = "critical" if tt in ("privilege_escalation","rdp_relay","known_malicious") else "high"
         alerts.append(alert("new_rule_category",
-            f"First time triggering '{tt}' â€” behaviour escalation",
+            f"First time triggering '{tt}' - behaviour escalation",
             sev, {"new_type":tt,"usual":list(b["usual_rule_groups"].keys())}))
 
     # 11. RULE ESCALATION
@@ -528,17 +528,17 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
         new_sev = {"critical":4,"high":3,"medium":2,"low":1}.get(event.get("severity","low"),1)
         if new_sev > b["avg_severity_score"] + 1.5:
             alerts.append(alert("rule_escalation",
-                f"Severity jumped to {event.get('severity')} â€” baseline avg was {b['avg_severity_score']:.1f}",
+                f"Severity jumped to {event.get('severity')} - baseline avg was {b['avg_severity_score']:.1f}",
                 "high", {"new_severity":event.get("severity"),"baseline_avg":b["avg_severity_score"]}))
 
     # 12. FIRST SUCCESS AFTER FAILURES
     if tt == "login_success":
         if b.get("total_failures",0) >= 5 and b.get("total_successes",0) == 0:
             alerts.append(alert("first_success_after_failures",
-                f"FIRST LOGIN SUCCESS after {b['total_failures']} prior failures â€” possible breach",
+                f"FIRST LOGIN SUCCESS after {b['total_failures']} prior failures - possible breach",
                 "critical", {"prior_failures":b["total_failures"]}))
 
-    # 13. AUTOMATED TOOL (inter-event interval collapse) â€” uses in-process LRU cache
+    # 13. AUTOMATED TOOL (inter-event interval collapse) - uses in-process LRU cache
     recent_ws = _get_recent(ip, limit=20)
     if len(recent_ws) >= 10:
         recent_ts_list = [sc for sc, _ in recent_ws]
@@ -548,7 +548,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
             std_iv = statistics.stdev(ivs) if len(ivs) > 1 else 0
             if avg_iv < 0.5 and std_iv < 0.1:
                 alerts.append(alert("automated_tool_detected",
-                    f"Events every {avg_iv:.3f}s std={std_iv:.4f} â€” automated scanner",
+                    f"Events every {avg_iv:.3f}s std={std_iv:.4f} - automated scanner",
                     "high", {"avg_interval":round(avg_iv,4),"std_interval":round(std_iv,4)}))
 
     # 14. DORMANT IP REACTIVATION
@@ -560,7 +560,7 @@ async def detect_deviations(ip: str, event: dict, ts: float) -> list:
             gap_days = (now - last_day).days
             if gap_days >= 7:
                 alerts.append(alert("dormant_ip_reactivated",
-                    f"IP was dormant {gap_days} days â€” sudden reactivation",
+                    f"IP was dormant {gap_days} days - sudden reactivation",
                     "high", {"gap_days":gap_days,"last_seen":last_day_str}))
         except Exception:
             pass
@@ -575,7 +575,7 @@ async def save_alerts(ip: str, alerts: list):
         osc.save_deviations(ip, alerts)   # one row per (ip,type), newest wins
 
 
-# â”€â”€ ingestion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- ingestion -----------------------------------------------------------------
 
 async def ingest_log_row(row: dict) -> bool:
     src_ip = extract_src_ip(row)
@@ -608,10 +608,10 @@ async def ingest_log_row(row: dict) -> bool:
         **classification,
     }
 
-    # â”€â”€ Update in-process recent-events LRU cache (for deviation detection) â”€
+    # -- Update in-process recent-events LRU cache (for deviation detection) -
     _push_recent(src_ip, score, event)
 
-    # â”€â”€ ClickHouse: persistent log store (CSV / manual ingest path) â”€â”€â”€â”€â”€â”€â”€
+    # -- ClickHouse: persistent log store (CSV / manual ingest path) -------
     # The Wazuh watcher writes to ClickHouse directly; this covers logs that
     # arrive via the backend's CSV / single-log endpoints.
     if STORE_ENABLED and osc:
@@ -657,7 +657,7 @@ async def ingest_log_row(row: dict) -> bool:
             str(row.get("data.user", row.get("data.win.eventdata.user", ""))),
             str(row.get("data.http.http_user_agent", "")),
             str(row.get("data.alert.signature", ""))[:200],
-            # â”€â”€ Phase 1: richer Wazuh signal â”€â”€
+            # -- Phase 1: richer Wazuh signal --
             _rget("rule.mitre.tactic"),
             _rget("rule.mitre.technique"),
             _rget("rule.groups"),
@@ -683,12 +683,12 @@ async def ingest_log_row(row: dict) -> bool:
         ]
         osc.insert_logs([ch_row])
 
-    # â”€â”€ Baseline deviation check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Baseline deviation check ------------------------------------------
     alerts = await detect_deviations(src_ip, event, score)
     if alerts:
         await save_alerts(src_ip, alerts)
 
-    # â”€â”€ Rebuild baseline every 100 events per IP (in-process counter) â”€â”€â”€â”€â”€
+    # -- Rebuild baseline every 100 events per IP (in-process counter) -----
     _ipcnt[src_ip] = _ipcnt.get(src_ip, 0) + 1
     if _ipcnt[src_ip] % 100 == 0:
         await build_baseline(src_ip)
@@ -743,7 +743,7 @@ async def ingest_single(log: dict):
     return {"status":"ok"}
 
 
-# â”€â”€ IP trail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- IP trail ------------------------------------------------------------------
 
 @app.get("/api/trail/{ip}")
 async def get_trail(ip: str, limit: int = 100):
@@ -813,13 +813,13 @@ async def rebuild_runtime_indexes() -> dict:
     return {"hot_ips": 0, "critical_ips": 0, "auto_blocked": 0, "source": "clickhouse"}
 
 
-# â”€â”€ baselines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- baselines -----------------------------------------------------------------
 
 @app.get("/api/baseline/{ip}")
 async def get_baseline(ip: str):
     b = osc.get_baseline(ip) if (STORE_ENABLED and osc) else None
     if not b:
-        return {"ip":ip,"found":False,"message":"No baseline yet â€” needs 10+ events"}
+        return {"ip":ip,"found":False,"message":"No baseline yet - needs 10+ events"}
     return {"ip":ip,"found":True,"baseline":b}
 
 
@@ -869,10 +869,10 @@ async def _scan_ip_deviations(ip: str, events_per_ip: int) -> tuple[int, int]:
 
 
 async def _run_deviation_scan(max_ips: int, events_per_ip: int):
-    """Full deviation scan â€” runs in background, parallelised per IP."""
+    """Full deviation scan - runs in background, parallelised per IP."""
     active_ips: list[str] = []
     try:
-        # osc._q uses thread-local client internally â€” safe to call from any thread
+        # osc._q uses thread-local client internally - safe to call from any thread
         rows = await _to_thread(
             osc._q,
             f"SELECT DISTINCT src_ip FROM cybersentinel.logs "
@@ -885,7 +885,7 @@ async def _run_deviation_scan(max_ips: int, events_per_ip: int):
         except Exception:
             active_ips = []
 
-    # Process all IPs in parallel â€” no more sequential 500-query chain
+    # Process all IPs in parallel - no more sequential 500-query chain
     CONCURRENCY = 20
     ips_with_devs = total = 0
     for i in range(0, len(active_ips), CONCURRENCY):
@@ -900,14 +900,14 @@ async def _run_deviation_scan(max_ips: int, events_per_ip: int):
 
 @app.post("/api/baseline/scan-deviations")
 async def scan_deviations(background_tasks: BackgroundTasks, events_per_ip: int = 100, max_ips: int = 300):
-    """Kick off baseline-deviation detection in the background â€” returns immediately."""
+    """Kick off baseline-deviation detection in the background - returns immediately."""
     if not (STORE_ENABLED and osc):
         return {"status": "disabled"}
     background_tasks.add_task(_run_deviation_scan, max_ips, events_per_ip)
     return {"status": "started", "max_ips": max_ips}
 
 
-# â”€â”€ alerts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- alerts --------------------------------------------------------------------
 
 @app.get("/api/alerts")
 async def get_alerts(severity: str = None, limit: int = 100):
@@ -923,7 +923,7 @@ async def get_ip_alerts(ip: str):
     return {"ip":ip,"alerts":alerts,"total":len(alerts)}
 
 
-# â”€â”€ AI explanations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- AI explanations ----------------------------------------------------------
 
 async def collect_ip_context(ip: str) -> dict:
     if STORE_ENABLED and osc:
@@ -1121,7 +1121,7 @@ Reference the actual data. If evidence is missing, say what is missing instead o
     }
 
 
-# â”€â”€ Deterministic Reports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Deterministic Reports -----------------------------------------------------
 
 def _human_count(value) -> str:
     try:
@@ -1251,8 +1251,8 @@ def _render_security_report(timeframe: str, start: datetime, end: datetime, data
             ents = i["entities"]
             scope = (f"{i['ip_count']} hosts in {i['subnet']}" if i["type"] == "campaign"
                      else f"host {ents['ips'][0]}")
-            users = f" â€” identities: {', '.join(ents['users'])}" if ents.get("users") else ""
-            chain = " â†’ ".join(i.get("tactics", [])) or "single stage"
+            users = f" - identities: {', '.join(ents['users'])}" if ents.get("users") else ""
+            chain = " -> ".join(i.get("tactics", [])) or "single stage"
             lines.append(f"- **[P{i['priority']} / {i['severity']}] {scope}{users}**")
             lines.append(f"  - Kill chain: {chain}")
             lines.append(f"  - {i['narrative']}")
@@ -1455,7 +1455,7 @@ async def get_stats():
         "alert_type_counts":alert_counts,
         "ai_configured":    bool(AI_API_KEY),
     }
-    # Only update cache if we got real data â€” never overwrite good cache with zeros
+    # Only update cache if we got real data - never overwrite good cache with zeros
     if total_logs or not _stats_cache:
         _stats_cache = result
         _stats_cache_ts = time.time()
@@ -1508,7 +1508,7 @@ async def _get_ml_health() -> dict:
         return {}
 
 
-# â”€â”€ threat intel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- threat intel --------------------------------------------------------------
 
 @app.get("/api/intel/{ip}")
 async def get_intel(ip: str):
@@ -1543,13 +1543,13 @@ async def get_intel(ip: str):
                     }
                     result["source"] = "abuseipdb"
         except Exception:
-            pass  # AbuseIPDB unavailable — return local result immediately
+            pass  # AbuseIPDB unavailable - return local result immediately
 
     _intel_set(ip, result, ttl=900)
     return result
 
 
-# â”€â”€ ATT&CK kill-chain + grounded threat intel (Phase 2) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- ATT&CK kill-chain + grounded threat intel (Phase 2) ------------------------
 
 def _dedupe_mitigations(mits: list[dict]) -> list[dict]:
     """De-duplicate mitigation entries by id, preserving first-seen order."""
@@ -1580,7 +1580,7 @@ def _event_tactic(ev: dict) -> tuple[str, str, str]:
 async def kill_chain(ip: str):
     """Lay an entity's activity out along the ATT&CK kill chain, ordered by tactic
     stage, with first/last seen and event counts per stage."""
-    # Serve from short-lived cache â€” incidents calls this for 30+ IPs simultaneously
+    # Serve from short-lived cache - incidents calls this for 30+ IPs simultaneously
     cached = _kc_cache.get(ip)
     if cached and time.time() - cached[0] < _KC_TTL:
         return cached[1]
@@ -1625,7 +1625,7 @@ async def kill_chain(ip: str):
     deepest = max(ordered, key=lambda x: x["rank"]) if ordered else None
     progression = [s["tactic"] for s in ordered]
 
-    # â”€â”€ Network traversal path (prepended before ATT&CK stages) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Network traversal path (prepended before ATT&CK stages) ----------
     # Reconstructed from event fields: dst_ip, dst_port, action, agent, country
     def _subnet_label(dst: str) -> str:
         """Map destination IP to a network segment / floor label."""
@@ -1645,7 +1645,7 @@ async def kill_chain(ip: str):
             return f"Internal Segment (10.{second}.x.x)"
         if first in ("172", "192"):
             return "Internal Network"
-        return None   # external â€” no routing hop to show
+        return None   # external - no routing hop to show
 
     timestamps = sorted([e.get("@timestamp","") for e in events if e.get("@timestamp")])
     first_ts = timestamps[0] if timestamps else ""
@@ -1664,7 +1664,7 @@ async def kill_chain(ip: str):
                                if e.get("action","").lower() in ("allow","allowed","accept","accepted","permit","permitted","pass")
                                and e.get("dst_ip","")})[:20]
 
-    # Unique dst_ips â†’ pick the most common internal one for routing label
+    # Unique dst_ips -> pick the most common internal one for routing label
     from collections import Counter
     dst_counter = Counter(d for d in dst_ips if d)
     top_dst = dst_counter.most_common(1)[0][0] if dst_counter else ""
@@ -1697,6 +1697,29 @@ async def kill_chain(ip: str):
         else:
             fw_status = "allowed"
             fw_detail = f"{allowed_cnt} connection(s) passed through firewall"
+
+        # WHY were they blocked? Surface the rule/policy that triggered the
+        # blocks (rule_id 97% populated, rule description 100%, rule_level 99%).
+        _BLOCK_ACTS = ("deny", "denied", "drop", "dropped", "block", "blocked", "reject", "rejected")
+        rule_hits: dict[tuple, dict] = {}
+        for e in events:
+            if (e.get("action", "").lower() not in _BLOCK_ACTS):
+                continue
+            rid = str(e.get("rule_id", "") or "").strip()
+            desc = str(e.get("rule", "") or "").strip()
+            if not (rid or desc):
+                continue
+            k = (rid, desc)
+            r = rule_hits.get(k)
+            if not r:
+                r = rule_hits[k] = {"rule_id": rid, "policy": desc,
+                                    "level": int(e.get("rule_level", 0) or 0), "count": 0}
+            r["count"] += 1
+        block_rules = sorted(rule_hits.values(), key=lambda x: x["count"], reverse=True)[:5]
+        if block_rules:
+            top = block_rules[0]
+            fw_detail += (f" -- top policy: rule {top['rule_id'] or 'n/a'} "
+                          f"\"{top['policy']}\" (level {top['level']}, {top['count']}x)")
         network_path.append({
             "stage": "Firewall",
             "type": "network",
@@ -1707,24 +1730,25 @@ async def kill_chain(ip: str):
             "status": fw_status,
             "blocked_ips": blocked_dst_ips,
             "allowed_ips": allowed_dst_ips,
+            "block_rules": block_rules,   # why: policy id + description + level + hits
         })
     else:
-        # No explicit action field â€” Wazuh IDS still observed it
+        # No explicit action field - Wazuh IDS still observed it
         network_path.append({
             "stage": "Firewall / IDS",
             "type": "network",
-            "detail": "Traffic observed by IDS â€” no explicit allow/deny recorded",
+            "detail": "Traffic observed by IDS - no explicit allow/deny recorded",
             "first_seen": first_ts,
             "last_seen":  last_ts,
             "events": len(events),
             "status": "observed",
         })
 
-    # Topology enrichment â€” look up destination IPs in uploaded Excel data
+    # Topology enrichment - look up destination IPs in uploaded Excel data
     def _topo(dst_ip: str) -> dict:
         return _topology.get(dst_ip, {})
 
-    # Stage 3: Router / Switch â†’ floor (enriched from topology if available)
+    # Stage 3: Router / Switch -> floor (enriched from topology if available)
     if segment or top_dst:
         topo_dst = _topo(top_dst)
         switch   = topo_dst.get("switch_name") or topo_dst.get("switch") or ""
@@ -1732,7 +1756,7 @@ async def kill_chain(ip: str):
         floor_t  = topo_dst.get("floor") or ""
         dept     = topo_dst.get("department") or topo_dst.get("dept") or ""
         seg_label = floor_t or segment or "Internal Network"
-        stage_label = f"Router / Switch â†’ {seg_label}"
+        stage_label = f"Router / Switch -> {seg_label}"
         detail_parts = [f"Traffic routed to {top_dst}"]
         if len(set(dst_ips)) > 1:
             detail_parts.append(f"and {len(set(dst_ips))-1} other host(s)")
@@ -1764,11 +1788,11 @@ async def kill_chain(ip: str):
         port_info = topo_dst.get("switch_port") or topo_dst.get("port") or ""
         detail_parts = [f"{hostname} ({top_dst})"]
         if dev_type:
-            detail_parts.append(f"Â· {dev_type}")
+            detail_parts.append(f"- {dev_type}")
         if owner:
-            detail_parts.append(f"Â· Owner: {owner}")
+            detail_parts.append(f"- Owner: {owner}")
         if port_info:
-            detail_parts.append(f"Â· Port: {port_info}")
+            detail_parts.append(f"- Port: {port_info}")
         network_path.append({
             "stage": "Endpoint",
             "type": "network",
@@ -1780,7 +1804,7 @@ async def kill_chain(ip: str):
             "topology": topo_dst or None,
         })
 
-    # â”€â”€ Event correlation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- Event correlation --------------------------------------------------
     from datetime import datetime, timezone
     import math
 
@@ -1791,7 +1815,7 @@ async def kill_chain(ip: str):
         except Exception:
             return None
 
-    # 1. Attack waves â€” group events into 1-hour buckets, label each bucket
+    # 1. Attack waves - group events into 1-hour buckets, label each bucket
     bucket_map: dict[str, dict] = {}
     for ev in events:
         dt = _parse_ts(ev.get("@timestamp",""))
@@ -1825,7 +1849,7 @@ async def kill_chain(ip: str):
     targeted_accounts = [{"account": k, "hits": v} for k, v in
                          sorted(acct_counter.items(), key=lambda x: -x[1])[:10]]
 
-    # 3. Service / port sequence â€” top ports with first-seen time
+    # 3. Service / port sequence - top ports with first-seen time
     port_first: dict[str, str] = {}
     port_count: dict[str, int] = {}
     for ev in sorted(events, key=lambda e: e.get("@timestamp","")):
@@ -1846,7 +1870,7 @@ async def kill_chain(ip: str):
         key=lambda x: x["first_seen"]
     )[:15]
 
-    # 4. Technique chain â€” ordered by first occurrence
+    # 4. Technique chain - ordered by first occurrence
     tech_first: dict[str, dict] = {}
     for ev in sorted(events, key=lambda e: e.get("@timestamp","")):
         tid = ev.get("mitre","") or ""
@@ -1871,7 +1895,7 @@ async def kill_chain(ip: str):
             r["count"] += 1
     top_rules = sorted(rule_counter.values(), key=lambda x: -x["count"])[:8]
 
-    # 6. Related IPs â€” same /24 subnet with any activity
+    # 6. Related IPs - same /24 subnet with any activity
     subnet = ".".join(ip.split(".")[:3]) if ip.count(".") == 3 else None
     related_ips: list[dict] = []
     if subnet and STORE_ENABLED and osc:
@@ -1885,7 +1909,7 @@ async def kill_chain(ip: str):
             pass
     related_ips = related_ips[:6]
 
-    # 7. Event velocity â€” events per hour, peak activity hour
+    # 7. Event velocity - events per hour, peak activity hour
     if bucket_map:
         peak_bucket = max(bucket_map.values(), key=lambda b: b["count"])
         total_hours = max(len(bucket_map), 1)
@@ -1945,13 +1969,13 @@ async def get_technique(tid: str):
 
 @app.get("/api/explain/grounded/{ip}")
 async def explain_grounded(ip: str):
-    """AI explanation grounded in the ATT&CK knowledge base â€” cites techniques and
+    """AI explanation grounded in the ATT&CK knowledge base - cites techniques and
     real-world mitigations ('how the world solves this'). Works without an AI key
     by returning the deterministic grounded brief."""
     if not (STORE_ENABLED and osc):
         raise HTTPException(503, "Store disabled")
 
-    # Run all ClickHouse fetches in parallel â€” saves 5-10s vs sequential
+    # Run all ClickHouse fetches in parallel - saves 5-10s vs sequential
     chain, events, threat_counts = await asyncio.gather(
         kill_chain(ip),
         _to_thread(osc.get_ip_events_desc, ip, 20),
@@ -1984,7 +2008,7 @@ async def explain_grounded(ip: str):
     }
 
     if not AI_API_KEY:
-        return {**brief, "explanation": "AI key not configured â€” showing grounded knowledge-base brief.",
+        return {**brief, "explanation": "AI key not configured - showing grounded knowledge-base brief.",
                 "model": "deterministic", "generated_at": datetime.now(timezone.utc).isoformat()}
 
     prompt = f"""You are a senior SOC analyst at a bank. Explain this IP's activity and what to do,
@@ -1998,7 +2022,7 @@ Threat-type counts: {json.dumps(threat_counts)}
 Recent events (newest first):
 {json.dumps(events[:12], indent=2, default=str)}
 
-ATT&CK knowledge base (grounding â€” cite these):
+ATT&CK knowledge base (grounding - cite these):
 {grounding}
 
 Write four short sections with these exact headings:
@@ -2015,7 +2039,7 @@ RECOMMENDED ACTIONS (with mitigation IDs):"""
     }
 
 
-# â”€â”€ UEBA: user & host entities (Phase 3) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- UEBA: user & host entities (Phase 3) ---------------------------------------
 
 def _entity_profile(field: str, value: str) -> dict:
     """Shared profile builder for a user or host entity."""
@@ -2024,28 +2048,56 @@ def _entity_profile(field: str, value: str) -> dict:
         return {"entity": value, "field": field, "found": False, "total_events": 0}
 
     countries, hosts, src_ips, threats, severities = {}, {}, {}, {}, {}
+    rules, rule_ids, dst_ports = {}, {}, {}
+    allowed = blocked = 0
     for ev in events:
         for bucket, key in ((countries, ev.get("country")), (hosts, ev.get("agent")),
                             (src_ips, ev.get("src_ip")), (threats, ev.get("threat_type")),
-                            (severities, ev.get("severity"))):
-            k = (key or "").strip()
+                            (severities, ev.get("severity")), (rules, ev.get("rule")),
+                            (rule_ids, ev.get("rule_id")), (dst_ports, ev.get("dst_port"))):
+            k = (str(key) if key is not None else "").strip()
             if k:
                 bucket[k] = bucket.get(k, 0) + 1
+        act = (ev.get("action") or "").lower()
+        if act in ("allow", "allowed", "accept", "accepted", "permit", "permitted", "pass"):
+            allowed += 1
+        elif act in ("deny", "denied", "drop", "dropped", "block", "blocked", "reject", "rejected"):
+            blocked += 1
 
-    hist_countries = set(countries.keys()) if field == "username" else None
+    def _top(d, n=10):
+        return dict(sorted(d.items(), key=lambda x: -x[1])[:n])
+
     ato = ub.detect_account_takeover(events, historical_countries=set()) if ub else []
     travel = ub.detect_impossible_travel(events) if ub else []
+
+    # "Where it came from": prefer the named host (agent); fall back to the
+    # network origin (country + source IP) when the alert carries no host.
+    top_country = next(iter(_top(countries, 1)), "")
+    top_src = next(iter(_top(src_ips, 1)), "")
+    top_host = next(iter(_top(hosts, 1)), "")
+    if top_host:
+        origin = f"host {top_host}" + (f" ({top_country})" if top_country else "")
+    elif top_country or top_src:
+        origin = f"network origin {top_src or '?'} in {top_country or 'unknown country'}"
+    else:
+        origin = "unknown"
 
     return {
         "entity": value,
         "field": field,
         "found": True,
         "total_events": len(events),
-        "countries": dict(sorted(countries.items(), key=lambda x: -x[1])[:10]),
-        "hosts": dict(sorted(hosts.items(), key=lambda x: -x[1])[:10]),
-        "src_ips": dict(sorted(src_ips.items(), key=lambda x: -x[1])[:10]),
+        "origin": origin,
+        "countries": _top(countries),
+        "hosts": _top(hosts),
+        "src_ips": _top(src_ips),
         "threat_types": threats,
         "severities": severities,
+        # ---- what it did (uses populated rule/action/port fields) ----
+        "top_rules": _top(rules),
+        "rule_ids": _top(rule_ids),
+        "dst_ports": _top(dst_ports),
+        "firewall": {"allowed": allowed, "blocked": blocked},
         "first_seen": events[0].get("@timestamp"),
         "last_seen": events[-1].get("@timestamp"),
         "account_takeover": ato,
@@ -2142,7 +2194,7 @@ async def ueba_peer_outliers(field: str = "username", limit: int = 500):
             "outliers": ub.peer_outliers(rows) if ub else []}
 
 
-# â”€â”€ Incident correlation + triage queue (Phase 4) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Incident correlation + triage queue (Phase 4) ------------------------------
 
 async def _signal_for_ip(ip: str, risk: int, ueba_by_ip: dict) -> Optional[dict]:
     """Build a correlation signal for one IP from its kill chain + UEBA links."""
@@ -2247,16 +2299,16 @@ async def _gather_incidents(max_ips: int = 15) -> list[dict]:
     now = time.time()
     age = now - _incidents_cache_ts
 
-    # Fresh — serve immediately
+    # Fresh - serve immediately
     if _incidents_cache and age < _INCIDENTS_TTL:
         return _incidents_cache
 
-    # Stale (up to 10 min) — return immediately, refresh silently in background
+    # Stale (up to 10 min) - return immediately, refresh silently in background
     if _incidents_cache and age < 600:
         asyncio.create_task(_compute_incidents_bg(max_ips))
         return _incidents_cache
 
-    # Cache empty (first ever boot) — compute once, then cache
+    # Cache empty (first ever boot) - compute once, then cache
     await _compute_incidents_bg(max_ips)
     return _incidents_cache or []
 
@@ -2330,14 +2382,14 @@ PRIORITY JUSTIFICATION:"""
     }
 
 
-# â”€â”€ search + health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- search + health -----------------------------------------------------------
 
 @app.get("/api/logs")
 async def get_logs(minutes: int = 0, start: str = "", end: str = "",
                    severity: str = "", min_level: int = 0, limit: int = 500):
     if not (STORE_ENABLED and osc):
         return {"logs": [], "count": 0, "source": "disabled"}
-    # Default to last 7 days — uses partition pruning, avoids full table scan
+    # Default to last 7 days - uses partition pruning, avoids full table scan
     if not minutes and not start and not end:
         minutes = 10080  # 7 days
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
@@ -2354,7 +2406,7 @@ async def search_ip(q: str):
     return list(await asyncio.gather(*[trail_summary(ip) for ip in ips]))
 
 
-# â”€â”€ Network Topology endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Network Topology endpoints ---------------------------------------------
 
 @app.post("/api/network/topology/upload")
 async def upload_topology(file: UploadFile = File(...)):
@@ -2432,37 +2484,37 @@ async def lookup_topology(ip: str):
 _NL_SCHEMA = """
 Tables in database: cybersentinel
 
-1. cybersentinel.logs â€” ALL security events/alerts (main table)
-   - ts: DateTime64 â€” event timestamp (use for ALL time filtering)
-   - src_ip: String â€” source/attacker IP address
-   - dst_ip: String â€” destination IP address
-   - dst_port: String â€” destination port number (stored as String)
-   - threat_type: String â€” brute_force | port_scan | malware | phishing | lateral_movement | etc
-   - severity: String â€” low | medium | high | critical
-   - rule: String â€” detection rule description
-   - rule_level: UInt8 â€” severity 1-15 (>=12 means critical)
-   - action: String â€” allow | block | drop
-   - country: String â€” country name of src_ip (e.g. 'India', 'China', 'Russia', 'United States')
-   - agent: String â€” internal endpoint hostname that generated the alert
-   - mitre_tactic: String â€” ATT&CK tactic (e.g. 'Initial Access', 'Lateral Movement', 'Exfiltration')
-   - mitre_technique: String â€” ATT&CK technique name
-   - username: String â€” user account involved
-   - target_user: String â€” account being targeted/attacked
-   - rule_groups: String â€” Wazuh rule categories
+1. cybersentinel.logs - ALL security events/alerts (main table)
+   - ts: DateTime64 - event timestamp (use for ALL time filtering)
+   - src_ip: String - source/attacker IP address
+   - dst_ip: String - destination IP address
+   - dst_port: String - destination port number (stored as String)
+   - threat_type: String - brute_force | port_scan | malware | phishing | lateral_movement | etc
+   - severity: String - low | medium | high | critical
+   - rule: String - detection rule description
+   - rule_level: UInt8 - severity 1-15 (>=12 means critical)
+   - action: String - allow | block | drop
+   - country: String - country name of src_ip (e.g. 'India', 'China', 'Russia', 'United States')
+   - agent: String - internal endpoint hostname that generated the alert
+   - mitre_tactic: String - ATT&CK tactic (e.g. 'Initial Access', 'Lateral Movement', 'Exfiltration')
+   - mitre_technique: String - ATT&CK technique name
+   - username: String - user account involved
+   - target_user: String - account being targeted/attacked
+   - rule_groups: String - Wazuh rule categories
 
-2. cybersentinel.agg_ip_daily â€” pre-aggregated daily counts per IP (fast for summaries)
+2. cybersentinel.agg_ip_daily - pre-aggregated daily counts per IP (fast for summaries)
    - day: Date, src_ip, threat_type, severity, events: UInt64
 
-3. cybersentinel.ml_scores â€” ML risk scores per IP (use FINAL to deduplicate)
+3. cybersentinel.ml_scores - ML risk scores per IP (use FINAL to deduplicate)
    - ip, risk_score: UInt8 (0-100), anomaly_score: Float64, is_anomaly: UInt8(0|1), scored_at: DateTime64
 
-4. cybersentinel.baselines â€” behavioral baseline per IP (use FINAL)
+4. cybersentinel.baselines - behavioral baseline per IP (use FINAL)
    - ip, built_at: DateTime64, data: String (JSON blob)
 
-5. cybersentinel.deviations â€” behavioral deviation alerts (use FINAL)
+5. cybersentinel.deviations - behavioral deviation alerts (use FINAL)
    - ip, type: String, severity: String, message: String, ts: DateTime64
 
-6. cybersentinel.blocklist â€” blocked IPs (use FINAL, active=1 means currently blocked)
+6. cybersentinel.blocklist - blocked IPs (use FINAL, active=1 means currently blocked)
    - ip, kind: String (auto|manual), active: UInt8, added_at: DateTime64
 """
 
@@ -2491,14 +2543,14 @@ Rules:
 - Readable timestamps: formatDateTime(ts, '%Y-%m-%d %H:%i:%S') AS time
 - Tables needing FINAL: ml_scores, baselines, deviations, blocklist
 - Brute force filter: threat_type ILIKE '%brute%'
-- For deviations/baselines/ml_scores, do NOT add time filters â€” use FINAL keyword only.
+- For deviations/baselines/ml_scores, do NOT add time filters - use FINAL keyword only.
 
 Analyst question: {question}
 
 SQL:"""
 
     raw = await ask_groq(prompt, max_tokens=500, model=AI_FAST_MODEL)
-    # Extract the SQL â€” the model sometimes wraps it in markdown or adds preamble
+    # Extract the SQL - the model sometimes wraps it in markdown or adds preamble
     sql = raw.strip()
     for tag in ["```sql", "```SQL", "```"]:
         if tag in sql:
@@ -2522,7 +2574,7 @@ SQL:"""
     import time as _time
 
     def _run_query():
-        # Runs in a worker thread â€” gets its OWN thread-local ClickHouse client
+        # Runs in a worker thread - gets its OWN thread-local ClickHouse client
         c = osc.get_client()
         if not c:
             raise RuntimeError("ClickHouse not available")
@@ -2548,7 +2600,7 @@ SQL:"""
 
 _resilience_cache: dict = {}
 _resilience_cache_ts: float = 0.0
-_RESILIENCE_TTL = 120  # seconds — resilience score changes slowly
+_RESILIENCE_TTL = 120  # seconds - resilience score changes slowly
 
 
 @app.get("/api/resilience")
@@ -2617,7 +2669,7 @@ async def get_resilience():
 
 @app.get("/api/health")
 async def health():
-    # Keep this lightweight â€” Docker health check has a 5s timeout.
+    # Keep this lightweight - Docker health check has a 5s timeout.
     # Only verify the client can be obtained; never run a query here.
     ch_status = "disabled"
     if STORE_ENABLED and osc:
@@ -2635,13 +2687,13 @@ async def health():
 
 
 
-# â”€â”€ storage stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- storage stats ------------------------------------------------------------
 
 @app.post("/api/archive/run")
 async def archive_run(retain_days: int = 90):
     """Delete logs older than retain_days from ClickHouse to reclaim disk space.
     Wazuh watcher calls this after every ARCHIVE_THRESHOLD new logs.
-    Default: keep last 90 days. Runs asynchronously â€” returns immediately."""
+    Default: keep last 90 days. Runs asynchronously - returns immediately."""
     if not (STORE_ENABLED and osc):
         return {"status": "disabled", "archived": 0}
     try:
@@ -2665,7 +2717,7 @@ async def archive_run(retain_days: int = 90):
 
 @app.get("/api/storage/stats")
 async def storage_stats():
-    """Storage usage from ClickHouse (logs + state) â€” single source of truth."""
+    """Storage usage from ClickHouse (logs + state) - single source of truth."""
     if not (STORE_ENABLED and osc):
         return {"source": "disabled"}
 
@@ -2678,7 +2730,7 @@ async def storage_stats():
             "deviations":   osc.get_deviation_total(),
             "retention":    "partition TTL (logs 90d, deviations 60d)",
         },
-        "recommendation": "storage is healthy â€” ClickHouse TTL manages retention automatically",
+        "recommendation": "storage is healthy - ClickHouse TTL manages retention automatically",
     }
 
 
