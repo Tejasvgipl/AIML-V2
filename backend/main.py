@@ -1477,8 +1477,9 @@ async def get_hot_ips():
         return _hot_ips_cache
     if not (STORE_ENABLED and osc):
         return _hot_ips_cache or []
-    # One batch query replaces N×4 per-IP queries (was 200 ClickHouse queries for 50 IPs)
-    result = await _to_thread(osc.get_hot_ip_summaries, 30)
+    # Show ALL hot IPs, not an arbitrary 30 (env-tunable). One batch query.
+    _limit = int(os.getenv("HOT_IPS_LIMIT", "200"))
+    result = await _to_thread(osc.get_hot_ip_summaries, _limit)
     if result:
         _hot_ips_cache = result
         _hot_ips_cache_ts = time.time()

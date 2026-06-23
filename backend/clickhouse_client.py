@@ -115,13 +115,84 @@ _EVENT_COLS = (
 )
 
 
+# ── Serve-layer enrichment (works on existing rows; no re-ingest needed) ──────
+
+def _derive_log_source(ev: dict) -> str:
+    """Best-effort platform/source for an event from the signals we DO have
+    (rule description 100%, rule_groups, agent, action). Never returns 'unknown'."""
+    hay = (str(ev.get("rule_groups", "")) + " " + str(ev.get("rule", "")) + " "
+           + str(ev.get("agent", "")) + " " + str(ev.get("mitre", ""))).lower()
+    if any(k in hay for k in ("firewall", "iptables", "fortigate", "palo", "asa", "ufw", "pfsense")):
+        return "firewall"
+    if any(k in hay for k in ("windows", "win_", "sysmon", "powershell", "eventlog", "rdp", "ntlm", "kerberos")):
+        return "windows"
+    if any(k in hay for k in ("macos", "osx", "darwin")):
+        return "macos"
+    if any(k in hay for k in ("sshd", "ssh ", "sudo", "pam", "auth.log", "syslog", "systemd", "linux", "unix", "cron")):
+        return "linux"
+    if any(k in hay for k in ("apache", "nginx", "http", "iis", "web", "sql_injection", "xss", "url")):
+        return "web"
+    if any(k in hay for k in ("vpn", "openvpn", "ipsec", "suricata", "snort", "ids", "netflow", "scan", "nmap", "recon")):
+        return "network"
+    # Has an allow/deny verdict but no host signal -> treat as firewall/network gear
+    if str(ev.get("action", "")).strip():
+        return "firewall"
+    return "endpoint"
+
+
+# threat_type keyword -> human label (used when threat_type is missing/'unknown')
+_THREAT_LABELS = [
+    ("Brute Force",            ("brute", "auth", "failed login", "invalid", "password")),
+    ("Privilege Escalation",   ("privilege", "sudo", "root", "escalat")),
+    ("Lateral Movement",       ("rdp", "lateral", "smb", "psexec", "remote desktop")),
+    ("Web Attack",             ("web", "sql", "xss", "injection", "http")),
+    ("Reconnaissance",         ("scan", "nmap", "recon", "portscan", "probe")),
+    ("Malware / IOC",          ("malware", "virus", "trojan", "ransom", "ioc", "blacklist", "known_bad")),
+    ("Database Activity",      ("mysql", "postgres", "mongo", "database", "mssql")),
+    ("VPN Activity",           ("vpn", "openvpn", "ipsec")),
+    ("Successful Login",       ("login_success", "session opened", "accepted password")),
+]
+
+
+def _better_threat(ev: dict) -> str:
+    """A readable threat label, never a bare 'unknown'. Uses threat_type when it
+    is meaningful, else derives from the rule description."""
+    tt = str(ev.get("threat_type", "")).strip()
+    if tt and tt.lower() != "unknown":
+        return tt.replace("_", " ").title()
+    hay = (str(ev.get("rule", "")) + " " + str(ev.get("rule_groups", ""))).lower()
+    for label, keys in _THREAT_LABELS:
+        if any(k in hay for k in keys):
+            return label
+    rule = str(ev.get("rule", "")).strip()
+    return ("Uncategorized: " + rule[:48]) if rule else "Other Activity"
+
+
+def _resolve_entity(ev: dict) -> dict:
+    """Stable identity for an event. IP is a LOCATION, not identity (DHCP reassigns
+    it), so prefer username -> host(agent) -> IP. Flags IP-only as low-confidence."""
+    user = str(ev.get("username", "")).strip()
+    if user:
+        return {"id": f"user:{user}", "type": "user", "label": user, "stable": True}
+    host = str(ev.get("agent", "")).strip()
+    if host:
+        return {"id": f"host:{host}", "type": "host", "label": host, "stable": True}
+    ip = str(ev.get("src_ip", "")).strip()
+    return {"id": f"ip:{ip}", "type": "ip", "label": ip, "stable": False,
+            "note": "IP-only identity - unreliable on DHCP ranges (lease may reassign)"}
+
+
 def _shape_events(rows: list[dict]) -> list[dict]:
-    """Attach _ts float (baseline compat) and ensure @timestamp is a string."""
+    """Attach _ts float (baseline compat), normalise @timestamp, and enrich each
+    event with resolved entity, log source and a readable threat label."""
     out = []
     for src in rows:
         raw_ts = src.get("@timestamp")
         src["_ts"] = _ts_float(raw_ts)
         src["@timestamp"] = _iso(raw_ts)
+        src["log_source"] = _derive_log_source(src)
+        src["threat_label"] = _better_threat(src)
+        src["entity"] = _resolve_entity(src)
         out.append(src)
     return out
 
@@ -248,9 +319,12 @@ def get_hot_ip_summaries(size: int = 30) -> list[dict]:
     return results
 
 
-def get_global_threat_counts() -> dict:
+def get_global_threat_counts(include_unknown: bool = False) -> dict:
+    # Exclude the 'unknown' bucket so "top threat" is always a real category an
+    # analyst can act on (flaw #4). Pass include_unknown=True for raw totals.
+    where = "" if include_unknown else "WHERE threat_type NOT IN ('unknown','')"
     rows = _q(f"SELECT threat_type, sum(events) AS c FROM {AGG_TABLE} "
-              f"GROUP BY threat_type ORDER BY c DESC LIMIT 50")
+              f"{where} GROUP BY threat_type ORDER BY c DESC LIMIT 50")
     return {r["threat_type"]: int(r["c"]) for r in rows}
 
 
