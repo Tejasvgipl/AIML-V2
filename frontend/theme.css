@@ -433,6 +433,11 @@ body { background:
 .ent-host { background: rgba(63,185,80,.15); color: #3fb950; }
 .ent-more { background: var(--surface); color: var(--muted); }
 .ent-none { font-size: 11px; color: var(--muted); font-style: italic; }
+.ent-kind-sensor { color: #d29922; }
+.ent-kind-user { color: #58a6ff; }
+.ent-kind-host { color: #3fb950; }
+.ent-nouser { font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: #d29922;
+  background: rgba(210,153,34,.13); padding: 1px 6px; border-radius: 4px; margin-left: 5px; cursor: help; }
 
 /* ── Login brand footer (logo + AI·ML tagline) ─────────────────────────── */
 .login-brandfoot {

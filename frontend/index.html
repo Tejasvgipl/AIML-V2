@@ -2208,8 +2208,10 @@
             <input id="hot-filter" oninput="renderHotTable()" placeholder="Filter by IP, user or host…"
               style="width:100%;max-width:340px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 11px;color:var(--text);font-size:12px;outline:none;margin-bottom:6px" />
             <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
-              An IP is a <b>location</b>, not an identity. Under DHCP it gets reassigned — so each row shows the
-              actual users &amp; hosts seen on it. <span class="tev-warn">&#9888;</span> = no user/host, identity is the raw IP.
+              An IP is a <b>location</b>, not an identity. Each row resolves to a real <b>user</b> when one was
+              captured; otherwise to the reporting <b>sensor</b> (the Wazuh agent that logged it, e.g.
+              <code>agent-19</code> / <code>BANK-DC-01</code> — a machine, not a person).
+              <span class="ent-nouser">no user</span> = no username on those events; <span class="tev-warn">&#9888;</span> = raw IP only.
             </div>
           </div>
           <table class="tbl">
@@ -2218,7 +2220,7 @@
                 <th>Source IP</th>
                 <th>Resolved identity</th>
                 <th>Users on IP</th>
-                <th>Hosts on IP</th>
+                <th>Sensors on IP</th>
                 <th>Events</th>
                 <th>Top threat</th>
                 <th>Severity</th>
@@ -2759,7 +2761,16 @@ tr:hover td{background:#161b22}</style></head>
     function nav(name) {
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.ni').forEach(n => n.classList.remove('active'));
-      document.getElementById('page-' + name).classList.add('active');
+      const pageEl = document.getElementById('page-' + name);
+      pageEl.classList.add('active');
+      // Reveal sweep: the entrance IntersectionObserver leaves cards on hidden
+      // pages stuck at inline opacity:0 (a display:none element never fires the
+      // observer). Clear it the moment the page is shown so content is never
+      // invisible regardless of observer timing or card height.
+      pageEl.querySelectorAll('.card, .cbox, .metric, .ops-chip, .bsl-box').forEach(el => {
+        el.style.opacity = '';
+        el.style.transform = '';
+      });
       document.querySelectorAll('.ni').forEach(n => {
         if (n.getAttribute('onclick') && n.getAttribute('onclick').includes("'" + name + "'")) n.classList.add('active');
       });
@@ -2904,23 +2915,30 @@ tr:hover td{background:#161b22}</style></head>
       const extra = list.length > max ? `<span class="ent-chip ent-more">+${list.length - max}</span>` : '';
       return shown + extra;
     }
+    // Build the identity headline honestly: a real user, a host/sensor (with a
+    // tooltip explaining agent-N is the reporting endpoint, not a person), or a
+    // bare IP. has_user=false → show the analyst there is no user on the events.
+    function identityTitle(id, ip) {
+      id = id || { label: ip, kind: 'ip', has_user: false };
+      if (id.kind === 'ip')
+        return `${escapeHTML(ip)} <span class="tev-warn" title="${escapeHTML(id.note || 'IP only')}">&#9888; no identity</span>`;
+      const kindLabel = id.kind === 'sensor' ? 'sensor' : id.kind;
+      const warn = id.has_user ? '' :
+        ` <span class="ent-nouser" title="${escapeHTML(id.note || 'no user on these events')}">no user</span>`;
+      return `${escapeHTML(id.label)} <span class="ent-kind ent-kind-${kindLabel}">${kindLabel}</span>${warn}`;
+    }
     // Rich entity card for the Overview spotlight.
     function renderEntityCard(h) {
       const [threatName] = topThreat(h.threat_types);
       const [sev] = severityRank(h.severities);
-      const id = h.identity || { label: h.ip, kind: 'ip', stable: false };
-      const unstable = id.kind === 'ip';
-      const title = unstable
-        ? `${h.ip} <span class="tev-warn" title="${escapeHTML(id.note || 'IP only')}">&#9888;</span>`
-        : `${escapeHTML(id.label)} <span class="ent-kind">${id.kind}</span>`;
       return `<div class="ent-card ent-sev-${sev}" onclick="goTrail('${h.ip}')">
         <div class="ent-card-head">
-          <span class="ent-title">${title}</span>
+          <span class="ent-title">${identityTitle(h.identity, h.ip)}</span>
           <span class="badge ${sev}">${sev}</span>
         </div>
         <div class="ent-card-ip">${h.ip} · ${Number(h.total || 0).toLocaleString()} events · ${String(threatName).replace(/_/g, ' ')}</div>
         <div class="ent-card-row"><span class="ent-lbl">Users</span><span class="ent-vals">${identChips(h.users, 'user', 3)}</span></div>
-        <div class="ent-card-row"><span class="ent-lbl">Hosts</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
+        <div class="ent-card-row"><span class="ent-lbl">Sensors</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
       </div>`;
     }
     // Filterable table of every source IP and the identities behind it.
@@ -2939,13 +2957,9 @@ tr:hover td{background:#161b22}</style></head>
       tb.innerHTML = rows.map(h => {
         const [tt] = topThreat(h.threat_types);
         const [sv] = severityRank(h.severities);
-        const id = h.identity || { label: h.ip, kind: 'ip', stable: false };
-        const ident = id.kind === 'ip'
-          ? `<span class="tev-warn" title="${escapeHTML(id.note || 'IP only — DHCP location')}">&#9888; IP only</span>`
-          : `${escapeHTML(id.label)} <span class="ent-kind">${id.kind}</span>`;
         return `<tr onclick="goTrail('${h.ip}')" style="cursor:pointer">
         <td style="color:var(--accent);font-weight:600;white-space:nowrap">${h.ip}</td>
-        <td>${ident}</td>
+        <td>${identityTitle(h.identity, h.ip)}</td>
         <td>${identChips(h.users, 'user', 3)}</td>
         <td>${identChips(h.hosts, 'host', 3)}</td>
         <td>${Number(h.total || 0).toLocaleString()}</td>
@@ -3038,12 +3052,8 @@ tr:hover td{background:#161b22}</style></head>
             const [threatName, threatCount] = topThreat(h.threat_types);
             const [sev] = severityRank(h.severities);
             const score = Math.min(99, Math.max(12, Math.round((Number(h.total || 0) * .18) + (sev === 'critical' ? 42 : sev === 'high' ? 28 : sev === 'medium' ? 16 : 9))));
-            const id = h.identity || { label: h.ip, kind: 'ip', stable: false };
-            const who = id.kind === 'ip'
-              ? `${h.ip} <span class="tev-warn" title="IP only — no user/host (DHCP location)">&#9888;</span>`
-              : `${escapeHTML(id.label)} <span class="ent-kind">${id.kind}</span>`;
             return `<div class="watch-item" onclick="goTrail('${h.ip}')">
-          <div class="watch-ip">${who}</div>
+          <div class="watch-ip">${identityTitle(h.identity, h.ip)}</div>
           <div class="watch-meta">${h.ip} · ${String(threatName).replace(/_/g, ' ')} · ${Number(h.total || 0).toLocaleString()} events</div>
           <div class="watch-score ${sev}">${score}</div>
         </div>`;
@@ -4726,7 +4736,10 @@ tr:hover td{background:#161b22}</style></head>
           observer.unobserve(entry.target);
         }
       });
-    }, { threshold: 0.1 });
+      // threshold 0 (any pixel) — 0.1 could NEVER be met for very tall cards
+      // (e.g. the 1000-row Logs table is ~50000px; 10% > viewport), leaving
+      // them stuck at opacity:0 and invisible forever.
+    }, { threshold: 0 });
     document.querySelectorAll('.metric, .card, .cbox, .ops-chip, .alert-card, .bsl-box, .term').forEach(el => {
       el.style.opacity = '0';
       el.style.transform = 'translateY(12px)';
@@ -4853,9 +4866,16 @@ tr:hover td{background:#161b22}</style></head>
 
   </script>
   <script>
-    // Service worker — caches /api/overview so page feels instant on repeat loads
+    // Register the kill-switch SW once so any browser still running the old
+    // caching worker gets it replaced and unregistered (it broke /api/logs &
+    // /api/overview with "Failed to fetch"). After it unregisters itself this
+    // is a no-op. Caching is handled server-side, not in the browser.
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.getRegistrations()
+        .then(regs => regs.length
+          ? navigator.serviceWorker.register('/sw.js').catch(() => {})
+          : null)
+        .catch(() => {});
     }
   </script>
 </body>

@@ -376,7 +376,10 @@ def map_to_row(raw_alert: dict):
         _first(flat, "data.srccountry", "GeoLocation.country_name"), # country
         _first(flat, "agent.name"),                                  # agent
         _first(flat, "rule.mitre.id"),                               # mitre
-        _first(flat, "data.user", "data.win.eventdata.user", "data.dstuser", "data.srcuser"),
+        _first(flat, "data.user", "data.win.eventdata.user", "data.win.eventdata.targetUserName",
+               "data.win.eventdata.subjectUserName", "data.dstuser", "data.srcuser",
+               "data.audit.auid", "data.aws.userIdentity.userName", "data.gcp.protoPayload.authenticationInfo.principalEmail",
+               "data.office365.UserId", "syscheck.uname_after"),  # username (many Wazuh sources)
         _first(flat, "data.http.http_user_agent"),                   # useragent
         _first(flat, "data.alert.signature")[:200],                  # signature
         # ── Phase 1: richer Wazuh signal ──

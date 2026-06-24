@@ -12,6 +12,7 @@ here via SQL aggregations and the materialized-view rollups.
 Synchronous helpers (safe to call from any context), matching the old client.
 """
 import os
+import re
 import json
 import logging
 import threading
@@ -168,17 +169,29 @@ def _better_threat(ev: dict) -> str:
     return ("Uncategorized: " + rule[:48]) if rule else "Other Activity"
 
 
+_SYNTH_AGENT = re.compile(r"^agent-\d+$", re.I)
+
+
 def _resolve_entity(ev: dict) -> dict:
-    """Stable identity for an event. IP is a LOCATION, not identity (DHCP reassigns
-    it), so prefer username -> host(agent) -> IP. Flags IP-only as low-confidence."""
-    user = str(ev.get("username", "")).strip()
+    """Stable identity for an event. Priority: real user (username OR target_user)
+    -> host/sensor (Wazuh agent) -> IP. IP is a LOCATION, not identity (DHCP
+    reassigns it). 'agent-N' is a synthetic Wazuh agent ID — a reporting SENSOR,
+    NOT a person — so it is labelled honestly and flagged has_user=False."""
+    user = str(ev.get("username", "")).strip() or str(ev.get("target_user", "")).strip()
     if user:
-        return {"id": f"user:{user}", "type": "user", "label": user, "stable": True}
+        return {"id": f"user:{user}", "type": "user", "label": user,
+                "stable": True, "has_user": True}
     host = str(ev.get("agent", "")).strip()
     if host:
-        return {"id": f"host:{host}", "type": "host", "label": host, "stable": True}
+        synth = bool(_SYNTH_AGENT.match(host))
+        return {"id": f"host:{host}", "type": "sensor" if synth else "host",
+                "label": host, "stable": True, "has_user": False,
+                "note": ("Reporting Wazuh agent (endpoint sensor) - no user identity "
+                         "on this event") if synth
+                        else "Resolved to host; no user identity on this event"}
     ip = str(ev.get("src_ip", "")).strip()
     return {"id": f"ip:{ip}", "type": "ip", "label": ip, "stable": False,
+            "has_user": False,
             "note": "IP-only identity - unreliable on DHCP ranges (lease may reassign)"}
 
 
@@ -300,17 +313,19 @@ def get_hot_ip_summaries(size: int = 30) -> list[dict]:
     # Identities behind each hot IP (users + hosts). IP is a LOCATION, not identity
     # (DHCP reassigns it) -- so an analyst must see WHO/WHAT was on that IP.
     # Fast: src_ip is the table's leading ORDER BY key.
+    # Pull username AND target_user as real users; agent is the reporting host/sensor.
     ident_map: dict[str, dict] = {}
     try:
         ident_rows = _q(
-            f"SELECT src_ip, username, agent, count() AS cnt "
+            f"SELECT src_ip, username, target_user, agent, count() AS cnt "
             f"FROM cybersentinel.logs WHERE src_ip IN ({placeholders}) "
-            f"AND (username != '' OR agent != '') "
-            f"GROUP BY src_ip, username, agent ORDER BY cnt DESC"
+            f"AND (username != '' OR target_user != '' OR agent != '') "
+            f"GROUP BY src_ip, username, target_user, agent ORDER BY cnt DESC"
         )
         for r in ident_rows:
             m = ident_map.setdefault(r["src_ip"], {"users": {}, "hosts": {}})
-            u, h, c = (r.get("username") or "").strip(), (r.get("agent") or "").strip(), int(r["cnt"])
+            u = (r.get("username") or "").strip() or (r.get("target_user") or "").strip()
+            h, c = (r.get("agent") or "").strip(), int(r["cnt"])
             if u:
                 m["users"][u] = m["users"].get(u, 0) + c
             if h:
@@ -345,15 +360,23 @@ def get_hot_ip_summaries(size: int = 30) -> list[dict]:
         s["hosts"] = [{"name": h, "events": c} for h, c in hosts[:8]]
         s["user_count"] = len(users)
         s["host_count"] = len(hosts)
-        # Resolve the most likely stable identity: top user > top host > IP.
-        # IP-only is flagged unstable (DHCP reassigns it) so the analyst knows.
+        # Resolve the most likely identity: real user > host/sensor > IP. Honest
+        # labels: a synthetic 'agent-N' is a reporting SENSOR (not a person), and
+        # has_user=False tells the UI to show "no user on these events".
         if users:
-            s["identity"] = {"label": users[0][0], "kind": "user", "stable": True}
+            s["identity"] = {"label": users[0][0], "kind": "user",
+                             "stable": True, "has_user": True}
         elif hosts:
-            s["identity"] = {"label": hosts[0][0], "kind": "host", "stable": True}
+            top_host = hosts[0][0]
+            synth = bool(_SYNTH_AGENT.match(top_host))
+            s["identity"] = {"label": top_host, "kind": "sensor" if synth else "host",
+                             "stable": True, "has_user": False,
+                             "note": ("Wazuh agent (endpoint sensor) - no user identity "
+                                      "captured on these events") if synth
+                                     else "Resolved to host; no user on these events"}
         else:
-            s["identity"] = {"label": ip, "kind": "ip", "stable": False,
-                             "note": "no user/host on these events — IP is a location, not an identity (DHCP)"}
+            s["identity"] = {"label": ip, "kind": "ip", "stable": False, "has_user": False,
+                             "note": "no user/host on these events - IP is a location, not an identity (DHCP)"}
         results.append(s)
     return results
 
