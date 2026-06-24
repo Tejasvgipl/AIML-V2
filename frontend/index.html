@@ -3100,6 +3100,11 @@ tr:hover td{background:#161b22}</style></head>
     }
     function doSearch() { const q = document.getElementById('ip-search').value.trim(); if (!q) return; goTrail(q); }
     function goTrail(ip) { nav('trail'); document.getElementById('trail-mode').value = 'ip'; onTrailModeChange(); document.getElementById('trail-input').value = ip; loadTrail(); }
+    function copyEid(ev, id) {
+      ev.stopPropagation();
+      if (navigator.clipboard) navigator.clipboard.writeText(id).then(() => toast('Copied ' + id)).catch(() => toast(id));
+      else toast(id);
+    }
     async function quickAI(ip) {
       nav('aiinvestigate');
       document.getElementById('ai-ip-input').value = ip;
@@ -3208,6 +3213,7 @@ tr:hover td{background:#161b22}</style></head>
           <span class="src-badge src-${e.log_source || 'endpoint'}">${e.log_source || 'endpoint'}</span>
           ${actHtml}
           <span class="tev-threat">${e.threat_label || (e.threat_type || '').replace(/_/g, ' ')}</span>
+          ${e.event_id ? `<span class="tev-eid" onclick="copyEid(event,'${e.event_id}')" title="Event ID — click to copy">${e.event_id}</span>` : ''}
         </div>
         <div class="tev-body">
           ${k('Identity', ident)}
@@ -3503,7 +3509,7 @@ tr:hover td{background:#161b22}</style></head>
                       : allowed ? '<span class="badge low">allowed</span>'
                       : '<span style="color:var(--muted)">—</span>';
         return `<tr>
-        <td style="font-size:11px;white-space:nowrap">${(e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}</td>
+        <td style="font-size:11px;white-space:nowrap">${(e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}${e.event_id ? `<br><span class="log-eid" onclick="copyEid(event,'${e.event_id}')" title="Event ID — click to copy">${e.event_id}</span>` : ''}</td>
         <td style="color:var(--accent);cursor:pointer" onclick="goTrail('${e.src_ip}')">${e.src_ip || '—'}</td>
         <td><span class="src-badge src-${e.log_source || 'endpoint'}">${e.log_source || 'endpoint'}</span></td>
         <td>${e.threat_label || (e.threat_type || '').replace(/_/g, ' ')}</td>

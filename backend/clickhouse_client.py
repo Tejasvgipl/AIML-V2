@@ -14,6 +14,7 @@ Synchronous helpers (safe to call from any context), matching the old client.
 import os
 import re
 import json
+import hashlib
 import logging
 import threading
 from datetime import datetime, timezone
@@ -195,9 +196,20 @@ def _resolve_entity(ev: dict) -> dict:
             "note": "IP-only identity - unreliable on DHCP ranges (lease may reassign)"}
 
 
+def _event_id(ev: dict) -> str:
+    """Stable, citable per-event ID so an analyst can reference an exact log.
+    Derived deterministically from the event's content (the demo rows carry no
+    source _id), so the same log always yields the same id across reloads."""
+    basis = "|".join(str(ev.get(k, "")) for k in
+                     ("@timestamp", "src_ip", "dst_ip", "dst_port", "rule_id",
+                      "rule_level", "threat_type", "agent", "username", "rule"))
+    return "EVT-" + hashlib.blake2b(basis.encode("utf-8", "ignore"), digest_size=6).hexdigest().upper()
+
+
 def _shape_events(rows: list[dict]) -> list[dict]:
     """Attach _ts float (baseline compat), normalise @timestamp, and enrich each
-    event with resolved entity, log source and a readable threat label."""
+    event with resolved entity, log source, a readable threat label and a stable
+    citable event id."""
     out = []
     for src in rows:
         raw_ts = src.get("@timestamp")
@@ -206,6 +218,7 @@ def _shape_events(rows: list[dict]) -> list[dict]:
         src["log_source"] = _derive_log_source(src)
         src["threat_label"] = _better_threat(src)
         src["entity"] = _resolve_entity(src)
+        src["event_id"] = _event_id(src)
         out.append(src)
     return out
 

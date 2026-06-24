@@ -452,6 +452,14 @@ body { background:
 .ip-chip:hover { background: rgba(88,166,255,.22); }
 .ip-chip b { color: var(--text); }
 
+/* ── Citable per-event ID badge (trail + logs) ────────────────────────── */
+.tev-eid { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--border); padding: 1px 7px; border-radius: 5px;
+  cursor: pointer; letter-spacing: .3px; }
+.tev-eid:hover { color: var(--accent); border-color: var(--accent); }
+.log-eid { font-family: var(--mono); font-size: 9.5px; color: var(--faint, var(--muted)); cursor: pointer; letter-spacing: .2px; }
+.log-eid:hover { color: var(--accent); }
+
 /* ── Login brand footer (logo + AI·ML tagline) ─────────────────────────── */
 .login-brandfoot {
   display: flex; align-items: center; gap: 13px; margin-top: 40px;
