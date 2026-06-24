@@ -297,6 +297,27 @@ def get_hot_ip_summaries(size: int = 30) -> list[dict]:
     )
     time_map = {r["src_ip"]: (_iso(r["first_seen"]), _iso(r["last_seen"])) for r in time_rows}
 
+    # Identities behind each hot IP (users + hosts). IP is a LOCATION, not identity
+    # (DHCP reassigns it) -- so an analyst must see WHO/WHAT was on that IP.
+    # Fast: src_ip is the table's leading ORDER BY key.
+    ident_map: dict[str, dict] = {}
+    try:
+        ident_rows = _q(
+            f"SELECT src_ip, username, agent, count() AS cnt "
+            f"FROM cybersentinel.logs WHERE src_ip IN ({placeholders}) "
+            f"AND (username != '' OR agent != '') "
+            f"GROUP BY src_ip, username, agent ORDER BY cnt DESC"
+        )
+        for r in ident_rows:
+            m = ident_map.setdefault(r["src_ip"], {"users": {}, "hosts": {}})
+            u, h, c = (r.get("username") or "").strip(), (r.get("agent") or "").strip(), int(r["cnt"])
+            if u:
+                m["users"][u] = m["users"].get(u, 0) + c
+            if h:
+                m["hosts"][h] = m["hosts"].get(h, 0) + c
+    except Exception:
+        pass
+
     # Aggregate in Python
     by_ip: dict[str, dict] = {}
     for r in detail_rows:
@@ -315,6 +336,24 @@ def get_hot_ip_summaries(size: int = 30) -> list[dict]:
         s["first_seen"] = first
         s["last_seen"] = last
         s["is_hot"] = True
+
+        # Attach the identities (users/hosts) seen on this IP, ranked by activity.
+        ident = ident_map.get(ip, {"users": {}, "hosts": {}})
+        users = sorted(ident["users"].items(), key=lambda kv: kv[1], reverse=True)
+        hosts = sorted(ident["hosts"].items(), key=lambda kv: kv[1], reverse=True)
+        s["users"] = [{"name": u, "events": c} for u, c in users[:8]]
+        s["hosts"] = [{"name": h, "events": c} for h, c in hosts[:8]]
+        s["user_count"] = len(users)
+        s["host_count"] = len(hosts)
+        # Resolve the most likely stable identity: top user > top host > IP.
+        # IP-only is flagged unstable (DHCP reassigns it) so the analyst knows.
+        if users:
+            s["identity"] = {"label": users[0][0], "kind": "user", "stable": True}
+        elif hosts:
+            s["identity"] = {"label": hosts[0][0], "kind": "host", "stable": True}
+        else:
+            s["identity"] = {"label": ip, "kind": "ip", "stable": False,
+                             "note": "no user/host on these events — IP is a location, not an identity (DHCP)"}
         results.append(s)
     return results
 

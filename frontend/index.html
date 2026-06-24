@@ -2176,7 +2176,7 @@
 
         <div class="cg2">
           <div class="cbox">
-            <h3>Threat types</h3>
+            <h3>Top threats (real categories)</h3>
             <div class="cwrap"><canvas id="ch-threats"></canvas></div>
           </div>
           <div class="cbox">
@@ -2184,18 +2184,45 @@
             <div class="cwrap"><canvas id="ch-devtypes"></canvas></div>
           </div>
         </div>
-        <div class="card">
-          <div class="ch"><span class="ct">Hot IPs</span><span id="hot-count"
-              style="font-size:11px;color:var(--muted)"></span></div>
+
+        <!-- ── Entity spotlight: top sources with the people/machines behind them ── -->
+        <div class="card" style="margin-bottom:20px">
+          <div class="ch">
+            <span class="ct">Priority Entities</span>
+            <span style="font-size:11px;color:var(--muted)">Highest-pressure sources — resolved to who / what was on them</span>
+          </div>
+          <div class="cb">
+            <div class="entity-spot" id="entity-spot">
+              <div class="empty" style="padding:18px">Resolving entities…</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Source IPs & Identities: every IP, every user/host behind it ── -->
+        <div class="card" style="overflow-x:auto">
+          <div class="ch">
+            <span class="ct">Source IPs &amp; Identities</span>
+            <span id="hot-count" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <div class="cb" style="padding-bottom:0">
+            <input id="hot-filter" oninput="renderHotTable()" placeholder="Filter by IP, user or host…"
+              style="width:100%;max-width:340px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 11px;color:var(--text);font-size:12px;outline:none;margin-bottom:6px" />
+            <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
+              An IP is a <b>location</b>, not an identity. Under DHCP it gets reassigned — so each row shows the
+              actual users &amp; hosts seen on it. <span class="tev-warn">&#9888;</span> = no user/host, identity is the raw IP.
+            </div>
+          </div>
           <table class="tbl">
             <thead>
               <tr>
-                <th>IP</th>
+                <th>Source IP</th>
+                <th>Resolved identity</th>
+                <th>Users on IP</th>
+                <th>Hosts on IP</th>
                 <th>Events</th>
-                <th>First seen</th>
-                <th>Last seen</th>
                 <th>Top threat</th>
                 <th>Severity</th>
+                <th>Last seen</th>
                 <th></th>
               </tr>
             </thead>
@@ -2727,7 +2754,7 @@ tr:hover td{background:#161b22}</style></head>
     }
 
 
-    let charts = {}, curIP = '';
+    let charts = {}, curIP = '', HOT_IPS = [];
 
     function nav(name) {
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -2866,7 +2893,71 @@ tr:hover td{background:#161b22}</style></head>
       return Object.entries(severities).sort((a, b) => (rank[b[0]] || 0) - (rank[a[0]] || 0) || b[1] - a[1])[0] || ['low', 0];
     }
     function topThreat(threats = {}) {
-      return Object.entries(threats).sort((a, b) => b[1] - a[1])[0] || ['unknown', 0];
+      const real = Object.entries(threats).filter(([k]) => k && k !== 'unknown');
+      return (real.sort((a, b) => b[1] - a[1])[0]) || ['unknown', 0];
+    }
+    // Render the users/hosts seen on an IP as compact chips (top N + "+more").
+    function identChips(list = [], kind = 'user', max = 4) {
+      if (!list.length) return '<span class="ent-none">none</span>';
+      const shown = list.slice(0, max).map(x =>
+        `<span class="ent-chip ent-${kind}" title="${escapeHTML(x.name)} · ${Number(x.events || 0).toLocaleString()} events">${escapeHTML(x.name)}</span>`).join('');
+      const extra = list.length > max ? `<span class="ent-chip ent-more">+${list.length - max}</span>` : '';
+      return shown + extra;
+    }
+    // Rich entity card for the Overview spotlight.
+    function renderEntityCard(h) {
+      const [threatName] = topThreat(h.threat_types);
+      const [sev] = severityRank(h.severities);
+      const id = h.identity || { label: h.ip, kind: 'ip', stable: false };
+      const unstable = id.kind === 'ip';
+      const title = unstable
+        ? `${h.ip} <span class="tev-warn" title="${escapeHTML(id.note || 'IP only')}">&#9888;</span>`
+        : `${escapeHTML(id.label)} <span class="ent-kind">${id.kind}</span>`;
+      return `<div class="ent-card ent-sev-${sev}" onclick="goTrail('${h.ip}')">
+        <div class="ent-card-head">
+          <span class="ent-title">${title}</span>
+          <span class="badge ${sev}">${sev}</span>
+        </div>
+        <div class="ent-card-ip">${h.ip} · ${Number(h.total || 0).toLocaleString()} events · ${String(threatName).replace(/_/g, ' ')}</div>
+        <div class="ent-card-row"><span class="ent-lbl">Users</span><span class="ent-vals">${identChips(h.users, 'user', 3)}</span></div>
+        <div class="ent-card-row"><span class="ent-lbl">Hosts</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
+      </div>`;
+    }
+    // Filterable table of every source IP and the identities behind it.
+    function renderHotTable() {
+      const tb = document.getElementById('hot-tbody');
+      if (!tb) return;
+      const q = (document.getElementById('hot-filter')?.value || '').trim().toLowerCase();
+      const rows = HOT_IPS.filter(h => {
+        if (!q) return true;
+        if (h.ip.toLowerCase().includes(q)) return true;
+        if ((h.users || []).some(u => u.name.toLowerCase().includes(q))) return true;
+        if ((h.hosts || []).some(x => x.name.toLowerCase().includes(q))) return true;
+        return false;
+      });
+      if (!rows.length) { tb.innerHTML = '<tr><td colspan="9" class="empty" style="padding:18px">No matching IPs</td></tr>'; return; }
+      tb.innerHTML = rows.map(h => {
+        const [tt] = topThreat(h.threat_types);
+        const [sv] = severityRank(h.severities);
+        const id = h.identity || { label: h.ip, kind: 'ip', stable: false };
+        const ident = id.kind === 'ip'
+          ? `<span class="tev-warn" title="${escapeHTML(id.note || 'IP only — DHCP location')}">&#9888; IP only</span>`
+          : `${escapeHTML(id.label)} <span class="ent-kind">${id.kind}</span>`;
+        return `<tr onclick="goTrail('${h.ip}')" style="cursor:pointer">
+        <td style="color:var(--accent);font-weight:600;white-space:nowrap">${h.ip}</td>
+        <td>${ident}</td>
+        <td>${identChips(h.users, 'user', 3)}</td>
+        <td>${identChips(h.hosts, 'host', 3)}</td>
+        <td>${Number(h.total || 0).toLocaleString()}</td>
+        <td>${String(tt || '').replace(/_/g, ' ')}</td>
+        <td><span class="badge ${sv || 'low'}">${sv || 'low'}</span></td>
+        <td style="font-size:11px;color:var(--muted);white-space:nowrap">${(h.last_seen || '').substring(0, 19).replace('T', ' ')}</td>
+        <td style="white-space:nowrap">
+          <button class="btn" style="font-size:10px;padding:3px 8px;margin-right:3px" onclick="event.stopPropagation();goTrail('${h.ip}')">Trail</button>
+          <button class="btn ai" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();quickAI('${h.ip}')">AI</button>
+        </td>
+      </tr>`;
+      }).join('');
     }
     async function refreshAll() {
       try {
@@ -2930,38 +3021,39 @@ tr:hover td{background:#161b22}</style></head>
       document.getElementById('ai-status').innerHTML = aiReady
         ? '<span style="width:6px;height:6px;border-radius:50%;background:var(--ai);display:inline-block"></span> AI ready'
         : '<span style="width:6px;height:6px;border-radius:50%;background:var(--warn);display:inline-block"></span> AI key missing';
-      if (s.threat_counts && Object.keys(s.threat_counts).length) pie('ch-threats', s.threat_counts);
+      if (s.threat_counts && Object.keys(s.threat_counts).length) {
+        const top = Object.entries(s.threat_counts)
+          .filter(([k]) => k && k !== 'unknown')
+          .sort((a, b) => b[1] - a[1]).slice(0, 8);
+        bar('ch-threats', top.map(([k]) => k.replace(/_/g, ' ')), top.map(([, v]) => v), '#f0883e', true);
+      }
       if (s.alert_type_counts && Object.keys(s.alert_type_counts).length) pie('ch-devtypes', s.alert_type_counts);
       if (hot) {
-        document.getElementById('hot-count').textContent = hot.length + ' IPs';
+        HOT_IPS = hot;
+        document.getElementById('hot-count').textContent =
+          `${hot.length} IPs · ${hot.reduce((n, h) => n + (h.user_count || 0), 0)} users · ${hot.reduce((n, h) => n + (h.host_count || 0), 0)} hosts`;
+        // Response queue — now resolved to identity, not bare IP.
         document.getElementById('watchlist').innerHTML = hot.length
-          ? hot.slice(0, 5).map(h => {
+          ? hot.slice(0, 6).map(h => {
             const [threatName, threatCount] = topThreat(h.threat_types);
             const [sev] = severityRank(h.severities);
             const score = Math.min(99, Math.max(12, Math.round((Number(h.total || 0) * .18) + (sev === 'critical' ? 42 : sev === 'high' ? 28 : sev === 'medium' ? 16 : 9))));
+            const id = h.identity || { label: h.ip, kind: 'ip', stable: false };
+            const who = id.kind === 'ip'
+              ? `${h.ip} <span class="tev-warn" title="IP only — no user/host (DHCP location)">&#9888;</span>`
+              : `${escapeHTML(id.label)} <span class="ent-kind">${id.kind}</span>`;
             return `<div class="watch-item" onclick="goTrail('${h.ip}')">
-          <div class="watch-ip">${h.ip}</div>
-          <div class="watch-meta">${String(threatName).replace(/_/g, ' ')} · ${threatCount} signals · ${Number(h.total || 0).toLocaleString()} events</div>
+          <div class="watch-ip">${who}</div>
+          <div class="watch-meta">${h.ip} · ${String(threatName).replace(/_/g, ' ')} · ${Number(h.total || 0).toLocaleString()} events</div>
           <div class="watch-score ${sev}">${score}</div>
         </div>`;
           }).join('')
           : '<div class="empty" style="padding:18px">No hot IPs in the current index</div>';
-        document.getElementById('hot-tbody').innerHTML = hot.map(h => {
-          const tt = topThreat(h.threat_types);
-          const sv = severityRank(h.severities);
-          return `<tr onclick="goTrail('${h.ip}')" style="cursor:pointer">
-        <td style="color:var(--accent);font-weight:600">${h.ip}</td>
-        <td>${h.total}</td>
-        <td style="font-size:11px;color:var(--muted)">${(h.first_seen || '').substring(0, 19).replace('T', ' ')}</td>
-        <td style="font-size:11px;color:var(--muted)">${(h.last_seen || '').substring(0, 19).replace('T', ' ')}</td>
-        <td>${(tt[0] || '').replace(/_/g, ' ')}</td>
-        <td><span class="badge ${sv ? sv[0] : 'low'}">${sv ? sv[0] : 'low'}</span></td>
-        <td style="white-space:nowrap">
-          <button class="btn" style="font-size:10px;padding:3px 8px;margin-right:3px" onclick="event.stopPropagation();goTrail('${h.ip}')">Trail</button>
-          <button class="btn ai" style="font-size:10px;padding:3px 8px" onclick="event.stopPropagation();quickAI('${h.ip}')">AI</button>
-        </td>
-      </tr>`;
-        }).join('');
+        // Entity spotlight — top sources as rich cards showing who/what was on them.
+        document.getElementById('entity-spot').innerHTML = hot.length
+          ? hot.slice(0, 6).map(renderEntityCard).join('')
+          : '<div class="empty" style="padding:18px">No active entities</div>';
+        renderHotTable();
       }
       if (mlh) {
         document.getElementById('ml-status').innerHTML = mlh.model_ready

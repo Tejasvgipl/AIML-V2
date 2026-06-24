@@ -409,6 +409,31 @@ body { background:
 .tev-id { color: var(--muted); font-size: 11px; font-family: var(--mono); }
 .mitre-tag { background: rgba(188,140,255,.15); color: #bc8cff; font-size: 11px; padding: 1px 7px; border-radius: 5px; }
 
+/* ── Overview: entity spotlight + identity chips ───────────────────────── */
+.entity-spot { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.ent-card {
+  background: var(--bg3, var(--surface)); border: 1px solid var(--border); border-left: 3px solid var(--border);
+  border-radius: 9px; padding: 12px 13px; cursor: pointer; transition: border-color .15s, transform .1s;
+}
+.ent-card:hover { transform: translateY(-1px); border-color: var(--accent); }
+.ent-sev-critical { border-left-color: #f85149; }
+.ent-sev-high     { border-left-color: #f0883e; }
+.ent-sev-medium   { border-left-color: #d29922; }
+.ent-sev-low      { border-left-color: #3fb950; }
+.ent-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.ent-title { font-weight: 700; font-size: 14px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ent-card-ip { font-size: 11px; color: var(--muted); margin-bottom: 9px; }
+.ent-card-row { display: flex; align-items: baseline; gap: 8px; margin-top: 5px; }
+.ent-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); flex: 0 0 42px; }
+.ent-vals { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.ent-kind { font-size: 9px; text-transform: uppercase; color: var(--muted); background: var(--surface);
+  padding: 1px 5px; border-radius: 4px; margin-left: 4px; letter-spacing: .4px; }
+.ent-chip { font-size: 11px; padding: 1px 7px; border-radius: 5px; font-family: var(--mono); white-space: nowrap; }
+.ent-user { background: rgba(88,166,255,.15); color: #58a6ff; }
+.ent-host { background: rgba(63,185,80,.15); color: #3fb950; }
+.ent-more { background: var(--surface); color: var(--muted); }
+.ent-none { font-size: 11px; color: var(--muted); font-style: italic; }
+
 /* ── Login brand footer (logo + AI·ML tagline) ─────────────────────────── */
 .login-brandfoot {
   display: flex; align-items: center; gap: 13px; margin-top: 40px;
