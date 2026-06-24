@@ -497,9 +497,11 @@ def get_index_stats() -> dict:
 
 
 def get_recent_logs(minutes: int = 0, start: str = "", end: str = "",
-                    severities=None, min_level: int = 0, limit: int = 500) -> list[dict]:
-    """Recent raw logs with optional time-range / severity / level filters.
-    minutes>0 -> last N minutes; or start/end are datetime strings (UI datetime-local)."""
+                    severities=None, min_level: int = 0, limit: int = 500,
+                    q: str = "") -> list[dict]:
+    """Recent raw logs with optional time-range / severity / level / search filters.
+    minutes>0 -> last N minutes; or start/end are datetime strings (UI datetime-local).
+    q -> free-text search across country, src_ip, rule, threat, username, host."""
     where = []
     params: dict = {}
     if minutes and minutes > 0:
@@ -517,6 +519,17 @@ def get_recent_logs(minutes: int = 0, start: str = "", end: str = "",
     if min_level and min_level > 0:
         where.append("rule_level >= {lvl:UInt16}")
         params["lvl"] = int(min_level)
+    q = (q or "").strip()
+    if q:
+        # case-insensitive substring across the fields an analyst searches by.
+        where.append("(positionCaseInsensitive(country, {q:String}) > 0 "
+                     "OR positionCaseInsensitive(src_ip, {q:String}) > 0 "
+                     "OR positionCaseInsensitive(dst_ip, {q:String}) > 0 "
+                     "OR positionCaseInsensitive(rule, {q:String}) > 0 "
+                     "OR positionCaseInsensitive(threat_type, {q:String}) > 0 "
+                     "OR positionCaseInsensitive(username, {q:String}) > 0 "
+                     "OR positionCaseInsensitive(agent, {q:String}) > 0)")
+        params["q"] = q
     wc = (" WHERE " + " AND ".join(where)) if where else ""
     sql = (f"SELECT {_EVENT_COLS} FROM {LOGS_TABLE}{wc} "
            f"ORDER BY ts DESC LIMIT {int(min(limit, 5000))}")

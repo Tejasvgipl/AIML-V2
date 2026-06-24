@@ -2343,6 +2343,12 @@
             </select>
             <button class="btn pri" onclick="loadLogs()">↻ Refresh</button>
           </div>
+          <div class="logs-search">
+            <input id="logs-q" placeholder="Search country, IP, rule, threat, user, host…"
+              onkeydown="if(event.key==='Enter')loadLogs()" />
+            <button class="btn pri" onclick="loadLogs()">Search</button>
+            <button class="btn" onclick="document.getElementById('logs-q').value='';loadLogs()">Clear</button>
+          </div>
         </div>
         <div class="card" style="overflow-x:auto">
           <div class="logs-count" id="logs-count">—</div>
@@ -3494,13 +3500,16 @@ tr:hover td{background:#161b22}</style></head>
     }
     async function loadLogs() {
       const lvl = document.getElementById('logs-minlevel').value || 1;
+      const term = (document.getElementById('logs-q')?.value || '').trim();
       let q = `${API}/logs?limit=1000&min_level=${lvl}`;
       if (logsRange.mins) q += `&minutes=${logsRange.mins}`;
       if (logsRange.from) q += `&start=${encodeURIComponent(logsRange.from)}`;
       if (logsRange.to) q += `&end=${encodeURIComponent(logsRange.to)}`;
+      if (term) q += `&q=${encodeURIComponent(term)}`;
       const r = await get(q);
       if (!r) return;
-      document.getElementById('logs-count').textContent = `${r.count} log${r.count === 1 ? '' : 's'}`;
+      document.getElementById('logs-count').textContent =
+        `${r.count} log${r.count === 1 ? '' : 's'}` + (term ? ` matching "${term}"` : '');
       const rows = (r.logs || []).map(e => {
         const act = (e.action || '').toLowerCase();
         const blocked = ['deny','denied','drop','dropped','block','blocked','reject','rejected'].includes(act);

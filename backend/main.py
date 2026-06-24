@@ -2415,16 +2415,19 @@ PRIORITY JUSTIFICATION:"""
 
 @app.get("/api/logs")
 async def get_logs(minutes: int = 0, start: str = "", end: str = "",
-                   severity: str = "", min_level: int = 0, limit: int = 500):
+                   severity: str = "", min_level: int = 0, limit: int = 500,
+                   q: str = ""):
     if not (STORE_ENABLED and osc):
         return {"logs": [], "count": 0, "source": "disabled"}
-    # Default to last 7 days - uses partition pruning, avoids full table scan
-    if not minutes and not start and not end:
+    # Default to last 7 days - uses partition pruning, avoids full table scan.
+    # When the analyst is searching (q), don't force that default so the search
+    # spans whatever range they picked (e.g. "All time" = no time bound).
+    if not minutes and not start and not end and not q.strip():
         minutes = 10080  # 7 days
     sevs = [s.strip() for s in severity.split(",") if s.strip()] or None
     logs = await _to_thread(
         osc.get_recent_logs,
-        minutes, start, end, sevs, min_level, min(limit, 1000)
+        minutes, start, end, sevs, min_level, min(limit, 1000), q
     )
     return {"logs": logs, "count": len(logs), "source": "clickhouse"}
 
