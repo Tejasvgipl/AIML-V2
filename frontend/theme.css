@@ -439,6 +439,19 @@ body { background:
 .ent-nouser { font-size: 9px; text-transform: uppercase; letter-spacing: .4px; color: #d29922;
   background: rgba(210,153,34,.13); padding: 1px 6px; border-radius: 4px; margin-left: 5px; cursor: help; }
 
+/* ── Trail: identity-pivot filter chips + IPs-used chips ───────────────── */
+.flt-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); flex: 0 0 70px; }
+.flt-chips { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+.flt-chip { font-size: 11px; padding: 2px 9px; border-radius: 14px; cursor: pointer; user-select: none;
+  border: 1px solid var(--border); color: var(--muted); background: var(--surface); white-space: nowrap; transition: all .12s; }
+.flt-chip:hover { color: var(--text); border-color: var(--accent); }
+.flt-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.flt-chip b { font-weight: 700; opacity: .8; }
+.ip-chip { font-size: 12px; font-family: var(--mono); padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  background: rgba(88,166,255,.12); color: #58a6ff; border: 1px solid rgba(88,166,255,.25); white-space: nowrap; }
+.ip-chip:hover { background: rgba(88,166,255,.22); }
+.ip-chip b { color: var(--text); }
+
 /* ── Login brand footer (logo + AI·ML tagline) ─────────────────────────── */
 .login-brandfoot {
   display: flex; align-items: center; gap: 13px; margin-top: 40px;

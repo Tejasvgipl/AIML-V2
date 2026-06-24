@@ -232,6 +232,45 @@ def get_ip_events_desc(ip: str, limit: int = 100, days: int = 0) -> list[dict]:
     return _shape_events(_q(sql, {"ip": ip, "days": days}))
 
 
+# Trail by a stable identity, not just IP. username/host are far more defensible
+# than src_ip (which is a DHCP location). Whitelisted columns only (no injection).
+_TRAIL_COLS = {"ip": "src_ip", "username": "username", "host": "agent"}
+
+
+def get_entity_events_desc(field: str, value: str, limit: int = 200) -> list[dict]:
+    """Events for an entity (ip | username | host), newest-first, for the trail."""
+    col = _TRAIL_COLS.get(field, "src_ip")
+    sql = (f"SELECT {_EVENT_COLS} FROM {LOGS_TABLE} WHERE {col} = {{v:String}} "
+           f"ORDER BY ts DESC LIMIT {int(min(limit, 100000))}")
+    return _shape_events(_q(sql, {"v": value}))
+
+
+def get_entity_summary(field: str, value: str) -> dict:
+    """count + first/last + threat/severity/log-source/IP breakdown for an entity."""
+    col = _TRAIL_COLS.get(field, "src_ip")
+    base = f"FROM {LOGS_TABLE} WHERE {col} = {{v:String}}"
+    p = {"v": value}
+    total = _q(f"SELECT count() c {base}", p)
+    if not total or not int(total[0]["c"]):
+        return {"found": False}
+    fl = _q(f"SELECT min(ts) f, max(ts) l {base}", p)
+    threats = _q(f"SELECT threat_type t, count() c {base} GROUP BY t ORDER BY c DESC LIMIT 50", p)
+    sevs = _q(f"SELECT severity s, count() c {base} GROUP BY s", p)
+    # distinct source IPs the identity used (the whole point of identity-based trailing)
+    ips = _q(f"SELECT src_ip i, count() c {base} AND src_ip != '' GROUP BY i ORDER BY c DESC LIMIT 50", p)
+    users = _q(f"SELECT username u, count() c {base} AND username != '' GROUP BY u ORDER BY c DESC LIMIT 50", p)
+    return {
+        "found": True,
+        "total": int(total[0]["c"]),
+        "first_seen": _iso(fl[0]["f"]) if fl else None,
+        "last_seen": _iso(fl[0]["l"]) if fl else None,
+        "threat_types": {r["t"]: int(r["c"]) for r in threats},
+        "severities": {r["s"]: int(r["c"]) for r in sevs},
+        "src_ips": [{"ip": r["i"], "events": int(r["c"])} for r in ips],
+        "users": [{"name": r["u"], "events": int(r["c"])} for r in users],
+    }
+
+
 def get_ip_total_count(ip: str) -> int:
     rows = _q(f"SELECT count() AS c FROM {LOGS_TABLE} WHERE src_ip = {{ip:String}}",
               {"ip": ip})

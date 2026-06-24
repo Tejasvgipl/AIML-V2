@@ -2235,7 +2235,14 @@
       <div id="page-trail" class="page">
         <div class="card" style="margin-bottom:16px">
           <div class="cb" style="display:flex;gap:10px">
+            <select id="trail-mode" onchange="onTrailModeChange()"
+              style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;outline:none">
+              <option value="ip">Trail by IP</option>
+              <option value="username">Trail by Username</option>
+              <option value="host">Trail by Host</option>
+            </select>
             <input id="trail-input" placeholder="Enter IP (e.g. 85.11.187.36)"
+              onkeydown="if(event.key==='Enter')loadTrail()"
               style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:13px;outline:none" />
             <button class="btn pri" onclick="loadTrail()">Load trail</button>
             <button class="btn" onclick="loadIntel()">+ Intel</button>
@@ -2287,8 +2294,26 @@
                 style="font-size:11px;color:var(--danger)"></span></div>
             <div class="cb" id="bsl-body" style="font-size:12px;color:var(--muted);line-height:1.9"></div>
           </div>
+          <div id="trail-ips-panel" style="display:none" class="card">
+            <div class="ch"><span class="ct">Source IPs used by this identity</span>
+              <span id="trail-ips-note" style="font-size:11px;color:var(--muted)"></span></div>
+            <div class="cb" id="trail-ips-body" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          </div>
           <div class="card">
-            <div class="ch"><span class="ct">Event trail — chronological</span></div>
+            <div class="ch" style="flex-wrap:wrap;gap:10px">
+              <span class="ct">Event trail — chronological</span>
+              <span id="trail-shown" style="font-size:11px;color:var(--muted)"></span>
+            </div>
+            <div class="cb" id="trail-filters" style="display:none;flex-direction:column;gap:8px;border-bottom:1px solid var(--border)">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span class="flt-lbl">Log source</span>
+                <span id="flt-source" class="flt-chips"></span>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                <span class="flt-lbl">User</span>
+                <span id="flt-user" class="flt-chips"></span>
+              </div>
+            </div>
             <div class="tlist" id="trail-events"></div>
           </div>
         </div>
@@ -2757,6 +2782,7 @@ tr:hover td{background:#161b22}</style></head>
 
 
     let charts = {}, curIP = '', HOT_IPS = [];
+    let TRAIL_EVENTS = [], trailFilter = { source: '', user: '' };
 
     function nav(name) {
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -3073,52 +3099,115 @@ tr:hover td{background:#161b22}</style></head>
       } catch(e) { console.error('refreshAll error:', e); }
     }
     function doSearch() { const q = document.getElementById('ip-search').value.trim(); if (!q) return; goTrail(q); }
-    function goTrail(ip) { nav('trail'); document.getElementById('trail-input').value = ip; loadTrail(); }
+    function goTrail(ip) { nav('trail'); document.getElementById('trail-mode').value = 'ip'; onTrailModeChange(); document.getElementById('trail-input').value = ip; loadTrail(); }
     async function quickAI(ip) {
       nav('aiinvestigate');
       document.getElementById('ai-ip-input').value = ip;
       await aiFullInvestigate();
     }
+    const TRAIL_PLACEHOLDER = { ip: 'Enter IP (e.g. 85.11.187.36)', username: 'Enter username (e.g. jdoe)', host: 'Enter host (e.g. BANK-WS-19)' };
+    function onTrailModeChange() {
+      const m = document.getElementById('trail-mode').value;
+      document.getElementById('trail-input').placeholder = TRAIL_PLACEHOLDER[m] || TRAIL_PLACEHOLDER.ip;
+    }
     async function loadTrail() {
-      const ip = document.getElementById('trail-input').value.trim(); if (!ip) return;
-      curIP = ip;
-      const [sum, trail] = await Promise.all([get(`${API}/trail/${ip}/summary`), get(`${API}/trail/${ip}?limit=200`)]);
-      if (!sum || !sum.found) { toast('No events for ' + ip, 'warn'); return; }
+      const mode = document.getElementById('trail-mode').value || 'ip';
+      const value = document.getElementById('trail-input').value.trim(); if (!value) return;
+      const sum = await get(`${API}/entity-trail?field=${mode}&value=${encodeURIComponent(value)}&limit=200`);
+      if (!sum || !sum.found) { toast('No events for ' + value, 'warn'); return; }
+      // IP-specific actions (kill chain / baseline / AI) need an IP — in entity
+      // mode anchor them to the most-active source IP this identity used.
+      curIP = mode === 'ip' ? value : (sum.src_ips && sum.src_ips[0] ? sum.src_ips[0].ip : value);
       document.getElementById('trail-panel').style.display = 'block';
-      document.getElementById('t-ip').textContent = ip;
+      const kindTag = mode === 'ip' ? '' : ` <span class="ent-kind ent-kind-${mode === 'host' ? 'host' : 'user'}">${mode}</span>`;
+      document.getElementById('t-ip').innerHTML = escapeHTML(value) + kindTag;
       document.getElementById('t-total').textContent = sum.total;
       document.getElementById('t-first').textContent = (sum.first_seen || '').substring(0, 19).replace('T', ' ');
       document.getElementById('t-last').textContent = (sum.last_seen || '').substring(0, 19).replace('T', ' ');
       const ttEntries = Object.entries(sum.threat_types || {}).filter(([k]) => k && k !== 'unknown').sort((a, b) => b[1] - a[1]);
-      const tt = ttEntries[0] || ['—', 0];
-      document.getElementById('t-threat').textContent = (tt[0] || '—').replace(/_/g, ' ');
+      document.getElementById('t-threat').textContent = ((ttEntries[0] || ['—'])[0] || '—').replace(/_/g, ' ');
       const sv = sum.severities ? Object.entries(sum.severities).sort((a, b) => b[1] - a[1])[0] : ['low', 0];
       const b = document.getElementById('t-sev-badge');
       b.className = 'badge ' + (sv ? sv[0] : 'low'); b.textContent = sv ? sv[0] : 'low';
-
       document.getElementById('t-badges').innerHTML = Object.entries(sum.threat_types || {}).map(([k, v]) => `<span class="badge medium" style="margin-bottom:4px">${k.replace(/_/g, ' ')}: ${v}</span>`).join('');
       document.getElementById('ai-trail-panel').style.display = 'none';
-      if (trail && trail.events) {
-        document.getElementById('trail-events').innerHTML = trail.events.length ? trail.events.map(e => {
-          const sc = e.severity || 'low';
-          const act = (e.action || '').toLowerCase();
-          const blocked = ['deny','denied','drop','dropped','block','blocked','reject','rejected'].includes(act);
-          const allowed = ['allow','allowed','accept','accepted','permit','permitted','pass'].includes(act);
-          const actHtml = blocked ? '<span class="badge critical">BLOCKED</span>'
-                        : allowed ? '<span class="badge low">ALLOWED</span>' : '';
-          const ent = e.entity || {};
-          const ident = ent.label
-            ? `${ent.label} <span class="tev-etype">${ent.type || ''}</span>` +
-              (ent.stable === false ? ` <span class="tev-warn" title="${(ent.note||'').replace(/"/g,'&quot;')}">&#9888; IP not stable identity</span>` : '')
-            : (e.src_ip || '—');
-          const k = (label, val) => val ? `<div class="tev-row"><span class="tev-k">${label}</span><span class="tev-v">${val}</span></div>` : '';
-          return `<div class="tev tev-${blocked?'block':allowed?'allow':'obs'}">
+
+      // "IPs used by this identity" — the payoff of identity-based trailing.
+      const ipsPanel = document.getElementById('trail-ips-panel');
+      if (mode !== 'ip' && (sum.src_ips || []).length) {
+        document.getElementById('trail-ips-note').textContent = `${sum.src_ips.length} distinct IP${sum.src_ips.length === 1 ? '' : 's'}`;
+        document.getElementById('trail-ips-body').innerHTML = sum.src_ips.map(x =>
+          `<span class="ip-chip" onclick="goTrail('${x.ip}')" title="Trail this IP">${x.ip} <b>${Number(x.events).toLocaleString()}</b></span>`).join('');
+        ipsPanel.style.display = 'block';
+      } else { ipsPanel.style.display = 'none'; }
+
+      TRAIL_EVENTS = sum.events || [];
+      trailFilter = { source: '', user: '' };
+      buildTrailFilters();
+      renderTrailEvents();
+    }
+    // Build the log-source + user filter chips from the loaded events.
+    function buildTrailFilters() {
+      const srcCount = {}, userCount = {};
+      TRAIL_EVENTS.forEach(e => {
+        const s = e.log_source || 'endpoint'; srcCount[s] = (srcCount[s] || 0) + 1;
+        const u = (e.username || '').trim() || '∅ no user'; userCount[u] = (userCount[u] || 0) + 1;
+      });
+      const chip = (kind, key, label, n, active) =>
+        `<span class="flt-chip ${active ? 'on' : ''}" onclick="setTrailFilter('${kind}','${String(key).replace(/'/g, "\\'")}')">${label} <b>${n}</b></span>`;
+      const srcEl = document.getElementById('flt-source');
+      const usrEl = document.getElementById('flt-user');
+      const srcKeys = Object.keys(srcCount).sort((a, b) => srcCount[b] - srcCount[a]);
+      const usrKeys = Object.keys(userCount).sort((a, b) => userCount[b] - userCount[a]);
+      srcEl.innerHTML = chip('source', '', 'All', TRAIL_EVENTS.length, !trailFilter.source)
+        + srcKeys.map(s => chip('source', s, s, srcCount[s], trailFilter.source === s)).join('');
+      // only show the user filter row when there's more than one user bucket
+      const userRow = usrEl.parentElement;
+      if (usrKeys.length > 1) {
+        userRow.style.display = 'flex';
+        usrEl.innerHTML = chip('user', '', 'All', TRAIL_EVENTS.length, !trailFilter.user)
+          + usrKeys.map(u => chip('user', u, u, userCount[u], trailFilter.user === u)).join('');
+      } else { userRow.style.display = 'none'; }
+      document.getElementById('trail-filters').style.display = TRAIL_EVENTS.length ? 'flex' : 'none';
+    }
+    function setTrailFilter(kind, key) {
+      trailFilter[kind] = (trailFilter[kind] === key) ? '' : key;
+      buildTrailFilters();
+      renderTrailEvents();
+    }
+    function renderTrailEvents() {
+      const evs = TRAIL_EVENTS.filter(e => {
+        if (trailFilter.source && (e.log_source || 'endpoint') !== trailFilter.source) return false;
+        if (trailFilter.user) {
+          const u = (e.username || '').trim() || '∅ no user';
+          if (u !== trailFilter.user) return false;
+        }
+        return true;
+      });
+      document.getElementById('trail-shown').textContent =
+        `${evs.length} of ${TRAIL_EVENTS.length} events` + (trailFilter.source || trailFilter.user ? ' (filtered)' : '');
+      document.getElementById('trail-events').innerHTML = evs.length ? evs.map(trailEventCard).join('') : '<div class="empty">No events match the filter</div>';
+    }
+    function trailEventCard(e) {
+      const sc = e.severity || 'low';
+      const act = (e.action || '').toLowerCase();
+      const blocked = ['deny', 'denied', 'drop', 'dropped', 'block', 'blocked', 'reject', 'rejected'].includes(act);
+      const allowed = ['allow', 'allowed', 'accept', 'accepted', 'permit', 'permitted', 'pass'].includes(act);
+      const actHtml = blocked ? '<span class="badge critical">BLOCKED</span>'
+                    : allowed ? '<span class="badge low">ALLOWED</span>' : '';
+      const ent = e.entity || {};
+      const ident = ent.label
+        ? `${escapeHTML(ent.label)} <span class="tev-etype">${ent.type || ''}</span>` +
+          (ent.stable === false ? ` <span class="tev-warn" title="${(ent.note || '').replace(/"/g, '&quot;')}">&#9888; IP not stable identity</span>` : '')
+        : (e.src_ip || '—');
+      const k = (label, val) => val ? `<div class="tev-row"><span class="tev-k">${label}</span><span class="tev-v">${val}</span></div>` : '';
+      return `<div class="tev tev-${blocked ? 'block' : allowed ? 'allow' : 'obs'}">
         <div class="tev-head">
           <span class="tts">${(e.ts || e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}</span>
           <span class="badge ${sc}">${sc}</span>
           <span class="src-badge src-${e.log_source || 'endpoint'}">${e.log_source || 'endpoint'}</span>
           ${actHtml}
-          <span class="tev-threat">${e.threat_label || (e.threat_type||'').replace(/_/g,' ')}</span>
+          <span class="tev-threat">${e.threat_label || (e.threat_type || '').replace(/_/g, ' ')}</span>
         </div>
         <div class="tev-body">
           ${k('Identity', ident)}
@@ -3129,8 +3218,6 @@ tr:hover td{background:#161b22}</style></head>
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
         </div>
       </div>`;
-        }).join('') : '<div class="empty">No events</div>';
-      }
     }
     async function aiExplainIP() {
       if (!curIP) return;

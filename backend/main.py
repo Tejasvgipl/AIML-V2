@@ -764,6 +764,29 @@ async def get_trail(ip: str, limit: int = 100):
     return {"ip": ip, "events": events, "stats": {}, "total": len(events), "source": "cache"}
 
 
+@app.get("/api/entity-trail")
+async def entity_trail(field: str = "ip", value: str = "", limit: int = 200):
+    """Trail an entity by ip | username | host. Username/host are stable identities
+    (defensible attribution); IP is a DHCP location. Returns events + a summary that
+    includes which source IPs the identity used."""
+    value = (value or "").strip()
+    if not value:
+        return {"found": False}
+    if field not in ("ip", "username", "host"):
+        field = "ip"
+    if not (STORE_ENABLED and osc):
+        return {"found": False}
+    events, summary = await asyncio.gather(
+        _to_thread(osc.get_entity_events_desc, field, value, limit),
+        _to_thread(osc.get_entity_summary, field, value),
+    )
+    if not summary.get("found"):
+        return {"found": False, "field": field, "value": value}
+    summary.update({"found": True, "field": field, "value": value,
+                    "events": events, "source": "clickhouse"})
+    return summary
+
+
 @app.get("/api/trail/{ip}/summary")
 async def trail_summary(ip: str):
     """IP summary: threat types, severities, first/last seen."""
