@@ -6,27 +6,32 @@
 
 /* ── Design tokens ─────────────────────────────────────────────────────── */
 :root {
-  --bg:        #070a12;
-  --bg-soft:   #0b1120;
-  --panel:     rgba(17, 24, 39, 0.72);
-  --panel-2:   rgba(23, 32, 50, 0.55);
-  --surface:   #0e1626;
-  --border:    rgba(148, 163, 184, 0.14);
-  --line:      rgba(148, 163, 184, 0.14);
-  --text:      #e9eef7;
-  --muted:     #8b9bb4;
-  --faint:     #5b6b86;
+  /* ── Neon-on-violet palette (CyberShield-inspired) ───────────────────────
+     Deep violet canvas, neon cyan/green/magenta accents, glow on hero bits.
+     Text stays high-contrast for real triage readability. */
+  --bg:        #0a0015;
+  --bg-soft:   #12031f;
+  --panel:     rgba(26, 10, 46, 0.72);
+  --panel-2:   rgba(42, 26, 74, 0.5);
+  --surface:   #1a0a2e;
+  --border:    rgba(150, 110, 220, 0.18);
+  --line:      rgba(150, 110, 220, 0.18);
+  --text:      #f1ebff;
+  --muted:     #b0a8d0;
+  --faint:     #7a6ca0;
 
-  --accent:    #6d5efc;
-  --accent-2:  #22d3ee;
-  --grad:      linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
-  --grad-soft: linear-gradient(135deg, rgba(109,94,252,.18), rgba(34,211,238,.12));
+  --accent:    #00e5ff;          /* neon cyan — primary */
+  --accent-2:  #00ff9d;          /* neon spring green — secondary */
+  --neon-mag:  #ff3df0;          /* neon magenta — tertiary/AI */
+  --grad:      linear-gradient(135deg, #00e5ff 0%, #ff3df0 100%);
+  --grad-soft: linear-gradient(135deg, rgba(0,229,255,.16), rgba(255,61,240,.12));
 
-  --danger:    #ff5468;
+  --danger:    #ff1f5a;
   --warn:      #ffb020;
-  --ok:        #2dd4a7;
-  --purple:    #a78bfa;
-  --ai:        #ff6a3d;
+  --ok:        #00ff9d;
+  --purple:    #b388ff;
+  --ai:        #ff3df0;
+  --glow:      0 0 30px;          /* reusable neon glow radius */
 
   --radius:    14px;
   --radius-sm: 10px;
@@ -48,8 +53,9 @@
 html, body {
   height: 100%;
   background:
-    radial-gradient(1100px 700px at 78% -8%, rgba(109,94,252,.16), transparent 60%),
-    radial-gradient(900px 620px at -6% 8%, rgba(34,211,238,.10), transparent 55%),
+    radial-gradient(1100px 700px at 80% -10%, rgba(255,61,240,.14), transparent 60%),
+    radial-gradient(950px 640px at -6% 6%, rgba(0,229,255,.12), transparent 55%),
+    radial-gradient(800px 800px at 50% 120%, rgba(0,255,157,.06), transparent 60%),
     var(--bg) !important;
   color: var(--text);
   font-family: var(--sans) !important;
@@ -337,10 +343,11 @@ code, .mono, .ip { font-family: var(--mono); }
    FORCE the new look over enhance.css (loaded last + !important on key props)
    ============================================================================ */
 body { background:
-    radial-gradient(1100px 700px at 78% -8%, rgba(109,94,252,.16), transparent 60%),
-    radial-gradient(900px 620px at -6% 8%, rgba(34,211,238,.10), transparent 55%),
-    #070a12 !important; color: var(--text) !important; font-family: var(--sans) !important; }
-.sidebar { background: linear-gradient(180deg, rgba(13,19,33,.94), rgba(8,12,21,.94)) !important; border-right: 1px solid var(--border) !important; }
+    radial-gradient(1100px 700px at 80% -10%, rgba(255,61,240,.14), transparent 60%),
+    radial-gradient(950px 640px at -6% 6%, rgba(0,229,255,.12), transparent 55%),
+    radial-gradient(800px 800px at 50% 120%, rgba(0,255,157,.06), transparent 60%),
+    #0a0015 !important; color: var(--text) !important; font-family: var(--sans) !important; }
+.sidebar { background: linear-gradient(180deg, rgba(26,10,46,.96), rgba(10,0,21,.96)) !important; border-right: 1px solid var(--border) !important; }
 .main { background: transparent !important; }
 .topbar { background: linear-gradient(180deg, rgba(7,10,18,.96) 60%, rgba(7,10,18,0)) !important; border: none !important; }
 .topbar h1 { color: var(--text) !important; }
@@ -722,10 +729,13 @@ body { letter-spacing: 0 !important; }   /* Geist is balanced; drop the +trackin
 /* 6 — Grids: consistent, generous gutters everywhere ------------------------ */
 .situation-board, .entity-spot, .dev-sevbar { gap: var(--s4) !important; }
 
-/* 7 — Restrained signature glow on hero elements ONLY (the CyberShield trick) */
-.ops-hero { box-shadow: 0 1px 2px rgba(0,0,0,.2), 0 24px 60px -34px rgba(109,94,252,.5) !important; }
-.threat-dial { box-shadow: 0 0 0 1px var(--border), 0 24px 60px -36px rgba(34,211,238,.45) !important; }
-.btn.pri, .btn.primary { box-shadow: 0 8px 24px -12px rgba(109,94,252,.7) !important; }
+/* 7 — Neon signature glow on hero elements (the CyberShield trick) ---------- */
+.ops-hero { box-shadow: 0 1px 2px rgba(0,0,0,.3), 0 24px 70px -32px rgba(255,61,240,.4), inset 0 0 0 1px rgba(0,229,255,.08) !important; }
+.threat-dial { box-shadow: 0 0 0 1px rgba(0,229,255,.2), 0 24px 60px -30px rgba(0,229,255,.4) !important; }
+.btn.pri, .btn.primary { box-shadow: 0 0 22px -4px rgba(0,229,255,.55) !important; }
+.btn.pri:hover, .btn.primary:hover { box-shadow: 0 0 26px -2px rgba(0,229,255,.75) !important; }
+/* Neon hover lift on every card — alive but not noisy */
+.page .card:hover { border-color: rgba(0,229,255,.28) !important; }
 
 /* 8 — Tables: airier rows, sticky calm headers ------------------------------ */
 table { border-collapse: separate !important; border-spacing: 0; width: 100%; }
