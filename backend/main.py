@@ -23,6 +23,10 @@ try:
     import incidents as inc            # alert -> incident correlation + narrative
 except Exception:
     inc = None  # type: ignore
+try:
+    import playbooks as pb             # response playbook definitions + matching
+except Exception:
+    pb = None  # type: ignore
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -82,6 +86,14 @@ async def _start_background_refresh():
     # isn't hammered. Defaults are gentle; lower them on a lightly-loaded box.
     _fast_every = int(os.getenv("WARM_FAST_SECONDS", "60"))
     _inc_every = int(os.getenv("WARM_INCIDENTS_SECONDS", "180"))
+
+    # Create SOAR/case/tag tables on existing volumes (init SQL only runs on a
+    # fresh volume). Idempotent — safe on every startup.
+    if osc and getattr(osc, "CLICKHOUSE_ENABLED", False):
+        try:
+            await _to_thread(osc.ensure_runtime_tables)
+        except Exception as e:
+            logger.warning(f"ensure_runtime_tables: {e}")
 
     async def _refresh_fast():
         """Stats, hot-ips, resilience - lightweight."""
@@ -2492,6 +2504,218 @@ PRIORITY JUSTIFICATION:"""
         "model": AI_FAST_MODEL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# -- Response playbooks (SOAR) -------------------------------------------------
+# The standout: every run is AI-suggested + blast-radius-previewed + human-
+# approved + fully logged to the playbook_runs ledger. Actions that mutate the
+# world (block_ip, disable_user) carry requires_approval and only fire when the
+# analyst explicitly approves. Everything runs deterministically without the LLM;
+# the AI is an optional narrator over the deterministic suggestion.
+
+async def _find_incident(incident_id: str) -> Optional[dict]:
+    """Resolve an incident by its id (host:IP or campaign:subnet). Falls back to
+    building a one-IP incident from a raw IP so the engine works on any pivot."""
+    incidents = await _gather_incidents()
+    found = next((i for i in incidents if i.get("id") == incident_id), None)
+    if found:
+        return found
+    # Accept a bare IP or host:IP and synthesise an incident on demand.
+    ip = incident_id.split(":", 1)[1] if ":" in incident_id else incident_id
+    if inc and STORE_ENABLED:
+        sig = await _signal_for_ip(ip, 0, {})
+        if sig:
+            built = inc.correlate([sig])
+            if built:
+                return built[0]
+    return None
+
+
+def _primary_entity(incident: dict) -> tuple[str, str]:
+    """(ip, user) the playbook acts on."""
+    ips = incident.get("entities", {}).get("ips", [])
+    users = incident.get("entities", {}).get("users", [])
+    return (ips[0] if ips else ""), (users[0] if users else "")
+
+
+async def _run_action(action: str, params: dict, ip: str, user: str,
+                      incident: dict, approve: bool) -> dict:
+    """Execute one playbook action. Returns a ledger step result."""
+    meta = pb.ACTIONS.get(action, {}) if pb else {}
+    mutates = bool(meta.get("mutates"))
+    label = meta.get("label", action)
+    step = {"action": action, "label": label, "mutates": mutates,
+            "status": "done", "output": "",
+            "ts": datetime.now(timezone.utc).isoformat()}
+
+    # World-changing actions require explicit approval.
+    if mutates and not approve:
+        step["status"] = "requires_approval"
+        step["output"] = "Awaiting analyst approval — not executed."
+        return step
+    try:
+        if action == "enrich_reputation":
+            feat = await _to_thread(osc.get_ip_reputation_features, ip) if (osc and ip) else {}
+            rep = _score_ip_reputation(feat or {})
+            step["output"] = rep.get("summary", "No data")
+            step["data"] = {k: rep.get(k) for k in ("score", "verdict", "factors")}
+        elif action == "enrich_abuseipdb":
+            if not _abuseipdb_configured():
+                step["status"] = "skipped"
+                step["output"] = "AbuseIPDB not configured (optional)."
+            else:
+                intel = await get_intel(ip)
+                a = (intel or {}).get("abuseipdb")
+                step["output"] = (f"AbuseIPDB {a['score']}/100, {a['reports']} reports, {a['isp']}"
+                                  if a else f"AbuseIPDB: {(intel or {}).get('abuseipdb_status')}")
+        elif action == "tag_entity":
+            tag = params.get("tag", "flagged")
+            ok = await _to_thread(osc.tag_entity, ip or user, tag, "playbook") if osc else False
+            step["output"] = f"Tagged {ip or user} as '{tag}'." if ok else "Tag store unavailable."
+        elif action == "open_case":
+            import uuid
+            title = params.get("title", "Incident {ip}").format(ip=ip or "?", user=user or "?")
+            case = {"case_id": "CASE-" + uuid.uuid4().hex[:8].upper(), "title": title,
+                    "incident_id": incident.get("id", ""), "entity": ip or user,
+                    "severity": incident.get("severity", "medium"),
+                    "status": "open", "created_by": "playbook"}
+            ok = await _to_thread(osc.insert_case, case) if osc else False
+            step["output"] = f"Opened {case['case_id']}: {title}" if ok else "Case store unavailable."
+            step["data"] = {"case_id": case["case_id"]}
+        elif action == "notify":
+            ch = params.get("channel", "soc")
+            url = os.getenv("SOC_WEBHOOK_URL", "")
+            msg = f"[CyberSentinel] {incident.get('severity','?').upper()} incident {incident.get('id','')} — {ip or user}"
+            if url:
+                try:
+                    async with httpx.AsyncClient(timeout=4) as c:
+                        await c.post(url, json={"text": msg})
+                    step["output"] = f"Notified #{ch} via webhook."
+                except Exception as e:
+                    step["status"] = "failed"; step["output"] = f"Webhook failed: {e}"
+            else:
+                step["output"] = f"Notify #{ch}: {msg} (no SOC_WEBHOOK_URL set — logged only)."
+        elif action == "block_ip":
+            ok = await _to_thread(osc.block_ip, ip, "playbook") if (osc and ip) else False
+            step["output"] = (f"Blocked {ip} (added to blocklist)." if ok
+                              else "Block store unavailable.")
+        elif action == "disable_user":
+            # No directory integration — record the intent in the ledger as an
+            # auditable stub so the action is honest about what it did.
+            step["output"] = (f"INTENT: disable account '{user}'. No directory "
+                              f"integration configured — recorded for manual action.")
+        else:
+            step["status"] = "skipped"; step["output"] = "Unknown action."
+    except Exception as e:
+        step["status"] = "failed"; step["output"] = f"Error: {e}"
+    return step
+
+
+@app.get("/api/playbooks")
+async def list_playbooks():
+    """All playbook definitions (the catalogue)."""
+    if not pb:
+        return {"playbooks": []}
+    return {"playbooks": [{k: p[k] for k in ("id", "name", "description", "severity", "steps")}
+                          for p in pb.PLAYBOOKS]}
+
+
+@app.get("/api/playbooks/suggest")
+async def suggest_playbooks(incident_id: str, ai: bool = False):
+    """Match playbooks to an incident + compute blast radius. The pre-approval
+    view: what we'd do, why, and what it would touch."""
+    if not pb:
+        raise HTTPException(503, "Playbook engine unavailable")
+    incident = await _find_incident(incident_id)
+    if not incident:
+        raise HTTPException(404, "No incident for that id")
+    ip, user = _primary_entity(incident)
+    matches = pb.match_playbooks(incident)
+    blast = await _to_thread(osc.get_blast_radius, incident.get("entities", {}).get("ips", [])) \
+        if (osc and STORE_ENABLED) else {}
+
+    suggestions = []
+    for m in matches:
+        p = m["playbook"]
+        suggestions.append({
+            "playbook_id": p["id"], "name": p["name"], "description": p["description"],
+            "severity": p["severity"], "reasons": m["reasons"],
+            "steps": [{"action": s["action"],
+                       "label": pb.ACTIONS.get(s["action"], {}).get("label", s["action"]),
+                       "mutates": pb.ACTIONS.get(s["action"], {}).get("mutates", False),
+                       "requires_approval": s.get("requires_approval", False)}
+                      for s in p["steps"]],
+        })
+
+    result = {
+        "incident_id": incident_id, "entity": {"ip": ip, "user": user},
+        "blast_radius": blast, "suggestions": suggestions,
+        "summary": "", "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Plain-English deterministic summary (always); AI narration only if asked.
+    if suggestions:
+        top = suggestions[0]
+        det = (f"Recommended response: {top['name']}. Matched because "
+               f"{', '.join(top['reasons'][:2])}. This entity touched {blast.get('hosts',0)} host(s), "
+               f"{blast.get('users',0)} user(s) and {blast.get('dst_ips',0)} destination(s) "
+               f"across {blast.get('events',0)} events. Mutating steps need your approval.")
+        result["summary"] = det
+        if ai and AI_API_KEY:
+            prompt = (f"You are a SOC lead. In 2-3 plain sentences, tell the analyst what to do and why. "
+                      f"Incident {incident.get('id')}, severity {incident.get('severity')}. "
+                      f"Recommended playbook: {top['name']} because {', '.join(top['reasons'])}. "
+                      f"Blast radius: {json.dumps(blast)}. Do not invent facts.")
+            result["ai_summary"] = await ask_groq(prompt, max_tokens=180, model=AI_FAST_MODEL)
+    else:
+        result["summary"] = "No predefined playbook matched this incident. Investigate manually."
+    return result
+
+
+@app.post("/api/playbooks/run")
+async def run_playbook(payload: dict):
+    """Execute a playbook against an incident. Mutating steps run only when
+    approve=true. Every run is written to the ledger (playbook_runs)."""
+    if not pb:
+        raise HTTPException(503, "Playbook engine unavailable")
+    playbook_id = payload.get("playbook_id", "")
+    incident_id = payload.get("incident_id", "")
+    approve = bool(payload.get("approve", False))
+    approved_by = (payload.get("approved_by") or "analyst").strip()
+    p = pb.PLAYBOOK_BY_ID.get(playbook_id)
+    if not p:
+        raise HTTPException(404, "Unknown playbook")
+    incident = await _find_incident(incident_id)
+    if not incident:
+        raise HTTPException(404, "No incident for that id")
+    ip, user = _primary_entity(incident)
+    blast = await _to_thread(osc.get_blast_radius, incident.get("entities", {}).get("ips", [])) \
+        if (osc and STORE_ENABLED) else {}
+
+    steps = []
+    for s in p["steps"]:
+        steps.append(await _run_action(s["action"], s.get("params", {}), ip, user, incident, approve))
+
+    any_pending = any(st["status"] == "requires_approval" for st in steps)
+    status = "approved" if approve else ("suggested" if any_pending else "done")
+    if all(st["status"] in ("done", "skipped") for st in steps):
+        status = "done"
+    import uuid
+    run = {"run_id": "RUN-" + uuid.uuid4().hex[:10].upper(), "playbook_id": playbook_id,
+           "incident_id": incident_id, "entity": ip or user,
+           "status": status, "approved_by": approved_by if approve else "",
+           "steps": steps, "blast_radius": blast}
+    if osc and STORE_ENABLED:
+        await _to_thread(osc.insert_playbook_run, run)
+    return run
+
+
+@app.get("/api/playbooks/runs")
+async def playbook_runs(incident_id: str = "", limit: int = 50):
+    """Read the ledger — past playbook runs (optionally for one incident)."""
+    if not (osc and STORE_ENABLED):
+        return {"runs": []}
+    runs = await _to_thread(osc.get_playbook_runs, incident_id, min(limit, 200))
+    return {"runs": runs, "total": len(runs)}
 
 
 # -- search + health -----------------------------------------------------------

@@ -913,6 +913,179 @@ def count_ml_scores() -> int:
     return int(rows[0]["c"]) if rows else 0
 
 
+# ── SOAR: playbook ledger / cases / tags (the "ops tool" layer) ────────────
+# These tables are created on a fresh volume by 01-schema.sql, and on EXISTING
+# volumes by ensure_runtime_tables() (called at backend startup) — the init SQL
+# only runs once on first container init.
+
+PLAYBOOK_RUNS_TABLE = f"{CLICKHOUSE_DB}.playbook_runs"
+CASES_TABLE         = f"{CLICKHOUSE_DB}.cases"
+ENTITY_TAGS_TABLE   = f"{CLICKHOUSE_DB}.entity_tags"
+
+_RUNTIME_DDL = [
+    f"""CREATE TABLE IF NOT EXISTS {PLAYBOOK_RUNS_TABLE} (
+        run_id       String,
+        playbook_id  String,
+        incident_id  String,
+        entity       String,
+        status       LowCardinality(String),      -- suggested|approved|done|failed
+        approved_by  String DEFAULT '',
+        steps        String,                       -- JSON array of step results (the ledger)
+        blast_radius String DEFAULT '',            -- JSON
+        created_at   DateTime64(3) DEFAULT now64(3),
+        updated_at   DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY run_id""",
+    f"""CREATE TABLE IF NOT EXISTS {CASES_TABLE} (
+        case_id     String,
+        title       String,
+        incident_id String DEFAULT '',
+        entity      String DEFAULT '',
+        severity    LowCardinality(String) DEFAULT 'medium',
+        status      LowCardinality(String) DEFAULT 'open',   -- open|investigating|closed
+        assignee    String DEFAULT '',
+        disposition String DEFAULT '',                        -- '' until closed: tp|fp|benign
+        notes       String DEFAULT '',
+        created_by  String DEFAULT '',
+        created_at  DateTime64(3) DEFAULT now64(3),
+        updated_at  DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY case_id""",
+    f"""CREATE TABLE IF NOT EXISTS {ENTITY_TAGS_TABLE} (
+        entity     String,
+        tag        LowCardinality(String),
+        source     String DEFAULT 'playbook',
+        active     UInt8 DEFAULT 1,
+        added_at   DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(added_at) ORDER BY (entity, tag)""",
+]
+
+
+def ensure_runtime_tables() -> bool:
+    """Create SOAR/case/tag tables on existing volumes (idempotent)."""
+    client = get_client()
+    if not client:
+        return False
+    ok = True
+    for ddl in _RUNTIME_DDL:
+        try:
+            client.command(ddl)
+        except Exception as e:
+            logger.error(f"ensure_runtime_tables failed: {e}")
+            ok = False
+    return ok
+
+
+def get_blast_radius(ips: list[str]) -> dict:
+    """What an action against these source IPs would touch — the entity's full
+    retained footprint (hosts, users, destinations) plus a 24h recency figure.
+    Shown to the analyst BEFORE they approve a containment step."""
+    if not ips:
+        return {"ips": 0, "hosts": 0, "users": 0, "dst_ips": 0,
+                "events": 0, "events_24h": 0}
+    placeholders = ",".join(f"'{ip}'" for ip in ips)
+    rows = _q(
+        f"SELECT uniqExact(agent) AS hosts, uniqExactIf(username, username != '') AS users, "
+        f"uniqExact(dst_ip) AS dst_ips, count() AS events, "
+        f"countIf(ts >= now() - INTERVAL 24 HOUR) AS events_24h "
+        f"FROM {LOGS_TABLE} WHERE src_ip IN ({placeholders})"
+    )
+    r = rows[0] if rows else {}
+    return {
+        "ips":        len(ips),
+        "hosts":      int(r.get("hosts") or 0),
+        "users":      int(r.get("users") or 0),
+        "dst_ips":    int(r.get("dst_ips") or 0),
+        "events":     int(r.get("events") or 0),
+        "events_24h": int(r.get("events_24h") or 0),
+    }
+
+
+def insert_playbook_run(run: dict) -> bool:
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.insert(
+            PLAYBOOK_RUNS_TABLE,
+            [[run["run_id"], run["playbook_id"], run.get("incident_id", ""),
+              run.get("entity", ""), run.get("status", "suggested"),
+              run.get("approved_by", ""), json.dumps(run.get("steps", [])),
+              json.dumps(run.get("blast_radius", {})), _now(), _now()]],
+            column_names=["run_id", "playbook_id", "incident_id", "entity", "status",
+                          "approved_by", "steps", "blast_radius", "created_at", "updated_at"],
+        )
+        return True
+    except Exception as e:
+        logger.error(f"insert_playbook_run failed: {e}")
+        return False
+
+
+def _shape_run(r: dict) -> dict:
+    try:
+        steps = json.loads(r.get("steps") or "[]")
+    except Exception:
+        steps = []
+    try:
+        blast = json.loads(r.get("blast_radius") or "{}")
+    except Exception:
+        blast = {}
+    return {
+        "run_id": r["run_id"], "playbook_id": r["playbook_id"],
+        "incident_id": r.get("incident_id", ""), "entity": r.get("entity", ""),
+        "status": r.get("status", ""), "approved_by": r.get("approved_by", ""),
+        "steps": steps, "blast_radius": blast,
+        "created_at": _iso(r.get("created_at")), "updated_at": _iso(r.get("updated_at")),
+    }
+
+
+def get_playbook_runs(incident_id: str = "", limit: int = 50) -> list[dict]:
+    where = "WHERE incident_id = {iid:String} " if incident_id else ""
+    rows = _q(f"SELECT * FROM {PLAYBOOK_RUNS_TABLE} FINAL {where}"
+              f"ORDER BY updated_at DESC LIMIT {int(limit)}",
+              {"iid": incident_id} if incident_id else None)
+    return [_shape_run(r) for r in rows]
+
+
+def insert_case(case: dict) -> bool:
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.insert(
+            CASES_TABLE,
+            [[case["case_id"], case.get("title", ""), case.get("incident_id", ""),
+              case.get("entity", ""), case.get("severity", "medium"),
+              case.get("status", "open"), case.get("assignee", ""),
+              case.get("disposition", ""), case.get("notes", ""),
+              case.get("created_by", ""), _now(), _now()]],
+            column_names=["case_id", "title", "incident_id", "entity", "severity",
+                          "status", "assignee", "disposition", "notes", "created_by",
+                          "created_at", "updated_at"],
+        )
+        return True
+    except Exception as e:
+        logger.error(f"insert_case failed: {e}")
+        return False
+
+
+def tag_entity(entity: str, tag: str, source: str = "playbook") -> bool:
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.insert(ENTITY_TAGS_TABLE, [[entity, tag, source, 1, _now()]],
+                      column_names=["entity", "tag", "source", "active", "added_at"])
+        return True
+    except Exception as e:
+        logger.error(f"tag_entity failed: {e}")
+        return False
+
+
+def get_entity_tags(entity: str) -> list[str]:
+    rows = _q(f"SELECT tag, argMax(active, added_at) AS a FROM {ENTITY_TAGS_TABLE} "
+              f"WHERE entity = {{e:String}} GROUP BY tag HAVING a = 1", {"e": entity})
+    return [r["tag"] for r in rows]
+
+
 # ── ML feature extraction (identical logic to the OpenSearch client) ───────
 
 FEATURE_COLS = [

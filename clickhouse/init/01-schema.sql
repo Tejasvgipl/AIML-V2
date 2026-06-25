@@ -162,6 +162,54 @@ CREATE TABLE IF NOT EXISTS cybersentinel.ml_scores
 ENGINE = ReplacingMergeTree(scored_at)
 ORDER BY ip;
 
+-- ── SOAR: playbook ledger / cases / entity tags ────────────────────────────
+-- The "ops tool" layer: every response playbook run is logged here (replayable
+-- ledger), cases turn incidents into trackable work, tags annotate entities.
+CREATE TABLE IF NOT EXISTS cybersentinel.playbook_runs
+(
+    run_id       String,
+    playbook_id  String,
+    incident_id  String,
+    entity       String,
+    status       LowCardinality(String),
+    approved_by  String DEFAULT '',
+    steps        String,
+    blast_radius String DEFAULT '',
+    created_at   DateTime64(3) DEFAULT now64(3),
+    updated_at   DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY run_id;
+
+CREATE TABLE IF NOT EXISTS cybersentinel.cases
+(
+    case_id     String,
+    title       String,
+    incident_id String DEFAULT '',
+    entity      String DEFAULT '',
+    severity    LowCardinality(String) DEFAULT 'medium',
+    status      LowCardinality(String) DEFAULT 'open',
+    assignee    String DEFAULT '',
+    disposition String DEFAULT '',
+    notes       String DEFAULT '',
+    created_by  String DEFAULT '',
+    created_at  DateTime64(3) DEFAULT now64(3),
+    updated_at  DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY case_id;
+
+CREATE TABLE IF NOT EXISTS cybersentinel.entity_tags
+(
+    entity     String,
+    tag        LowCardinality(String),
+    source     String DEFAULT 'playbook',
+    active     UInt8 DEFAULT 1,
+    added_at   DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(added_at)
+ORDER BY (entity, tag);
+
 -- ── Auth: users + audit log ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS cybersentinel.cs_users
 (

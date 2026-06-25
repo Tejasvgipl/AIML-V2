@@ -4245,6 +4245,7 @@ tr:hover td{background:#161b22}</style></head>
             ${ips ? `<div style="margin-bottom:10px">${ips}${i.ip_count > 5 ? `<span style="font-size:11px;color:var(--muted)">+${i.ip_count - 5} more</span>` : ''}</div>` : ''}
             ${i.narrative ? `<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">${i.narrative}</div>` : ''}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn pri" style="font-size:11px" onclick="suggestResponse('${i.id}', this)">⚡ Suggested response</button>
               ${lead ? `<button class="btn ai" style="font-size:11px" onclick="incidentNarrative('${lead}', this)">AI incident report</button>` : ''}
               ${lead ? `<button class="btn" style="font-size:11px" onclick="nav('ueba')">UEBA</button>` : ''}
             </div>
@@ -4275,6 +4276,79 @@ tr:hover td{background:#161b22}</style></head>
           <div class="ai-body">${formatReportText(r.ai_narrative || r.explanation || '')}</div>
         </div>
         ${mits ? `<div style="margin-top:12px"><div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:8px;letter-spacing:.05em">RECOMMENDED MITIGATIONS</div>${mits}</div>` : ''}`;
+    }
+
+    // ── Response playbooks (SOAR) ───────────────────────────────────────────
+    function stepBadge(s) {
+      const c = { done: 'var(--ok)', skipped: 'var(--muted)', requires_approval: 'var(--warn)', failed: 'var(--danger)' }[s] || 'var(--muted)';
+      const t = { requires_approval: 'needs approval', done: 'done', skipped: 'skipped', failed: 'failed' }[s] || s;
+      return `<span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}55">${t}</span>`;
+    }
+    async function suggestResponse(incidentId, btn) {
+      btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Matching…';
+      const r = await get(`${API}/playbooks/suggest?incident_id=${encodeURIComponent(incidentId)}`);
+      btn.disabled = false; btn.textContent = orig;
+      if (!r) return;
+      const panel = btn.closest('.cb');
+      let box = panel.querySelector('.pb-panel');
+      if (!box) { box = document.createElement('div'); box.className = 'pb-panel'; box.style.marginTop = '12px'; panel.appendChild(box); }
+      const b = r.blast_radius || {};
+      const sugg = (r.suggestions || []).map((s, idx) => {
+        const sc = s.severity === 'critical' ? 'var(--danger)' : s.severity === 'high' ? 'var(--warn)' : 'var(--accent)';
+        const steps = s.steps.map(st =>
+          `<li style="margin:2px 0">${st.label}${st.mutates ? ' <span class="badge" style="background:var(--warn)22;color:var(--warn);border:1px solid var(--warn)55">approval</span>' : ''}</li>`).join('');
+        return `<div style="border:1px solid var(--border);border-left:3px solid ${sc};border-radius:6px;padding:10px 12px;margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+            <span style="font-weight:600;color:${sc}">${s.name}</span>
+            <span class="badge ${s.severity}">${s.severity}</span>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin:4px 0">${s.description}</div>
+          <div style="font-size:11px;color:var(--muted2,#9aa)">Matched: ${(s.reasons || []).join('; ')}</div>
+          <ul style="margin:6px 0 8px 18px;padding:0;font-size:12px">${steps}</ul>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" style="font-size:11px" onclick="runPlaybook('${s.playbook_id}','${incidentId}',false,this)">Run safe steps</button>
+            <button class="btn pri" style="font-size:11px" onclick="runPlaybook('${s.playbook_id}','${incidentId}',true,this)">Approve &amp; run all</button>
+          </div>
+          <div class="pb-result" data-pb="${s.playbook_id}"></div>
+        </div>`;
+      }).join('') || '<div style="color:var(--muted);font-size:12px">No predefined playbook matched. Investigate manually.</div>';
+      box.innerHTML = `
+        <div style="background:var(--bg2);border-radius:8px;padding:12px">
+          <div style="font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.05em;margin-bottom:6px">⚡ SUGGESTED RESPONSE</div>
+          <div style="font-size:12px;margin-bottom:8px;line-height:1.5">${r.summary || ''}</div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-bottom:10px">
+            <span>Blast radius:</span>
+            <span><b style="color:var(--fg)">${b.hosts ?? 0}</b> hosts</span>
+            <span><b style="color:var(--fg)">${b.users ?? 0}</b> users</span>
+            <span><b style="color:var(--fg)">${b.dst_ips ?? 0}</b> destinations</span>
+            <span><b style="color:var(--fg)">${(b.events ?? 0).toLocaleString()}</b> events</span>
+          </div>
+          ${sugg}
+        </div>`;
+    }
+    async function runPlaybook(playbookId, incidentId, approve, btn) {
+      const label = btn.textContent; btn.disabled = true; btn.textContent = 'Running…';
+      let r;
+      try {
+        const resp = await fetch(`${API}/playbooks/run`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ playbook_id: playbookId, incident_id: incidentId, approve, approved_by: 'analyst' })
+        });
+        r = await resp.json();
+      } catch (e) { r = null; }
+      btn.disabled = false; btn.textContent = label;
+      if (!r || !r.steps) return;
+      const out = btn.closest('div').parentElement.querySelector(`.pb-result[data-pb="${playbookId}"]`);
+      const rows = r.steps.map(s =>
+        `<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:4px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:12px">${s.label}</span>
+          <span style="white-space:nowrap">${stepBadge(s.status)}</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin:0 0 6px 0">${s.output || ''}</div>`).join('');
+      out.innerHTML = `<div style="margin-top:8px;background:var(--bg3);border-radius:6px;padding:8px 10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Run <b>${r.run_id}</b> · status <b>${r.status}</b>${r.approved_by ? ' · approved by ' + r.approved_by : ''}</div>
+        ${rows}
+      </div>`;
     }
 
     // ── UEBA ──────────────────────────────────────────────────────────────────
