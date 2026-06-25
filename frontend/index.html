@@ -1977,7 +1977,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=10-btn">
+  <link rel="stylesheet" href="theme.css?v=11-pb">
 </head>
 
 <body>
@@ -2013,8 +2013,8 @@
         <div class="ni" onclick="nav('incidents')"><span class="ndot nd-r"></span>Incidents</div>
         <div class="ni" onclick="nav('ueba')"><span class="ndot" style="background:var(--ai)"></span>UEBA</div>
         <div class="ni" onclick="nav('killchain')"><span class="ndot" style="background:var(--purple)"></span>Kill Chain</div>
-        <div class="ns">Control</div>
-        <div class="ni" onclick="nav('ingest')"><span class="ndot nd-g"></span>Ingest Logs</div>
+        <div class="ns">Response</div>
+        <div class="ni" onclick="nav('playbooks')"><span class="ndot" style="background:var(--accent)"></span>Playbooks</div>
         <div class="ns">Reporting</div>
         <div class="ni" onclick="nav('reports')"><span class="ndot" style="background:var(--ai)"></span>Reports</div>
       </nav>
@@ -2665,38 +2665,31 @@
           </table>
         </div>
       </div>
-      <div id="page-ingest" class="page">
+      <div id="page-playbooks" class="page">
         <div class="card" style="margin-bottom:16px">
-          <div class="ch"><span class="ct">Upload CSV log file</span></div>
+          <div class="ch">
+            <span class="ct">⚡ Response Playbooks <span style="font-size:11px;color:var(--muted);font-weight:400">— AI-suggested, blast-radius previewed, human-approved, fully logged</span></span>
+            <button class="btn" style="font-size:11px" onclick="loadPlaybooksPage()">↻ Refresh</button>
+          </div>
           <div class="cb">
-            <div class="upload-zone" id="drop-zone" onclick="document.getElementById('csv-file').click()"
-              ondragover="dragOver(event)" ondrop="dropFile(event)" ondragleave="dragLeave()">
-              <h3 style="margin-bottom:8px">Drop CSV file here</h3>
-              <p style="color:var(--muted);font-size:12px">or click to browse</p>
-              <input type="file" id="csv-file" accept=".csv" style="display:none" onchange="uploadCSV(this.files[0])" />
+            <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:4px">
+              Playbooks turn an incident into a one-click response. They run from the
+              <b style="color:var(--text)">Incidents</b> page — open any incident and click
+              <b style="color:var(--accent)">⚡ Suggested response</b>. The engine matches the right playbook,
+              previews exactly what it would touch (blast radius), and runs only on your approval for any
+              containment step. Every run is recorded in the ledger below.
             </div>
-            <div class="prog-wrap" id="prog-wrap">
-              <div class="prog-bar" id="prog-bar" style="width:0%"></div>
-            </div>
-            <div id="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
           </div>
         </div>
-        <div class="card">
-          <div class="ch"><span class="ct">Paste single JSON log</span></div>
-          <div class="cb">
-            <textarea id="json-log" rows="4"
-              style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none;resize:vertical"
-              placeholder='{"@timestamp":"2026-04-22T09:30:00Z","rule.description":"Fortigate: Login failed.","data.ui":"85.11.187.36","data.level":"alert"}'></textarea>
-            <button class="btn pri" style="margin-top:10px" onclick="ingestJSON()">Ingest</button>
-          </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="ch"><span class="ct">Playbook catalogue</span></div>
+          <div class="cb"><div id="pb-catalogue" class="empty">Loading…</div></div>
         </div>
         <div class="card">
-          <div class="ch"><span class="ct">Quick actions</span></div>
-          <div class="cb" style="display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn yel" onclick="buildAllBaselines()">Build all baselines</button>
-            <button class="btn pri" onclick="trainModelQuick()">Train ML model</button>
-            <span id="qa-status" style="font-size:12px;color:var(--muted);align-self:center"></span>
+          <div class="ch">
+            <span class="ct">Run ledger <span style="font-size:11px;color:var(--muted);font-weight:400">— every executed step, replayable</span></span>
           </div>
+          <div class="cb"><div id="pb-ledger" class="empty">Loading…</div></div>
         </div>
       </div>
       <div id="page-reports" class="page">
@@ -2836,7 +2829,7 @@ tr:hover td{background:#161b22}</style></head>
         deviations: 'Baseline Deviations', bslexplorer: 'Baseline Explorer',
         aiinvestigate: 'AI Investigator', nlquery: 'SOC Query', ml: 'ML Anomaly',
         incidents: 'Incident Triage', ueba: 'UEBA — Users & Entities', killchain: 'ATT&CK Kill Chain',
-        ingest: 'Ingest Logs', reports: 'Reports',
+        playbooks: 'Response Playbooks', reports: 'Reports',
       };
       document.getElementById('page-title').textContent = T[name] || name;
       document.body.dataset.page = name;
@@ -2846,6 +2839,7 @@ tr:hover td{background:#161b22}</style></head>
       if (name === 'deviations') loadDeviations();
       if (name === 'reports') refreshReportEndpoints();
       if (name === 'incidents') { loadIncidents(); loadEntityRisk(); loadAttackCoverage(); }
+      if (name === 'playbooks') loadPlaybooksPage();
       if (name === 'ueba') loadUEBA();
       if (name === 'killchain') { /* loaded on-demand via goKillChain or manual input */ }
       if (name === 'users') { loadUsers(); loadTopologyStatus(); }
@@ -4391,6 +4385,51 @@ tr:hover td{background:#161b22}</style></head>
     }
 
     // ── Response playbooks (SOAR) ───────────────────────────────────────────
+    async function loadPlaybooksPage() {
+      const [cat, led] = await Promise.all([get(`${API}/playbooks`), get(`${API}/playbooks/runs?limit=40`)]);
+      // Catalogue
+      const cb = document.getElementById('pb-catalogue');
+      if (cat && cat.playbooks && cat.playbooks.length) {
+        cb.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">` +
+          cat.playbooks.map(p => {
+            const sc = p.severity === 'critical' ? 'var(--danger)' : p.severity === 'high' ? 'var(--warn)' : 'var(--accent)';
+            const steps = (p.steps || []).map(s => {
+              const lbl = (s.action || '').replace(/_/g, ' ');
+              const mut = s.requires_approval;
+              return `<li style="margin:2px 0">${lbl}${mut ? ' <span class="badge" style="background:var(--warn)22;color:var(--warn);border:1px solid var(--warn)55;font-size:9px">approval</span>' : ''}</li>`;
+            }).join('');
+            return `<div style="border:1px solid var(--border);border-left:3px solid ${sc};border-radius:10px;padding:14px">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
+                <span style="font-weight:650;color:${sc}">${p.name}</span>
+                <span class="badge ${p.severity}">${p.severity}</span>
+              </div>
+              <div style="font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:8px">${p.description}</div>
+              <div style="font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Steps</div>
+              <ul style="margin:0 0 0 18px;padding:0;font-size:12px">${steps}</ul>
+            </div>`;
+          }).join('') + `</div>`;
+      } else cb.innerHTML = '<span style="color:var(--muted)">Playbook engine unavailable</span>';
+      // Ledger
+      const lb = document.getElementById('pb-ledger');
+      if (led && led.runs && led.runs.length) {
+        lb.innerHTML = `<table style="width:100%"><thead><tr>
+            <th>Run</th><th>Playbook</th><th>Entity</th><th>Status</th><th>Approved by</th><th>Steps</th><th>When</th>
+          </tr></thead><tbody>` +
+          led.runs.map(r => {
+            const sc = r.status === 'done' ? 'var(--ok)' : r.status === 'approved' ? 'var(--accent)' : 'var(--warn)';
+            const done = (r.steps || []).filter(s => s.status === 'done').length;
+            return `<tr>
+              <td style="font-family:var(--mono);font-size:11px;color:var(--accent)">${r.run_id}</td>
+              <td style="font-size:12px">${r.playbook_id}</td>
+              <td style="font-family:var(--mono);font-size:11px">${r.entity || '—'}</td>
+              <td><span class="badge" style="background:${sc}22;color:${sc};border:1px solid ${sc}55">${r.status}</span></td>
+              <td style="font-size:12px;color:var(--muted)">${r.approved_by || '—'}</td>
+              <td style="font-size:12px">${done}/${(r.steps || []).length}</td>
+              <td style="font-size:11px;color:var(--muted);white-space:nowrap">${String(r.updated_at || '').substring(0, 19).replace('T', ' ')}</td>
+            </tr>`;
+          }).join('') + `</tbody></table>`;
+      } else lb.innerHTML = '<span style="color:var(--muted)">No playbook runs yet. Run one from the Incidents page (⚡ Suggested response).</span>';
+    }
     function stepBadge(s) {
       const c = { done: 'var(--ok)', skipped: 'var(--muted)', requires_approval: 'var(--warn)', failed: 'var(--danger)' }[s] || 'var(--muted)';
       const t = { requires_approval: 'needs approval', done: 'done', skipped: 'skipped', failed: 'failed' }[s] || s;
