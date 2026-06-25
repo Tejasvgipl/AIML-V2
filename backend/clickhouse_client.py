@@ -491,6 +491,22 @@ def get_global_severity_counts() -> dict:
     return {r["severity"]: int(r["c"]) for r in rows}
 
 
+def get_global_mitre_counts(days: int = 90) -> dict:
+    """Event counts per raw ATT&CK technique id present in the logs (the `mitre`
+    field). Sparse vs threat_type, but authoritative when present."""
+    rows = _q(f"SELECT mitre, count() AS c FROM {LOGS_TABLE} "
+              f"WHERE mitre != '' AND ts >= now() - INTERVAL {int(days)} DAY "
+              f"GROUP BY mitre ORDER BY c DESC LIMIT 200")
+    out: dict = {}
+    for r in rows:
+        # mitre can be a comma/space list (e.g. "T1110, T1078").
+        for tid in str(r["mitre"]).replace(",", " ").split():
+            tid = tid.strip().upper()
+            if tid:
+                out[tid] = out.get(tid, 0) + int(r["c"])
+    return out
+
+
 def get_total_doc_count() -> int:
     """Fast row count via system.parts metadata — no full table scan."""
     rows = _q(

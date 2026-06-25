@@ -2501,6 +2501,13 @@
           </div>
           <div class="cb"><div id="rba-body" class="empty">Loading…</div></div>
         </div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="ch">
+            <span class="ct">🎯 ATT&amp;CK coverage <span style="font-size:11px;color:var(--muted);font-weight:400">— what we detect vs the gaps</span></span>
+            <span id="cov-summary" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+          <div class="cb"><div id="cov-body" class="empty">Loading…</div></div>
+        </div>
         <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
           <button class="btn pri" onclick="loadIncidents()">↻ Refresh triage queue</button>
           <span style="font-size:12px;color:var(--muted);align-self:center">Correlated campaigns and host incidents — sorted by priority</span>
@@ -2834,7 +2841,7 @@ tr:hover td{background:#161b22}</style></head>
       if (name === 'ml') loadAnomalies();
       if (name === 'deviations') loadDeviations();
       if (name === 'reports') refreshReportEndpoints();
-      if (name === 'incidents') { loadIncidents(); loadEntityRisk(); }
+      if (name === 'incidents') { loadIncidents(); loadEntityRisk(); loadAttackCoverage(); }
       if (name === 'ueba') loadUEBA();
       if (name === 'killchain') { /* loaded on-demand via goKillChain or manual input */ }
       if (name === 'users') { loadUsers(); loadTopologyStatus(); }
@@ -4274,6 +4281,31 @@ tr:hover td{background:#161b22}</style></head>
         </div>`;
       }).join('');
       body.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Top ${r.entities.length} by decaying risk (half-life ${r.half_life_hours}h, ${r.window_days}d window) · score is relative to the hottest ${label.toLowerCase()}</div>${rows}`;
+    }
+    async function loadAttackCoverage() {
+      const r = await get(`${API}/attack-coverage`);
+      const body = document.getElementById('cov-body');
+      if (!r || !r.tactics) { body.innerHTML = '<span style="color:var(--muted)">Coverage unavailable</span>'; return; }
+      const s = r.summary;
+      document.getElementById('cov-summary').textContent = `${s.techniques_covered}/${s.techniques_total} techniques · ${s.coverage_pct}% covered`;
+      const maxEv = Math.max(1, ...r.tactics.flatMap(t => t.techniques.map(x => x.events)));
+      const cols = r.tactics.filter(t => t.techniques.length).map(t => {
+        const tiles = t.techniques.map(x => {
+          let bg = 'var(--bg3)', fg = 'var(--muted)', bd = 'var(--border)';
+          if (x.covered) {
+            const intensity = x.events / maxEv;
+            const col = intensity > 0.66 ? 'var(--danger)' : intensity > 0.33 ? 'var(--warn)' : 'var(--ok)';
+            bg = col + '22'; fg = col; bd = col + '66';
+          }
+          return `<div title="${x.id} ${x.name} — ${x.covered ? x.events + ' events' : 'no detection (gap)'}" style="background:${bg};color:${fg};border:1px solid ${bd};border-radius:4px;padding:3px 5px;font-size:10px;font-family:var(--mono);margin-bottom:3px;${x.covered ? '' : 'opacity:.5;border-style:dashed'}">${x.id}${x.covered ? '' : ' ·'}</div>`;
+        }).join('');
+        return `<div style="min-width:118px;flex:1">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;min-height:24px">${t.tactic}</div>
+          ${tiles}
+        </div>`;
+      }).join('');
+      body.innerHTML = `<div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px">${cols}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px">Solid = active detection (colour = event volume) · dashed = coverage gap. Derived from fired detections mapped to ATT&amp;CK.</div>`;
     }
     async function loadIncidents() {
       const r = await get(`${API}/incidents`); if (!r) return;

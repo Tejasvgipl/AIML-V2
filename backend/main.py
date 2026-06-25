@@ -2809,6 +2809,65 @@ async def list_feedback(limit: int = 200):
     return {"feedback": fb, "total": len(fb)}
 
 
+# -- ATT&CK coverage heatmap --------------------------------------------------
+
+@app.get("/api/attack-coverage")
+async def attack_coverage():
+    """Tactic x technique coverage derived from what we actually detect: raw
+    ATT&CK ids in the logs plus threat_type -> technique mappings. Shows the SOC
+    where detection exists and where the gaps are."""
+    if not (ti and osc and STORE_ENABLED):
+        raise HTTPException(503, "Coverage requires threat-intel + store")
+
+    threat_counts, mitre_counts = await asyncio.gather(
+        _to_thread(osc.get_global_threat_counts, False),
+        _to_thread(osc.get_global_mitre_counts, 90),
+        return_exceptions=True,
+    )
+    if isinstance(threat_counts, Exception):
+        threat_counts = {}
+    if isinstance(mitre_counts, Exception):
+        mitre_counts = {}
+
+    # Accumulate event volume per technique id from both sources.
+    tech_events: dict[str, int] = dict(mitre_counts or {})
+    for tt, cnt in (threat_counts or {}).items():
+        tid = ti.THREAT_TO_TECHNIQUE.get((tt or "").lower())
+        if tid:
+            tech_events[tid] = tech_events.get(tid, 0) + int(cnt)
+
+    # Lay every KB technique onto its tactic; mark covered vs gap.
+    tactics: dict[str, dict] = {t: {"tactic": t, "techniques": [], "events": 0}
+                                for t in ti.TACTIC_ORDER}
+    covered = 0
+    for tid, entry in ti.KB.items():
+        tac = entry.get("tactic", "")
+        bucket = tactics.setdefault(tac, {"tactic": tac, "techniques": [], "events": 0})
+        ev = int(tech_events.get(tid, 0))
+        is_cov = ev > 0
+        if is_cov:
+            covered += 1
+        bucket["techniques"].append({
+            "id": tid, "name": entry.get("name", tid),
+            "events": ev, "covered": is_cov,
+        })
+        bucket["events"] += ev
+
+    # Order tactics along the kill chain; techniques by event volume.
+    ordered = []
+    for t in sorted(tactics.values(), key=lambda b: ti.tactic_rank(b["tactic"])):
+        t["techniques"].sort(key=lambda x: (-x["events"], x["id"]))
+        ordered.append(t)
+
+    total_tech = len(ti.KB)
+    return {
+        "tactics": ordered,
+        "summary": {"techniques_total": total_tech, "techniques_covered": covered,
+                    "coverage_pct": round(covered / total_tech * 100) if total_tech else 0},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # -- search + health -----------------------------------------------------------
 
 @app.get("/api/logs")
