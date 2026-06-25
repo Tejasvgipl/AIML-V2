@@ -3467,8 +3467,22 @@ tr:hover td{background:#161b22}</style></head>
       const d = await get(`${API}/intel/${curIP}`); if (!d) return;
       document.getElementById('intel-panel').style.display = 'block';
       let h = `<b>IP:</b> ${d.ip} &nbsp;|&nbsp; <b>Known bad:</b> ${d.is_known_bad ? '<span style="color:var(--danger)">YES</span>' : 'No'}<br>`;
-      if (d.abuseipdb) { const a = d.abuseipdb; h += `<b>AbuseIPDB:</b> <span style="color:${a.score > 50 ? 'var(--danger)' : a.score > 25 ? 'var(--warn)' : 'var(--ok)'}">${a.score}/100</span> &nbsp;|&nbsp; <b>Country:</b> ${a.country} &nbsp;|&nbsp; <b>ISP:</b> ${a.isp} &nbsp;|&nbsp; <b>Tor:</b> ${a.is_tor ? 'Yes' : 'No'}`; }
-      else h += `<span style="color:var(--muted)">AbuseIPDB not configured</span>`;
+      // In-house reputation (always available, computed from our own history) ---
+      const r = d.reputation;
+      if (r && r.available) {
+        const col = r.score >= 70 ? 'var(--danger)' : r.score >= 40 ? 'var(--warn)' : r.score >= 15 ? '#facc15' : 'var(--ok)';
+        h += `<div style="margin-top:6px"><b>In-house reputation:</b> <span style="color:${col};font-weight:700">${r.score}/100 (${r.verdict})</span> <span style="color:var(--muted);font-size:11px">— from ${r.events} events in our own logs, no external API</span></div>`;
+        if (r.factors && r.factors.length) h += `<ul style="margin:4px 0 4px 18px;padding:0;color:var(--muted2,#9aa)">${r.factors.map(f => `<li>${f}</li>`).join('')}</ul>`;
+      } else {
+        h += `<div style="margin-top:6px;color:var(--muted)">In-house reputation: no events from this IP in retained telemetry.</div>`;
+      }
+      // AbuseIPDB external booster (optional) ---------------------------------
+      if (d.abuseipdb) { const a = d.abuseipdb; h += `<div style="margin-top:6px"><b>AbuseIPDB:</b> <span style="color:${a.score > 50 ? 'var(--danger)' : a.score > 25 ? 'var(--warn)' : 'var(--ok)'}">${a.score}/100</span> &nbsp;|&nbsp; <b>Country:</b> ${a.country} &nbsp;|&nbsp; <b>ISP:</b> ${a.isp} &nbsp;|&nbsp; <b>Tor:</b> ${a.is_tor ? 'Yes' : 'No'}</div>`; }
+      else {
+        const st = d.abuseipdb_status || 'not_configured';
+        const msg = { not_configured: 'AbuseIPDB not configured (add ABUSEIPDB_KEY to .env)', bad_key: 'AbuseIPDB key rejected (401/403) - check the key', rate_limited: 'AbuseIPDB rate limit hit (free tier = 1000/day)', unreachable: 'AbuseIPDB unreachable' }[st] || `AbuseIPDB: ${st}`;
+        h += `<div style="margin-top:6px;color:var(--muted)">${msg}</div>`;
+      }
       document.getElementById('intel-body').innerHTML = h;
     }
     async function loadBaseline() {

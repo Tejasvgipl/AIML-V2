@@ -311,6 +311,50 @@ def get_ip_severity_counts(ip: str) -> dict:
     return {r["severity"]: int(r["c"]) for r in rows}
 
 
+def get_ip_reputation_features(ip: str) -> dict:
+    """One-scan behavioural feature vector for an IP, computed entirely from our
+    own ClickHouse history. No external API — works fully air-gapped. Feeds the
+    deterministic in-house reputation score (see main._score_ip_reputation)."""
+    rows = _q(
+        f"SELECT "
+        f"  count() AS total, "
+        f"  countIf(severity = 'critical') AS crit, "
+        f"  countIf(severity = 'high')     AS high, "
+        f"  countIf(severity = 'medium')   AS med, "
+        f"  countIf(severity = 'low')      AS low, "
+        f"  max(rule_level)                AS max_level, "
+        f"  uniqExact(dst_port)            AS uniq_ports, "
+        f"  uniqExact(dst_ip)              AS uniq_dsts, "
+        f"  uniqExact(country)             AS uniq_countries, "
+        f"  uniqExactIf(username, username != '') AS uniq_users, "
+        f"  min(ts) AS first_seen, max(ts) AS last_seen "
+        f"FROM {LOGS_TABLE} WHERE src_ip = {{ip:String}}",
+        {"ip": ip},
+    )
+    if not rows or int(rows[0].get("total") or 0) == 0:
+        return {"total": 0}
+    r = rows[0]
+    # Top threat types for the human-readable factor list.
+    tt = _q(f"SELECT threat_type, count() AS c FROM {LOGS_TABLE} "
+            f"WHERE src_ip = {{ip:String}} AND threat_type != '' "
+            f"GROUP BY threat_type ORDER BY c DESC LIMIT 5", {"ip": ip})
+    return {
+        "total":          int(r.get("total") or 0),
+        "crit":           int(r.get("crit") or 0),
+        "high":           int(r.get("high") or 0),
+        "med":            int(r.get("med") or 0),
+        "low":            int(r.get("low") or 0),
+        "max_level":      int(r.get("max_level") or 0),
+        "uniq_ports":     int(r.get("uniq_ports") or 0),
+        "uniq_dsts":      int(r.get("uniq_dsts") or 0),
+        "uniq_countries": int(r.get("uniq_countries") or 0),
+        "uniq_users":     int(r.get("uniq_users") or 0),
+        "first_seen":     _iso(r.get("first_seen")),
+        "last_seen":      _iso(r.get("last_seen")),
+        "top_threats":    [{"type": t["threat_type"], "count": int(t["c"])} for t in tt],
+    }
+
+
 # ── all-IP queries (served from the rollup table when possible) ────────────
 
 def get_all_unique_ips(size: int = 10000) -> list[str]:

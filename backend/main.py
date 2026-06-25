@@ -105,6 +105,13 @@ async def _start_background_refresh():
     asyncio.create_task(_refresh_incidents())
 
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "demo")
+# Placeholder values that mean "not configured" — avoids firing 401s at AbuseIPDB
+# with the .env.example stub and silently falling back. Real keys are 80 hex chars.
+_ABUSEIPDB_PLACEHOLDERS = {"", "demo", "your_key_here", "your_key", "changeme", "none"}
+
+def _abuseipdb_configured() -> bool:
+    k = (ABUSEIPDB_KEY or "").strip()
+    return k.lower() not in _ABUSEIPDB_PLACEHOLDERS and len(k) >= 20
 AI_API_KEY  = os.getenv("AI_API_KEY", os.getenv("GROQ_API_KEY", ""))
 AI_MODEL      = os.getenv("AI_MODEL", os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
 # Fast model for explanations - 8b-instant is sub-second on Groq vs 10-15s for 70b
@@ -1541,6 +1548,63 @@ async def _get_ml_health() -> dict:
 
 # -- threat intel --------------------------------------------------------------
 
+def _score_ip_reputation(feat: dict) -> dict:
+    """Deterministic, air-gapped IP reputation from our own ClickHouse history.
+    Returns a 0-100 risk score (higher = worse), a verdict, and plain-English
+    factors. No external dependency — this is the in-house ML signal that always
+    works; AbuseIPDB (when configured) only boosts it."""
+    total = int(feat.get("total") or 0)
+    if total == 0:
+        return {"score": 0, "verdict": "unknown",
+                "summary": "No events from this IP in retained telemetry.",
+                "factors": [], "available": False}
+
+    crit, high, med, low = (int(feat.get(k) or 0) for k in ("crit", "high", "med", "low"))
+    sev_tot = crit + high + med + low or 1
+    # Severity mix (same weighting as the global threat index — consistent UX).
+    sev_ratio = (crit * 1.0 + high * 0.65 + med * 0.35 + low * 0.10) / sev_tot
+    sev_pts = sev_ratio * 55                                   # up to 55
+
+    factors = []
+    if crit:
+        factors.append(f"{crit} critical-severity event{'s' if crit != 1 else ''} from this source")
+    if high:
+        factors.append(f"{high} high-severity event{'s' if high != 1 else ''}")
+
+    # Breadth — scanning / lateral movement signal.
+    ports, dsts = int(feat.get("uniq_ports") or 0), int(feat.get("uniq_dsts") or 0)
+    breadth_pts = 0
+    if ports > 5 or dsts > 10:
+        breadth_pts = min(20, (max(0, ports - 5) * 2) + (max(0, dsts - 10)))
+        factors.append(f"touched {dsts} hosts across {ports} ports — looks like scanning or lateral movement")
+
+    # Worst Wazuh rule level seen (0-15 scale) → up to 15.
+    lvl = int(feat.get("max_level") or 0)
+    level_pts = min(15, lvl)
+    if lvl >= 12:
+        factors.append(f"triggered a level-{lvl} rule (Wazuh treats 12+ as critical)")
+
+    # Volume — up to 10, log-scaled so a noisy IP doesn't auto-max.
+    import math
+    vol_pts = min(10, round(math.log10(total + 1) * 4))
+
+    users = int(feat.get("uniq_users") or 0)
+    if users > 1:
+        factors.append(f"associated with {users} distinct usernames")
+
+    score = int(max(0, min(100, round(sev_pts + breadth_pts + level_pts + vol_pts))))
+    verdict = ("malicious" if score >= 70 else "suspicious" if score >= 40
+               else "watch" if score >= 15 else "benign")
+    top = feat.get("top_threats") or []
+    lead = top[0]["type"].replace("_", " ") if top else "mixed activity"
+    summary = (f"In-house reputation {score}/100 ({verdict}). Primary activity: {lead}. "
+               f"{total} events, worst severity rule level {lvl}.")
+    return {"score": score, "verdict": verdict, "summary": summary,
+            "factors": factors[:5], "available": True,
+            "events": total, "first_seen": feat.get("first_seen"),
+            "last_seen": feat.get("last_seen"), "top_threats": top}
+
+
 @app.get("/api/intel/{ip}")
 async def get_intel(ip: str):
     cached = _intel_get(ip)
@@ -1550,11 +1614,21 @@ async def get_intel(ip: str):
     result = {
         "ip":           ip,
         "is_known_bad": any(ip.startswith(s) for s in KNOWN_BAD_SUBNETS),
+        "reputation":   {"available": False},
         "abuseipdb":    None,
+        "abuseipdb_status": "not_configured" if not _abuseipdb_configured() else "ok",
         "source":       "local",
     }
 
-    if ABUSEIPDB_KEY and ABUSEIPDB_KEY != "demo":
+    # In-house reputation first — always available, no external call.
+    if STORE_ENABLED:
+        try:
+            feat = await _to_thread(osc.get_ip_reputation_features, ip)
+            result["reputation"] = _score_ip_reputation(feat or {})
+        except Exception:
+            pass
+
+    if _abuseipdb_configured():
         try:
             async with httpx.AsyncClient(timeout=3) as client:
                 resp = await client.get(
@@ -1573,8 +1647,15 @@ async def get_intel(ip: str):
                         "is_public": data.get("isPublic",True),
                     }
                     result["source"] = "abuseipdb"
+                    result["abuseipdb_status"] = "ok"
+                elif resp.status_code in (401, 403):
+                    result["abuseipdb_status"] = "bad_key"
+                elif resp.status_code == 429:
+                    result["abuseipdb_status"] = "rate_limited"
+                else:
+                    result["abuseipdb_status"] = f"http_{resp.status_code}"
         except Exception:
-            pass  # AbuseIPDB unavailable - return local result immediately
+            result["abuseipdb_status"] = "unreachable"
 
     _intel_set(ip, result, ttl=900)
     return result
