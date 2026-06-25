@@ -3504,6 +3504,23 @@ tr:hover td{background:#161b22}</style></head>
         const msg = { not_configured: 'AbuseIPDB not configured (add ABUSEIPDB_KEY to .env)', bad_key: 'AbuseIPDB key rejected (401/403) - check the key', rate_limited: 'AbuseIPDB rate limit hit (free tier = 1000/day)', unreachable: 'AbuseIPDB unreachable' }[st] || `AbuseIPDB: ${st}`;
         h += `<div style="margin-top:6px;color:var(--muted)">${msg}</div>`;
       }
+      // STIX2 threat-intel relationships (actor / campaign / malware) ---------
+      const ti = d.threat_intel;
+      if (ti && ti.available) {
+        const chips = (arr, color, icon) => (arr || []).map(x => `<span class="badge" style="background:${color}22;color:${color};border:1px solid ${color}55;margin-right:4px">${icon} ${x}</span>`).join('');
+        let tih = `<div style="margin-top:8px"><b>Threat intel:</b> `;
+        tih += chips(ti.actors, 'var(--danger)', '👤') + chips(ti.campaigns, 'var(--warn)', '🎯') + chips(ti.malware, '#c084fc', '🦠');
+        if (!ti.actors.length && !ti.campaigns.length && !ti.malware.length) {
+          const r0 = (ti.relations || [])[0] || {};
+          tih += `<span style="color:var(--muted)">${r0.note || 'flagged'} (${r0.source || 'intel'})</span>`;
+        }
+        tih += (ti.relations || []).length ? `<div style="font-size:11px;color:var(--muted);margin-top:3px">Sources: ${[...new Set((ti.relations||[]).map(r=>r.source))].join(', ')}</div>` : '';
+        tih += `</div>`;
+        h += tih;
+      } else if (ti) {
+        const sc = ti.sources_configured || {};
+        h += `<div style="margin-top:8px;color:var(--muted);font-size:12px">Threat intel: no attribution available${(!sc.misp && !sc.opencti) ? ' (connect MISP/OpenCTI or curate data/ioc_store.json for actor/campaign links)' : ''}</div>`;
+      }
       // Analyst disposition + feedback buttons (the re-disposition loop) -------
       if (d.disposition) {
         const dd = d.disposition;

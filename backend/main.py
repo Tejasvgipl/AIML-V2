@@ -27,6 +27,10 @@ try:
     import playbooks as pb             # response playbook definitions + matching
 except Exception:
     pb = None  # type: ignore
+try:
+    import ioc_intel as ioc            # STIX2-style IP -> actor/campaign enrichment
+except Exception:
+    ioc = None  # type: ignore
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -1643,14 +1647,23 @@ async def get_intel(ip: str):
     if cached:
         return cached
 
+    known_bad = any(ip.startswith(s) for s in KNOWN_BAD_SUBNETS)
     result = {
         "ip":           ip,
-        "is_known_bad": any(ip.startswith(s) for s in KNOWN_BAD_SUBNETS),
+        "is_known_bad": known_bad,
         "reputation":   {"available": False},
+        "threat_intel": {"available": False},
         "abuseipdb":    None,
         "abuseipdb_status": "not_configured" if not _abuseipdb_configured() else "ok",
         "source":       "local",
     }
+
+    # STIX2-style relationships (actor/campaign/malware) with honest provenance.
+    if ioc:
+        try:
+            result["threat_intel"] = await _to_thread(ioc.enrich_ip, ip, known_bad)
+        except Exception:
+            pass
 
     # In-house reputation first — always available, no external call.
     if STORE_ENABLED:
@@ -2807,6 +2820,16 @@ async def list_feedback(limit: int = 200):
         return {"feedback": []}
     fb = await _to_thread(osc.get_all_feedback, min(limit, 500))
     return {"feedback": fb, "total": len(fb)}
+
+
+@app.post("/api/ioc/reload")
+async def reload_ioc_store():
+    """Reload the local IOC store after editing data/ioc_store.json."""
+    if not ioc:
+        raise HTTPException(503, "IOC intel unavailable")
+    n = await _to_thread(ioc.reload_store)
+    return {"ok": True, "indicators": n,
+            "misp": ioc.misp_configured(), "opencti": ioc.opencti_configured()}
 
 
 # -- ATT&CK coverage heatmap --------------------------------------------------

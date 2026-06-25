@@ -1,0 +1,40 @@
+[
+  {
+    "_comment": "HONEST SEED. Internal known-bad scanning infrastructure. Source is our own blocklist, so NO external actor/campaign is claimed — only the facts we have.",
+    "indicator": "85.11.182.0/23",
+    "type": "ipv4-addr",
+    "actor": "",
+    "campaign": "",
+    "malware": "",
+    "confidence": 60,
+    "source": "internal blocklist",
+    "tlp": "green",
+    "references": [],
+    "first_seen": "2026-01-01"
+  },
+  {
+    "indicator": "198.235.24.0/24",
+    "type": "ipv4-addr",
+    "actor": "",
+    "campaign": "",
+    "malware": "",
+    "confidence": 60,
+    "source": "internal blocklist",
+    "tlp": "green",
+    "references": [],
+    "first_seen": "2026-01-01"
+  },
+  {
+    "_comment": "EXAMPLE ONLY — documents the actor/campaign/malware relationship format used when you connect MISP/OpenCTI or curate real intel. The indicator is a TEST-NET-2 address (RFC 5737), never real traffic, so it cannot mis-attribute production data.",
+    "indicator": "198.51.100.7",
+    "type": "ipv4-addr",
+    "actor": "FIN7 (example)",
+    "campaign": "Carbanak (example)",
+    "malware": "Cobalt Strike (example)",
+    "confidence": 85,
+    "source": "EXAMPLE:documentation",
+    "tlp": "amber",
+    "references": ["https://attack.mitre.org/groups/G0046/"],
+    "first_seen": "2026-01-01"
+  }
+]
