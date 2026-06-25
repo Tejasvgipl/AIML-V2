@@ -1086,6 +1086,58 @@ def get_entity_tags(entity: str) -> list[str]:
     return [r["tag"] for r in rows]
 
 
+# ── Risk-Based Alerting (RBA): per-entity time-decayed risk ────────────────
+# Every event adds severity-weighted points to its entity (IP or user); points
+# decay exponentially with age (half-life), so stale risk fades and only
+# entities with sustained/recent bad behaviour float to the top. This turns a
+# flood of alerts into a short ranked watch-list — the alert-fatigue killer.
+
+def get_entity_risk_ranking(dimension: str = "ip", half_life_hours: int = 72,
+                            window_days: int = 30, limit: int = 50) -> list[dict]:
+    col = {"ip": "src_ip", "user": "username", "host": "agent"}.get(dimension, "src_ip")
+    where_ident = f"AND {col} != ''" if dimension in ("user", "host") else ""
+    hl = max(1, int(half_life_hours))
+    rows = _q(
+        f"SELECT {col} AS entity, "
+        f"  count() AS events, "
+        f"  round(sum( "
+        f"    multiIf(severity='critical',10, severity='high',6.5, "
+        f"            severity='medium',3.5, severity='low',1, 0.5) "
+        f"    * exp(-0.6931471805 * dateDiff('hour', ts, now()) / {hl}) "
+        f"  ), 2) AS risk_points, "
+        f"  max(rule_level) AS max_level, "
+        f"  countIf(severity = 'critical') AS crit, "
+        f"  uniqExact(dst_ip) AS uniq_dsts, "
+        f"  max(ts) AS last_seen "
+        f"FROM {LOGS_TABLE} "
+        f"WHERE ts >= now() - INTERVAL {int(window_days)} DAY {where_ident} "
+        f"GROUP BY {col} "
+        f"ORDER BY risk_points DESC LIMIT {int(limit)}"
+    )
+    if not rows:
+        return []
+    top = max((float(r.get("risk_points") or 0) for r in rows), default=0) or 1.0
+    out = []
+    for r in rows:
+        pts = float(r.get("risk_points") or 0)
+        score = int(max(0, min(100, round(pts / top * 100))))   # relative to hottest entity
+        band = ("critical" if score >= 80 else "high" if score >= 55
+                else "medium" if score >= 30 else "low")
+        out.append({
+            "entity":      r["entity"],
+            "dimension":   dimension,
+            "events":      int(r.get("events") or 0),
+            "risk_points": round(pts, 1),
+            "score":       score,            # 0-100 relative ranking, for bars/triage
+            "band":        band,
+            "max_level":   int(r.get("max_level") or 0),
+            "critical":    int(r.get("crit") or 0),
+            "uniq_dsts":   int(r.get("uniq_dsts") or 0),
+            "last_seen":   _iso(r.get("last_seen")),
+        })
+    return out
+
+
 # ── ML feature extraction (identical logic to the OpenSearch client) ───────
 
 FEATURE_COLS = [

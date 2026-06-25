@@ -2718,6 +2718,26 @@ async def playbook_runs(incident_id: str = "", limit: int = 50):
     return {"runs": runs, "total": len(runs)}
 
 
+# -- Risk-Based Alerting (RBA): per-entity decaying risk watch-list -----------
+
+@app.get("/api/entity-risk")
+async def entity_risk(dim: str = "ip", half_life_hours: int = 72,
+                      window_days: int = 30, limit: int = 50):
+    """Ranked watch-list of entities (ip|user|host) by time-decayed risk. Replaces
+    the alert flood with the handful of entities that actually deserve attention."""
+    if not (osc and STORE_ENABLED):
+        return {"entities": [], "dimension": dim}
+    if dim not in ("ip", "user", "host"):
+        dim = "ip"
+    ents = await _to_thread(osc.get_entity_risk_ranking, dim,
+                            max(1, half_life_hours), max(1, window_days), min(limit, 200))
+    return {
+        "dimension": dim, "half_life_hours": half_life_hours,
+        "window_days": window_days, "entities": ents, "total": len(ents),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # -- search + health -----------------------------------------------------------
 
 @app.get("/api/logs")

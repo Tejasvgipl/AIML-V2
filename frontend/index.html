@@ -2487,6 +2487,20 @@
         </div>
       </div>
       <div id="page-incidents" class="page">
+        <div class="card" style="margin-bottom:16px">
+          <div class="ch">
+            <span class="ct">⚖ Risk watch-list <span style="font-size:11px;color:var(--muted);font-weight:400">— time-decayed risk, stale activity fades</span></span>
+            <span style="display:flex;gap:6px;align-items:center">
+              <select id="rba-dim" onchange="loadEntityRisk()" style="background:var(--bg3);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:3px 8px;font-size:12px">
+                <option value="ip">By source IP</option>
+                <option value="user">By user</option>
+                <option value="host">By host</option>
+              </select>
+              <button class="btn" style="font-size:11px" onclick="loadEntityRisk()">↻</button>
+            </span>
+          </div>
+          <div class="cb"><div id="rba-body" class="empty">Loading…</div></div>
+        </div>
         <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
           <button class="btn pri" onclick="loadIncidents()">↻ Refresh triage queue</button>
           <span style="font-size:12px;color:var(--muted);align-self:center">Correlated campaigns and host incidents — sorted by priority</span>
@@ -2820,7 +2834,7 @@ tr:hover td{background:#161b22}</style></head>
       if (name === 'ml') loadAnomalies();
       if (name === 'deviations') loadDeviations();
       if (name === 'reports') refreshReportEndpoints();
-      if (name === 'incidents') loadIncidents();
+      if (name === 'incidents') { loadIncidents(); loadEntityRisk(); }
       if (name === 'ueba') loadUEBA();
       if (name === 'killchain') { /* loaded on-demand via goKillChain or manual input */ }
       if (name === 'users') { loadUsers(); loadTopologyStatus(); }
@@ -4216,6 +4230,28 @@ tr:hover td{background:#161b22}</style></head>
     }
 
     // ── Incidents ─────────────────────────────────────────────────────────────
+    async function loadEntityRisk() {
+      const dim = document.getElementById('rba-dim').value;
+      const r = await get(`${API}/entity-risk?dim=${dim}&limit=12`);
+      const body = document.getElementById('rba-body');
+      if (!r || !r.entities || !r.entities.length) { body.innerHTML = '<span style="color:var(--muted)">No risk signal in window</span>'; return; }
+      const label = { ip: 'IP', user: 'User', host: 'Host' }[dim] || 'Entity';
+      const rows = r.entities.map(e => {
+        const c = e.band === 'critical' ? 'var(--danger)' : e.band === 'high' ? 'var(--warn)' : e.band === 'medium' ? '#facc15' : 'var(--ok)';
+        const clickable = dim === 'ip';
+        return `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+          <span style="font-weight:700;color:${c};min-width:34px;text-align:right">${e.score}</span>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;justify-content:space-between;gap:8px">
+              <span style="font-family:var(--mono);font-size:12px;${clickable ? 'color:var(--accent);cursor:pointer' : ''}" ${clickable ? `onclick="goTrail('${e.entity}')"` : ''}>${e.entity || '(none)'}</span>
+              <span style="font-size:11px;color:var(--muted);white-space:nowrap">${e.events} ev · ${e.critical} crit · ${e.uniq_dsts} dst</span>
+            </div>
+            <div style="height:5px;background:var(--bg3);border-radius:3px;margin-top:3px;overflow:hidden"><div style="height:100%;width:${e.score}%;background:${c}"></div></div>
+          </div>
+        </div>`;
+      }).join('');
+      body.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Top ${r.entities.length} by decaying risk (half-life ${r.half_life_hours}h, ${r.window_days}d window) · score is relative to the hottest ${label.toLowerCase()}</div>${rows}`;
+    }
     async function loadIncidents() {
       const r = await get(`${API}/incidents`); if (!r) return;
       const inc = r.incidents || [];
