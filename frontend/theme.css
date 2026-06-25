@@ -750,3 +750,89 @@ tr:hover td { background: rgba(148,163,184,.04); }
 
 /* 10 — Calmer entrance motion (no jarring) ---------------------------------- */
 .page .card { transition: opacity .4s ease, transform .4s ease; }
+
+/* ============================================================================
+   BUTTON SYSTEM — one clear, consistent language (kills the "mixed" look)
+   Primary = SOLID neon cyan (the single call-to-action colour). Everything else
+   is intentionally quieter so the eye always knows the main action.
+   ============================================================================ */
+.btn {
+  background: rgba(42,26,74,.6) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 9px !important;
+  font-weight: 550 !important;
+  box-shadow: none !important;
+}
+.btn:hover {
+  border-color: rgba(0,229,255,.4) !important;
+  color: #fff !important;
+  background: rgba(42,26,74,.85) !important;
+  transform: translateY(-1px);
+}
+
+/* PRIMARY — one solid colour, dark text for max contrast, soft cyan glow */
+.btn.pri, .btn.primary {
+  background: #00e5ff !important;
+  color: #07111a !important;
+  border: 1px solid #00e5ff !important;
+  font-weight: 650 !important;
+  box-shadow: 0 0 20px -4px rgba(0,229,255,.6) !important;
+}
+.btn.pri:hover, .btn.primary:hover {
+  background: #4af0ff !important;
+  box-shadow: 0 0 26px -2px rgba(0,229,255,.8) !important;
+}
+
+/* AI actions — magenta, the one place the second neon appears */
+.btn.ai {
+  background: rgba(255,61,240,.14) !important;
+  color: #ff8df5 !important;
+  border: 1px solid rgba(255,61,240,.4) !important;
+}
+.btn.ai:hover { background: rgba(255,61,240,.24) !important; color: #fff !important; }
+
+/* DANGER — red, always means "destructive / contain" */
+.btn.danger, .btn.red {
+  background: rgba(255,31,90,.14) !important;
+  color: #ff6b8e !important;
+  border: 1px solid rgba(255,31,90,.4) !important;
+}
+.btn.danger:hover, .btn.red:hover { background: rgba(255,31,90,.24) !important; color: #fff !important; }
+
+/* WARN — amber */
+.btn.yel, .btn.warn {
+  background: rgba(255,176,32,.13) !important;
+  color: #ffce6a !important;
+  border: 1px solid rgba(255,176,32,.38) !important;
+}
+
+/* Focus rings + search → cyan (was leftover purple) ------------------------- */
+input:focus, select:focus, textarea:focus,
+.srch:focus-within, .field input:focus {
+  border-color: rgba(0,229,255,.6) !important;
+  box-shadow: 0 0 0 3px rgba(0,229,255,.14) !important;
+}
+
+/* ============================================================================
+   SPACING & READABILITY POLISH — make every block clearly legible
+   ============================================================================ */
+/* Body text never cramped */
+.cb, .tev-row, .ent-card, td, .empty { line-height: 1.6; }
+/* Section headers get clear air above when stacked inside a card body */
+.cb > h2, .cb > h3, .cb > .section-title { margin: var(--s4) 0 var(--s3); }
+.cb > *:first-child { margin-top: 0; }
+/* Toolbars / filter rows: consistent gaps + wrap nicely */
+.logs-toolbar, .dev-toolbar, .flt-chips, .logs-ranges { gap: var(--s2) var(--s3) !important; }
+/* Inputs: comfortable padding */
+input, select, textarea { padding: 10px 13px !important; border-radius: 9px !important; }
+/* Chips / badges: breathing room so they don't smear together */
+.chip, .badge, .ent-chip, .flt-chip { padding: 4px 10px !important; border-radius: 999px !important; }
+/* KPI / stat tiles: clear internal stack */
+.ops-chip, .metric, .kpi { display: flex; flex-direction: column; gap: var(--s2) !important; }
+/* Topbar: more comfortable height + spacing */
+.topbar { padding: var(--s4) var(--s5) !important; gap: var(--s4) !important; }
+.topbar h1 { letter-spacing: -.3px !important; }
+/* Sidebar nav: a touch more vertical rhythm so items are easy to hit/read */
+.ni { padding: 10px 12px !important; font-size: 13px !important; }
+.ns { padding: 16px 12px 6px !important; }
