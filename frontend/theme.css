@@ -28,12 +28,20 @@
   --purple:    #a78bfa;
   --ai:        #ff6a3d;
 
-  --radius:    16px;
-  --radius-sm: 11px;
+  --radius:    14px;
+  --radius-sm: 10px;
+  --radius-lg: 20px;
   --shadow:    0 18px 50px -22px rgba(0,0,0,.75);
   --shadow-sm: 0 8px 24px -16px rgba(0,0,0,.7);
-  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  /* Geist first (premium), Inter fallback so nothing breaks if it fails to load */
+  --sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+
+  /* ── 8pt spacing scale — the backbone of a calm, un-congested layout ───── */
+  --s1: 4px;   --s2: 8px;   --s3: 12px;  --s4: 16px;
+  --s5: 24px;  --s6: 32px;  --s7: 48px;  --s8: 64px;
+  /* Max readable content width so wide monitors don't sprawl */
+  --content-max: 1320px;
 }
 
 /* ── Base ──────────────────────────────────────────────────────────────── */
@@ -658,3 +666,77 @@ body[data-page="reports"]       { --accent: #8b5cf6; --accent-2: #22d3ee; }
   .shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
 }
+
+/* ============================================================================
+   DESIGN SYSTEM v2 — "BREATHE" de-congestion layer (loaded LAST, overrides)
+   Goal: turn a dense console into a calm, Linear/Vercel-grade product.
+   Levers: generous whitespace, a single max content column, clear type rhythm,
+   lighter card chrome, restrained motion. Applied via existing class names so
+   it improves EVERY page at once — no markup churn required.
+   ============================================================================ */
+
+/* 1 — Center content in a readable column; far more breathing room ---------- */
+.main { padding: var(--s6) var(--s7) var(--s8) !important; }
+.main > .page { max-width: var(--content-max); margin: 0 auto; }
+@media (max-width: 1100px) { .main { padding: var(--s5) var(--s5) var(--s7) !important; } }
+
+/* 2 — Page rhythm: each .page section gets vertical air between blocks ------- */
+.page > .card,
+.page > section,
+.page > .situation-board,
+.page > div { margin-bottom: var(--s5); }
+.page > *:last-child { margin-bottom: 0; }
+
+/* 3 — Cards: roomier padding, softer chrome, calmer shadow ------------------- */
+.card, .panel {
+  border-radius: var(--radius) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,.18), 0 12px 32px -24px rgba(0,0,0,.6) !important;
+}
+.card > .cb, .panel > .cb { padding: var(--s5) !important; }
+.card > .ch, .panel > .ch {
+  padding: var(--s4) var(--s5) !important;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+}
+.card > .ch + .cb { padding-top: var(--s4) !important; }
+
+/* 4 — Typography rhythm: confident hierarchy, the work Linear lets type do --- */
+.ct, .card-title, .ch .ct {
+  font-size: 14px !important; font-weight: 650 !important;
+  letter-spacing: -.1px !important; color: var(--text) !important;
+}
+.main h1 { font-size: 26px; font-weight: 800; letter-spacing: -.6px; margin: 0 0 var(--s2); }
+.main h2 { font-size: 19px; font-weight: 700; letter-spacing: -.3px; }
+.empty { color: var(--muted); font-size: 13px; padding: var(--s5); text-align: center; }
+body { letter-spacing: 0 !important; }   /* Geist is balanced; drop the +tracking */
+
+/* 5 — KPI / stat tiles: bigger numbers, quieter labels (single-metric calm) -- */
+.ops-chip-v, .metric-value, .kpi-value { letter-spacing: -1px !important; line-height: 1.05 !important; }
+.ops-chip { padding: var(--s5) !important; }
+.ops-chip-l, .metric-label, .kpi-label {
+  text-transform: uppercase; letter-spacing: .8px !important;
+  font-size: 10.5px !important; color: var(--muted) !important; font-weight: 600 !important;
+}
+
+/* 6 — Grids: consistent, generous gutters everywhere ------------------------ */
+.situation-board, .entity-spot, .dev-sevbar { gap: var(--s4) !important; }
+
+/* 7 — Restrained signature glow on hero elements ONLY (the CyberShield trick) */
+.ops-hero { box-shadow: 0 1px 2px rgba(0,0,0,.2), 0 24px 60px -34px rgba(109,94,252,.5) !important; }
+.threat-dial { box-shadow: 0 0 0 1px var(--border), 0 24px 60px -36px rgba(34,211,238,.45) !important; }
+.btn.pri, .btn.primary { box-shadow: 0 8px 24px -12px rgba(109,94,252,.7) !important; }
+
+/* 8 — Tables: airier rows, sticky calm headers ------------------------------ */
+table { border-collapse: separate !important; border-spacing: 0; width: 100%; }
+th { font-size: 11px !important; text-transform: uppercase; letter-spacing: .6px;
+     padding: 10px 14px !important; background: var(--bg-soft); position: sticky; top: 0; }
+td { padding: 11px 14px !important; font-size: 12.5px; border-top: 1px solid var(--border); }
+tr:hover td { background: rgba(148,163,184,.04); }
+
+/* 9 — Buttons: slightly larger hit area, smoother feel ---------------------- */
+.btn { padding: 8px 14px !important; border-radius: 9px !important; font-weight: 550 !important;
+       transition: background .15s, border-color .15s, transform .12s, box-shadow .15s !important; }
+
+/* 10 — Calmer entrance motion (no jarring) ---------------------------------- */
+.page .card { transition: opacity .4s ease, transform .4s ease; }
