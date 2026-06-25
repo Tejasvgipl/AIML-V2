@@ -1412,6 +1412,13 @@ async def _generate_report_payload(timeframe: str) -> dict:
     controls = {
         "alert_type_counts": stats.get("alert_type_counts", {}),
     }
+    # Blocklist counts for the "current controls" line (deterministic, no AI).
+    try:
+        blocklist = await _to_thread(osc.get_blocklist) if (osc and STORE_ENABLED) else {}
+    except Exception:
+        blocklist = {}
+    controls["auto_blocked"] = len((blocklist or {}).get("auto", []))
+    controls["manual_blocked"] = len((blocklist or {}).get("manual", []))
     incidents = await _gather_incidents()
     controls["incidents"] = incidents[:8]
     report = _render_security_report(timeframe, start, end, data, controls)

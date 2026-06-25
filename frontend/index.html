@@ -1977,7 +1977,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=11-pb">
+  <link rel="stylesheet" href="theme.css?v=12-rep">
 </head>
 
 <body>
@@ -2708,28 +2708,6 @@
             <span id="rep-status" style="font-size:12px;color:var(--muted);align-self:center"></span>
           </div>
         </div>
-        <div class="card" style="margin-bottom:16px">
-          <div class="ch"><span class="ct">Report API Endpoint</span></div>
-          <div class="cb" style="display:grid;gap:8px">
-            <div id="rep-api-context" style="font-size:12px;color:var(--muted)">Current report: weekly</div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <code id="rep-api-json" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
-              <button class="btn" onclick="copyReportEndpoint('json')">Copy JSON</button>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <code id="rep-api-md" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
-              <button class="btn" onclick="copyReportEndpoint('md')">Copy Markdown</button>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <code id="rep-api-pdf" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
-              <button class="btn" onclick="copyReportEndpoint('pdf')">Copy PDF</button>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <code id="rep-api-html" style="color:var(--accent);font-size:12px;word-break:break-all"></code>
-              <button class="btn" onclick="copyReportEndpoint('html')">Copy HTML</button>
-            </div>
-          </div>
-        </div>
         <div id="report-container" style="display:none">
           <div class="card">
             <div class="ch" style="display:flex;justify-content:space-between;align-items:center">
@@ -2837,7 +2815,6 @@ tr:hover td{background:#161b22}</style></head>
       if (name === 'logs') loadLogs();
       if (name === 'ml') loadAnomalies();
       if (name === 'deviations') loadDeviations();
-      if (name === 'reports') refreshReportEndpoints();
       if (name === 'incidents') { loadIncidents(); loadEntityRisk(); loadAttackCoverage(); }
       if (name === 'playbooks') loadPlaybooksPage();
       if (name === 'ueba') loadUEBA();
@@ -3342,19 +3319,18 @@ tr:hover td{background:#161b22}</style></head>
       editor.style.display = 'none';
       document.getElementById('rep-edit-btn').textContent = 'Edit';
 
-      aiLoading(preview);
-      btnStatus.textContent = 'Building ' + timeframe + ' report from current evidence...';
+      preview.innerHTML = '<span style="color:var(--muted)">Compiling ' + timeframe + ' report from logs…</span>';
+      btnStatus.textContent = 'Compiling ' + timeframe + ' report…';
 
       const r = await get(`${API}/reports/generate?timeframe=${timeframe}`);
-      if (!r) { 
+      if (!r) {
         preview.innerHTML = '<span style="color:var(--danger)">Report generation failed.</span>';
         btnStatus.textContent = '';
-        return; 
+        return;
       }
 
       currentReportPayload = r;
       currentReportTimeframe = r.timeframe || timeframe;
-      refreshReportEndpoints();
       editor.value = r.report;
       preview.innerHTML = formatReportText(r.report);
       btnStatus.textContent = `Generated from ${r.source || 'available'} data · ${r.generated_at ? String(r.generated_at).substring(0, 19) : ''}`;
