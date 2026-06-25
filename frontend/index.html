@@ -3021,12 +3021,23 @@ tr:hover td{background:#161b22}</style></head>
       const hotCount = (s.hot_ips || []).length;
       const criticalCount = (s.critical_ips || []).length;
       const alertCount = Number(s.total_alerts || 0);
-      // Threat index: a saturating curve on critical+hot pressure. The old
-      // formula (criticalCount*2.6 + alertCount*.01) pinned to 100 on any busy
-      // system. This asymptotes toward 100 so it actually VARIES and stays
-      // meaningful whether there are 5 or 5000 events.
-      const sevPressure = criticalCount + (hotCount * 0.4);
-      const threatIndex = Math.max(0, Math.min(99, Math.round(100 * (1 - Math.exp(-sevPressure / 55)))));
+      // Threat index = weighted SEVERITY MIX of all events (bounded 0–100,
+      // explainable). The old count-based curves saturated to ~100 on any busy
+      // system (hundreds of hot/critical IPs). This is a ratio, so it reflects
+      // HOW dangerous the traffic is, not just how much there is — it only nears
+      // 100 if almost everything is critical, and drops when traffic is benign.
+      const sev = s.severity_counts || {};
+      const sevTot = (sev.critical || 0) + (sev.high || 0) + (sev.medium || 0) + (sev.low || 0);
+      let threatIndex;
+      if (sevTot > 0) {
+        const weighted = (sev.critical || 0) * 1.0 + (sev.high || 0) * 0.65
+                       + (sev.medium || 0) * 0.35 + (sev.low || 0) * 0.10;
+        threatIndex = Math.max(0, Math.min(100, Math.round((weighted / sevTot) * 100)));
+      } else {
+        // Fallback when severity counts aren't available yet.
+        const sevPressure = criticalCount + (hotCount * 0.4);
+        threatIndex = Math.max(0, Math.min(99, Math.round(100 * (1 - Math.exp(-sevPressure / 55)))));
+      }
       document.getElementById('m-total').textContent = s.total_logs.toLocaleString();
       document.getElementById('m-ips').textContent = s.unique_ips.toLocaleString();
       document.getElementById('m-hot').textContent = hotCount;
@@ -3111,6 +3122,16 @@ tr:hover td{background:#161b22}</style></head>
       if (navigator.clipboard) navigator.clipboard.writeText(id).then(() => toast('Copied ' + id)).catch(() => toast(id));
       else toast(id);
     }
+    // Name a destination by its service (from the port) so "blocked to 10.0.x:3389"
+    // reads as "blocked to RDP" — analyst-friendly, since we have no domain data.
+    const PORT_SERVICE = {
+      21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS', 80: 'HTTP', 110: 'POP3',
+      135: 'RPC', 139: 'NetBIOS', 143: 'IMAP', 161: 'SNMP', 389: 'LDAP', 443: 'HTTPS',
+      445: 'SMB', 636: 'LDAPS', 993: 'IMAPS', 995: 'POP3S', 1433: 'MSSQL', 1521: 'Oracle',
+      3306: 'MySQL', 3389: 'RDP', 5432: 'PostgreSQL', 5900: 'VNC', 5985: 'WinRM', 5986: 'WinRM',
+      6379: 'Redis', 8080: 'HTTP', 8443: 'HTTPS', 9200: 'Elasticsearch', 27017: 'MongoDB'
+    };
+    function portService(port) { return PORT_SERVICE[Number(port)] || ''; }
     async function quickAI(ip) {
       nav('aiinvestigate');
       document.getElementById('ai-ip-input').value = ip;
@@ -3223,7 +3244,7 @@ tr:hover td{background:#161b22}</style></head>
         </div>
         <div class="tev-body">
           ${k('Identity', ident)}
-          ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}`)}
+          ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}${portService(e.dst_port) ? ` <span class="tev-svc">${portService(e.dst_port)}</span>` : ''}`)}
           ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id">#${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
           ${k('User', e.username)}
           ${k('Country', e.country)}
@@ -4306,7 +4327,7 @@ tr:hover td{background:#161b22}</style></head>
       if (type === 'src') {
         html = `<div class="kc-detail">
           <h4>🌍 Source — ${d.ip}</h4>
-          <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Originating attacker IP being analysed across all ${d.totalEvents} log events.</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Source IP under investigation across all ${d.totalEvents} log events. Not yet confirmed malicious — could be an external actor, a scanner, or a legitimate client.</div>
           <button class="btn" onclick="goTrail('${d.ip}')">View IP Trail →</button>
         </div>`;
       } else if (type === 'net') {
@@ -4470,7 +4491,7 @@ tr:hover td{background:#161b22}</style></head>
         <div class="kc-flow-wrap"><div class="kc-flow-row">
           <div class="kc-node" style="color:#64b5f6;animation:kcNodeIn .4s ease 0s backwards" onclick="kcNodeDetail('src',-1,this)">
             <div class="kc-node-icon">🌍</div>
-            <div class="kc-node-label">Attacker</div>
+            <div class="kc-node-label">Source</div>
             <div class="kc-node-status" style="background:rgba(100,181,246,.15);color:#64b5f6">${ip}</div>
             <div class="kc-node-meta">${r.total_events} events</div>
           </div>
@@ -4676,66 +4697,67 @@ tr:hover td{background:#161b22}</style></head>
       const scorePosition = score === null ? 'not available' : score < -0.1 ? 'well below the anomaly boundary' : score < 0 ? 'just below the anomaly boundary' : 'above the anomaly boundary';
       const mainReasons = [];
       const drivers = [];
+      const abn = score === null ? '' : score < -0.1 ? 'very unusual' : score < 0 ? 'somewhat unusual' : 'close to normal';
       if (r.is_anomaly) {
-        mainReasons.push('Isolation Forest returned anomaly=YES because this IP sits outside the normal cluster of trained IP behaviour.');
-        drivers.push({ level: 'critical', text: `<b>Model decision:</b> anomaly=YES. This means the IP was separated from normal IPs by the Isolation Forest trees.` });
+        mainReasons.push('This source behaves very differently from normal traffic in your environment, so the model flagged it as an outlier.');
+        drivers.push({ level: 'critical', text: `<b>Flagged as abnormal.</b> Its behaviour does not match the normal pattern of other sources the model has learned.` });
       } else {
-        mainReasons.push('Isolation Forest did not mark it as a hard anomaly, so the risk mainly comes from rule/baseline context.');
-        drivers.push({ level: 'medium', text: `<b>Model decision:</b> anomaly=NO. Any risk here mainly comes from baseline or threat feature context.` });
+        mainReasons.push('The model did not flag this as clearly abnormal, so most of the risk comes from the threat rules and baseline activity below.');
+        drivers.push({ level: 'medium', text: `<b>Not flagged as abnormal by itself.</b> Any risk below comes from threat rules and behaviour changes, not from the model alone.` });
       }
       if (score !== null) {
-        mainReasons.push(`Raw anomaly score is ${score}, which is ${scorePosition}; lower than 0 means suspicious.`);
-        drivers.push({ level: score < -0.1 ? 'critical' : score < 0 ? 'high' : 'medium', text: `<b>Anomaly score:</b> ${score}. Boundary is around 0. Negative means outlier; positive means more normal. This score produced base risk ${rawRisk}.` });
+        mainReasons.push(`How unusual: ${abn} (abnormality score ${score}; below 0 means unusual, and the lower it is, the more unusual).`);
+        drivers.push({ level: score < -0.1 ? 'critical' : score < 0 ? 'high' : 'medium', text: `<b>How unusual:</b> ${abn}. Score ${score} (0 = typical, negative = stands out). On its own this contributes about ${rawRisk}/100.` });
       }
       if (f.baseline_alerts > 0 || f.critical_alerts > 0) {
-        mainReasons.push(`Baseline added ${baselineBoost} points because it has ${f.baseline_alerts || 0} deviation alerts and ${f.critical_alerts || 0} critical deviations.`);
-        drivers.push({ level: f.critical_alerts > 0 ? 'critical' : 'high', text: `<b>Baseline boost added ${baselineBoost} risk points.</b> ${f.baseline_alerts || 0} behavioural deviations and ${f.critical_alerts || 0} critical deviations were seen for this IP.` });
+        mainReasons.push(`It also broke its own normal pattern ${f.baseline_alerts || 0} time(s)${f.critical_alerts ? ` (${f.critical_alerts} serious)` : ''}, adding ${baselineBoost} points.`);
+        drivers.push({ level: f.critical_alerts > 0 ? 'critical' : 'high', text: `<b>Behaviour changed (+${baselineBoost} pts).</b> ${f.baseline_alerts || 0} deviation(s) from its own normal pattern, ${f.critical_alerts || 0} of them serious.` });
       }
       if (f.n_events > 500 || f.event_rate_pm > 1) {
-        mainReasons.push(`Event volume is abnormal: ${f.n_events || 0} events at ${f.event_rate_pm || 0}/min.`);
-        drivers.push({ level: 'high', text: `<b>High activity volume.</b> ${f.n_events || 0} events at ${f.event_rate_pm || 0}/min can indicate scanning, brute force, or automated tooling.` });
+        mainReasons.push(`Very busy: ${f.n_events || 0} events (${f.event_rate_pm || 0}/min) — a pace typical of scanning, brute force, or automated tools.`);
+        drivers.push({ level: 'high', text: `<b>Unusually busy.</b> ${f.n_events || 0} events at ${f.event_rate_pm || 0}/min — often a sign of scanning, brute force, or a script.` });
       }
       if (f.unique_dst_ips > 10 || f.unique_dst_ports > 5) {
-        mainReasons.push(`Target spread is wide: ${f.unique_dst_ips || 0} destination IPs and ${f.unique_dst_ports || 0} destination ports.`);
-        drivers.push({ level: 'high', text: `<b>Wide target spread.</b> It touched ${f.unique_dst_ips || 0} destination IPs and ${f.unique_dst_ports || 0} ports, which can look like reconnaissance or lateral movement.` });
+        mainReasons.push(`Hit a wide spread of targets: ${f.unique_dst_ips || 0} machines across ${f.unique_dst_ports || 0} ports — looks like scanning or lateral movement.`);
+        drivers.push({ level: 'high', text: `<b>Touched many targets.</b> ${f.unique_dst_ips || 0} machines and ${f.unique_dst_ports || 0} ports — typical of recon or moving across the network.` });
       }
       if (f.brute_force_cnt || f.ssh_bf_cnt || f.vpn_bf_cnt) {
-        mainReasons.push(`Credential attack features are present: ${f.brute_force_cnt || 0} brute-force events.`);
-        drivers.push({ level: 'critical', text: `<b>Credential attack signals:</b> ${f.brute_force_cnt || 0} brute-force, ${f.ssh_bf_cnt || 0} SSH brute-force, ${f.vpn_bf_cnt || 0} VPN brute-force events.` });
+        mainReasons.push(`Password-guessing seen: ${(Number(f.brute_force_cnt || 0) + Number(f.ssh_bf_cnt || 0) + Number(f.vpn_bf_cnt || 0))} brute-force attempts.`);
+        drivers.push({ level: 'critical', text: `<b>Password-guessing (brute force).</b> ${f.brute_force_cnt || 0} general, ${f.ssh_bf_cnt || 0} SSH, ${f.vpn_bf_cnt || 0} VPN attempts.` });
       }
       if (f.rdp_cnt || f.db_scan_cnt || f.priv_esc_cnt) {
-        mainReasons.push(`High-value technique features are present: RDP ${f.rdp_cnt || 0}, DB scan ${f.db_scan_cnt || 0}, privilege escalation ${f.priv_esc_cnt || 0}.`);
-        drivers.push({ level: 'high', text: `<b>High-value technique signals.</b> RDP relay ${f.rdp_cnt || 0}, DB scan ${f.db_scan_cnt || 0}, privilege escalation ${f.priv_esc_cnt || 0}.` });
+        mainReasons.push(`Activity against sensitive services: RDP ${f.rdp_cnt || 0}, database ${f.db_scan_cnt || 0}, privilege escalation ${f.priv_esc_cnt || 0}.`);
+        drivers.push({ level: 'high', text: `<b>Touched sensitive services.</b> Remote desktop ${f.rdp_cnt || 0}, database probing ${f.db_scan_cnt || 0}, privilege escalation ${f.priv_esc_cnt || 0}.` });
       }
       if (f.known_bad_cnt) {
-        mainReasons.push(`${f.known_bad_cnt} known-malicious events are included in the feature vector.`);
-        drivers.push({ level: 'critical', text: `<b>Known malicious activity.</b> ${f.known_bad_cnt} known-bad events are included in the feature vector.` });
+        mainReasons.push(`Matched threat intelligence: ${f.known_bad_cnt} event(s) tied to known-malicious activity.`);
+        drivers.push({ level: 'critical', text: `<b>Known-bad match.</b> ${f.known_bad_cnt} event(s) matched threat intelligence for known-malicious activity.` });
       }
       if (f.pct_critical > 0 || f.pct_high > 0.25) {
-        mainReasons.push(`Severity mix is unusual: ${(Number(f.pct_high || 0) * 100).toFixed(0)}% high severity and ${(Number(f.pct_critical || 0) * 100).toFixed(0)}% critical.`);
-        drivers.push({ level: 'high', text: `<b>Severity mix is elevated:</b> ${(Number(f.pct_high || 0) * 100).toFixed(0)}% high severity, ${(Number(f.pct_critical || 0) * 100).toFixed(0)}% critical severity.` });
+        mainReasons.push(`Severity is skewed high: ${(Number(f.pct_high || 0) * 100).toFixed(0)}% high and ${(Number(f.pct_critical || 0) * 100).toFixed(0)}% critical events.`);
+        drivers.push({ level: 'high', text: `<b>Mostly serious alerts.</b> ${(Number(f.pct_high || 0) * 100).toFixed(0)}% high, ${(Number(f.pct_critical || 0) * 100).toFixed(0)}% critical.` });
       }
       if (drivers.length === 1) {
-        mainReasons.push('No single loud feature dominated; the score came from the combined feature vector compared with other IPs.');
-        drivers.push({ level: 'medium', text: `<b>No single loud driver dominated.</b> The score came from the combined feature vector after scaling and comparison against other IPs.` });
+        mainReasons.push('No single thing stood out — the score is the combined effect of many small factors compared with other sources.');
+        drivers.push({ level: 'medium', text: `<b>No single dominant cause.</b> The score is the combined effect of several smaller factors versus other sources.` });
       }
       const finalReason = mainReasons.slice(0, 4).join(' ');
       const confidenceReason = confidence < 45
-        ? 'Confidence is low because the model has limited supporting evidence, usually too few events or few corroborating signals.'
+        ? 'Low confidence — limited evidence (few events or few corroborating signals), so treat as a lead, not a conclusion.'
         : confidence < 75
-          ? 'Confidence is medium because there is useful evidence, but not enough volume or corroboration for full trust.'
-          : 'Confidence is high because enough events and multiple signals support the score.';
+          ? 'Medium confidence — there is real evidence, but not enough volume or corroboration to be certain.'
+          : 'High confidence — enough events and multiple independent signals back this up.';
       const verdict = risk > 70
-        ? 'Critical because the base anomaly score plus baseline/security features crossed the critical threshold.'
+        ? 'Investigate now. Strong, corroborated signals put this in the critical band.'
         : risk > 40
-          ? 'High because the IP is anomalous, but the final score stayed below the critical threshold.'
-          : 'Medium because the model saw some unusual behaviour, but not enough supporting signals for high/critical.';
+          ? 'Worth a look. Unusual behaviour, but not yet enough to be critical.'
+          : 'Low priority. Some oddity, but limited supporting evidence.';
       return `<div class="ml-explain">
-        <div class="ml-explain-title">Actual reason this IP got ${risk}/100 (${mlRiskLabel(risk)})</div>
-        <p><b>Short answer:</b> ${finalReason}</p>
-        <p><b>Verdict:</b> ${verdict}</p>
+        <div class="ml-explain-title">Why this source scored ${risk}/100 (${mlRiskLabel(risk)})</div>
+        <p><b>In short:</b> ${finalReason}</p>
+        <p><b>What to do:</b> ${verdict}</p>
         <p><b>Confidence:</b> ${confidence}/100 (${confidenceLabel(confidence)}). ${confidenceReason}</p>
-        <div class="ml-formula">calculation: anomaly_score ${score ?? 'n/a'} → base_risk ${baseRisk}; baseline boost ${baselineBoost}; final risk ${risk}/100</div>
+        <div class="ml-formula">How the score adds up: abnormality ${rawRisk ?? 'n/a'}/100 + behaviour-change boost ${baselineBoost} = ${risk}/100</div>
         <div class="ml-driver-list">${drivers.map(d => `<div class="ml-driver ${d.level}">${d.text}</div>`).join('')}</div>
       </div>`;
     }

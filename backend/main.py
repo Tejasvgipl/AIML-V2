@@ -1457,9 +1457,9 @@ async def get_stats():
         return _stats_cache
 
     if STORE_ENABLED and osc:
-        # Run all 7 ClickHouse queries in parallel via thread pool
+        # Run all queries in parallel via thread pool
         (total_logs, unique_ips, threat_counts, hot_ips,
-         total_alerts, critical_ips, alert_counts) = await asyncio.gather(
+         total_alerts, critical_ips, alert_counts, severity_counts) = await asyncio.gather(
             _to_thread(osc.get_total_doc_count),
             _to_thread(osc.get_unique_ip_count),
             _to_thread(osc.get_global_threat_counts),
@@ -1467,10 +1467,11 @@ async def get_stats():
             _to_thread(osc.get_deviation_total),
             _to_thread(osc.get_critical_ips),
             _to_thread(osc.get_alert_type_counts),
+            _to_thread(osc.get_global_severity_counts),
         )
     else:
         total_logs = unique_ips = total_alerts = 0
-        threat_counts, alert_counts = {}, {}
+        threat_counts, alert_counts, severity_counts = {}, {}, {}
         hot_ips, critical_ips = [], []
 
     result = {
@@ -1481,6 +1482,7 @@ async def get_stats():
         "total_alerts":     int(total_alerts or 0),
         "critical_ips":     list(critical_ips or []),
         "alert_type_counts":alert_counts,
+        "severity_counts":  severity_counts or {},
         "ai_configured":    bool(AI_API_KEY),
     }
     # Only update cache if we got real data - never overwrite good cache with zeros
