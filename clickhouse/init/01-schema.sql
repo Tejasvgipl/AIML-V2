@@ -210,6 +210,19 @@ CREATE TABLE IF NOT EXISTS cybersentinel.entity_tags
 ENGINE = ReplacingMergeTree(added_at)
 ORDER BY (entity, tag);
 
+-- Analyst feedback (TP/FP/benign/escalate) remembered per entity / alert-kind.
+CREATE TABLE IF NOT EXISTS cybersentinel.alert_feedback
+(
+    entity      String DEFAULT '',
+    signature   String DEFAULT '',
+    disposition LowCardinality(String),
+    note        String DEFAULT '',
+    analyst     String DEFAULT '',
+    ts          DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(ts)
+ORDER BY (entity, signature);
+
 -- ── Auth: users + audit log ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS cybersentinel.cs_users
 (

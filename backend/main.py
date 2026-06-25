@@ -1617,6 +1617,26 @@ def _score_ip_reputation(feat: dict) -> dict:
             "last_seen": feat.get("last_seen"), "top_threats": top}
 
 
+def _apply_disposition(rep: dict, disp: dict) -> dict:
+    """Fold a standing analyst verdict into the in-house reputation. A confirmed
+    false-positive / benign caps the score so it stops dominating triage; a
+    true-positive / escalate keeps it high and flags it. The raw model score is
+    preserved as model_score for transparency."""
+    d = disp.get("disposition", "")
+    rep = dict(rep)
+    rep["model_score"] = rep.get("score")
+    who = disp.get("analyst") or "analyst"
+    if d in ("false_positive", "benign"):
+        rep["score"] = min(rep.get("score", 0), 10)
+        rep["verdict"] = "benign (analyst-confirmed)"
+        rep["summary"] = (f"Analyst {who} marked this {d.replace('_', ' ')}. "
+                          f"Risk suppressed (model said {rep['model_score']}/100). " + rep.get("summary", ""))
+    elif d in ("true_positive", "escalate"):
+        rep["verdict"] = f"{d.replace('_', ' ')} (analyst-confirmed)"
+        rep["summary"] = f"Analyst {who} confirmed this {d.replace('_', ' ')}. " + rep.get("summary", "")
+    return rep
+
+
 @app.get("/api/intel/{ip}")
 async def get_intel(ip: str):
     cached = _intel_get(ip)
@@ -1636,7 +1656,13 @@ async def get_intel(ip: str):
     if STORE_ENABLED:
         try:
             feat = await _to_thread(osc.get_ip_reputation_features, ip)
-            result["reputation"] = _score_ip_reputation(feat or {})
+            rep = _score_ip_reputation(feat or {})
+            # Re-disposition: apply any standing analyst verdict for this IP.
+            disp = await _to_thread(osc.get_entity_disposition, ip)
+            if disp:
+                rep = _apply_disposition(rep, disp)
+                result["disposition"] = disp
+            result["reputation"] = rep
         except Exception:
             pass
 
@@ -2731,11 +2757,56 @@ async def entity_risk(dim: str = "ip", half_life_hours: int = 72,
         dim = "ip"
     ents = await _to_thread(osc.get_entity_risk_ranking, dim,
                             max(1, half_life_hours), max(1, window_days), min(limit, 200))
+    # Annotate with any standing analyst disposition (re-disposition in action).
+    try:
+        dmap = await _to_thread(osc.get_dispositions_map, [e["entity"] for e in ents])
+        for e in ents:
+            if e["entity"] in dmap:
+                e["disposition"] = dmap[e["entity"]]
+    except Exception:
+        pass
     return {
         "dimension": dim, "half_life_hours": half_life_hours,
         "window_days": window_days, "entities": ents, "total": len(ents),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# -- Analyst feedback loop (TP/FP) → re-disposition ---------------------------
+
+_VALID_DISPOSITIONS = {"true_positive", "false_positive", "benign", "escalate"}
+
+@app.post("/api/feedback")
+async def submit_feedback(payload: dict):
+    """Record an analyst verdict on an entity (and/or an alert kind). Remembered
+    and re-applied to future appearances — a confirmed FP never costs triage
+    time twice."""
+    disposition = (payload.get("disposition") or "").strip()
+    if disposition not in _VALID_DISPOSITIONS:
+        raise HTTPException(400, f"disposition must be one of {sorted(_VALID_DISPOSITIONS)}")
+    entity = (payload.get("entity") or "").strip()
+    threat_type = (payload.get("threat_type") or "").strip()
+    rule_id = (payload.get("rule_id") or "").strip()
+    signature = (payload.get("signature") or
+                 (f"{threat_type}:{rule_id}" if (threat_type or rule_id) else "")).strip()
+    if not entity and not signature:
+        raise HTTPException(400, "provide an entity and/or a signature")
+    ok = False
+    if osc and STORE_ENABLED:
+        ok = await _to_thread(osc.insert_feedback, entity, signature, disposition,
+                              payload.get("note", ""), payload.get("analyst", "analyst"))
+    # Clear cached intel for this entity so the new disposition shows immediately.
+    if entity:
+        _intel_cache.pop(entity, None)
+    return {"ok": ok, "entity": entity, "signature": signature, "disposition": disposition}
+
+
+@app.get("/api/feedback")
+async def list_feedback(limit: int = 200):
+    if not (osc and STORE_ENABLED):
+        return {"feedback": []}
+    fb = await _to_thread(osc.get_all_feedback, min(limit, 500))
+    return {"feedback": fb, "total": len(fb)}
 
 
 # -- search + health -----------------------------------------------------------

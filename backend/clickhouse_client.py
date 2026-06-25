@@ -921,6 +921,7 @@ def count_ml_scores() -> int:
 PLAYBOOK_RUNS_TABLE = f"{CLICKHOUSE_DB}.playbook_runs"
 CASES_TABLE         = f"{CLICKHOUSE_DB}.cases"
 ENTITY_TAGS_TABLE   = f"{CLICKHOUSE_DB}.entity_tags"
+FEEDBACK_TABLE      = f"{CLICKHOUSE_DB}.alert_feedback"
 
 _RUNTIME_DDL = [
     f"""CREATE TABLE IF NOT EXISTS {PLAYBOOK_RUNS_TABLE} (
@@ -956,6 +957,14 @@ _RUNTIME_DDL = [
         active     UInt8 DEFAULT 1,
         added_at   DateTime64(3) DEFAULT now64(3)
     ) ENGINE = ReplacingMergeTree(added_at) ORDER BY (entity, tag)""",
+    f"""CREATE TABLE IF NOT EXISTS {FEEDBACK_TABLE} (
+        entity      String DEFAULT '',
+        signature   String DEFAULT '',                 -- threat_type:rule_id (kind of alert)
+        disposition LowCardinality(String),             -- true_positive|false_positive|benign|escalate
+        note        String DEFAULT '',
+        analyst     String DEFAULT '',
+        ts          DateTime64(3) DEFAULT now64(3)
+    ) ENGINE = ReplacingMergeTree(ts) ORDER BY (entity, signature)""",
 ]
 
 
@@ -1084,6 +1093,56 @@ def get_entity_tags(entity: str) -> list[str]:
     rows = _q(f"SELECT tag, argMax(active, added_at) AS a FROM {ENTITY_TAGS_TABLE} "
               f"WHERE entity = {{e:String}} GROUP BY tag HAVING a = 1", {"e": entity})
     return [r["tag"] for r in rows]
+
+
+# ── Analyst feedback loop (TP/FP) → re-disposition ─────────────────────────
+# An analyst's verdict on an entity (or a kind of alert) is remembered and
+# re-applied: a future appearance of the same entity/signature inherits the
+# disposition, so a confirmed false-positive never costs triage time twice.
+
+def insert_feedback(entity: str, signature: str, disposition: str,
+                    note: str = "", analyst: str = "") -> bool:
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.insert(FEEDBACK_TABLE,
+                      [[entity or "", signature or "", disposition, note or "", analyst or "", _now()]],
+                      column_names=["entity", "signature", "disposition", "note", "analyst", "ts"])
+        return True
+    except Exception as e:
+        logger.error(f"insert_feedback failed: {e}")
+        return False
+
+
+def get_entity_disposition(entity: str) -> Optional[dict]:
+    """Latest analyst verdict for a specific entity, if any."""
+    rows = _q(f"SELECT disposition, note, analyst, ts FROM {FEEDBACK_TABLE} FINAL "
+              f"WHERE entity = {{e:String}} AND entity != '' ORDER BY ts DESC LIMIT 1", {"e": entity})
+    if not rows:
+        return None
+    r = rows[0]
+    return {"disposition": r["disposition"], "note": r.get("note", ""),
+            "analyst": r.get("analyst", ""), "ts": _iso(r.get("ts"))}
+
+
+def get_dispositions_map(entities: list[str]) -> dict:
+    """{entity: disposition} for a batch — used to annotate the risk watch-list."""
+    ents = [e for e in entities if e]
+    if not ents:
+        return {}
+    placeholders = ",".join(f"'{e}'" for e in ents)
+    rows = _q(f"SELECT entity, argMax(disposition, ts) AS disposition FROM {FEEDBACK_TABLE} "
+              f"WHERE entity IN ({placeholders}) GROUP BY entity")
+    return {r["entity"]: r["disposition"] for r in rows}
+
+
+def get_all_feedback(limit: int = 200) -> list[dict]:
+    rows = _q(f"SELECT entity, signature, disposition, note, analyst, ts FROM {FEEDBACK_TABLE} FINAL "
+              f"ORDER BY ts DESC LIMIT {int(limit)}")
+    return [{"entity": r["entity"], "signature": r["signature"],
+             "disposition": r["disposition"], "note": r.get("note", ""),
+             "analyst": r.get("analyst", ""), "ts": _iso(r.get("ts"))} for r in rows]
 
 
 # ── Risk-Based Alerting (RBA): per-entity time-decayed risk ────────────────
