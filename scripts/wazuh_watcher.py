@@ -67,7 +67,7 @@ CHUNK_LINES = int(os.getenv("WAZUH_CHUNK_LINES", "50000"))
 INSERT_COLS = [
     "ts", "ingested_at", "src_ip", "dst_ip", "dst_port", "threat_type",
     "severity", "rule", "rule_id", "rule_level", "action", "country",
-    "agent", "mitre", "username", "useragent", "signature",
+    "agent", "mitre", "username", "useragent", "signature", "url",
     # ── Phase 1: richer Wazuh signal ──
     "mitre_tactic", "mitre_technique", "rule_groups", "rule_firedtimes",
     "pci_dss", "gdpr", "hipaa", "nist",
@@ -382,6 +382,10 @@ def map_to_row(raw_alert: dict):
                "data.office365.UserId", "syscheck.uname_after"),  # username (many Wazuh sources)
         _first(flat, "data.http.http_user_agent"),                   # useragent
         _first(flat, "data.alert.signature")[:200],                  # signature
+        # destination NAME the alert is about — blocked/contacted URL, domain or
+        # DNS query. Covers Fortigate/proxy URL blocks, web alerts and Sysmon DNS.
+        _first(flat, "data.url", "data.hostname", "data.dstname", "data.uri",
+               "data.win.eventdata.queryName", "data.dns.question.name")[:512],  # url
         # ── Phase 1: richer Wazuh signal ──
         _first(flat, "rule.mitre.tactic"),                           # mitre_tactic
         _first(flat, "rule.mitre.technique"),                        # mitre_technique

@@ -1977,7 +1977,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=12-rep">
+  <link rel="stylesheet" href="theme.css?v=15-recommender">
 </head>
 
 <body>
@@ -2666,31 +2666,22 @@
         </div>
       </div>
       <div id="page-playbooks" class="page">
-        <div class="card" style="margin-bottom:16px">
-          <div class="ch">
-            <span class="ct">⚡ Response Playbooks <span style="font-size:11px;color:var(--muted);font-weight:400">— AI-suggested, blast-radius previewed, human-approved, fully logged</span></span>
-            <button class="btn" style="font-size:11px" onclick="loadPlaybooksPage()">↻ Refresh</button>
-          </div>
-          <div class="cb">
-            <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:4px">
-              Playbooks turn an incident into a one-click response. They run from the
-              <b style="color:var(--text)">Incidents</b> page — open any incident and click
-              <b style="color:var(--accent)">⚡ Suggested response</b>. The engine matches the right playbook,
-              previews exactly what it would touch (blast radius), and runs only on your approval for any
-              containment step. Every run is recorded in the ledger below.
+        <!-- ── Recommender: which NEW playbooks should we build? ── -->
+        <div class="dossier-hero">
+          <div class="dh-left">
+            <div class="dh-kicker">🧠 ML Playbook Recommender</div>
+            <div class="dh-title">Which playbooks should you build next?</div>
+            <div class="dh-sub">A classifier trained <b style="color:var(--text)">only on your analysts' true-positive / false-positive
+              calls</b> finds the log patterns that genuinely recur and aren't yet covered by a playbook — then drafts the
+              response for each. No heuristics: it learns from your feedback alone, so the more you triage, the sharper it gets.</div>
+            <div class="dh-controls">
+              <button class="btn pri" onclick="retrainRecommender(this)">↻ Retrain on latest feedback</button>
+              <span id="rec-model-status" class="rec-model"></span>
             </div>
           </div>
         </div>
-        <div class="card" style="margin-bottom:16px">
-          <div class="ch"><span class="ct">Playbook catalogue</span></div>
-          <div class="cb"><div id="pb-catalogue" class="empty">Loading…</div></div>
-        </div>
-        <div class="card">
-          <div class="ch">
-            <span class="ct">Run ledger <span style="font-size:11px;color:var(--muted);font-weight:400">— every executed step, replayable</span></span>
-          </div>
-          <div class="cb"><div id="pb-ledger" class="empty">Loading…</div></div>
-        </div>
+        <div id="pb-recommender" style="margin-bottom:16px"><div class="empty" style="padding:30px">Loading recommender…</div></div>
+
       </div>
       <div id="page-reports" class="page">
         <div class="term-panel">
@@ -3241,6 +3232,7 @@ tr:hover td{background:#161b22}</style></head>
         <div class="tev-body">
           ${k('Identity', ident)}
           ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}${portService(e.dst_port) ? ` <span class="tev-svc">${portService(e.dst_port)}</span>` : ''}`)}
+          ${k(blocked ? 'Target (blocked)' : 'Target', e.url ? `<span class="tev-url">${escapeHTML(e.url)}</span>` : '')}
           ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id">#${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
           ${k('User', e.username)}
           ${k('Country', e.country)}
@@ -4327,7 +4319,6 @@ tr:hover td{background:#161b22}</style></head>
             ${ips ? `<div style="margin-bottom:10px">${ips}${i.ip_count > 5 ? `<span style="font-size:11px;color:var(--muted)">+${i.ip_count - 5} more</span>` : ''}</div>` : ''}
             ${i.narrative ? `<div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.6">${i.narrative}</div>` : ''}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn pri" style="font-size:11px" onclick="suggestResponse('${i.id}', this)">⚡ Suggested response</button>
               ${lead ? `<button class="btn ai" style="font-size:11px" onclick="incidentNarrative('${lead}', this)">AI incident report</button>` : ''}
               ${lead ? `<button class="btn" style="font-size:11px" onclick="nav('ueba')">UEBA</button>` : ''}
             </div>
@@ -4362,121 +4353,116 @@ tr:hover td{background:#161b22}</style></head>
 
     // ── Response playbooks (SOAR) ───────────────────────────────────────────
     async function loadPlaybooksPage() {
-      const [cat, led] = await Promise.all([get(`${API}/playbooks`), get(`${API}/playbooks/runs?limit=40`)]);
-      // Catalogue
-      const cb = document.getElementById('pb-catalogue');
-      if (cat && cat.playbooks && cat.playbooks.length) {
-        cb.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px">` +
-          cat.playbooks.map(p => {
-            const sc = p.severity === 'critical' ? 'var(--danger)' : p.severity === 'high' ? 'var(--warn)' : 'var(--accent)';
-            const steps = (p.steps || []).map(s => {
-              const lbl = (s.action || '').replace(/_/g, ' ');
-              const mut = s.requires_approval;
-              return `<li style="margin:2px 0">${lbl}${mut ? ' <span class="badge" style="background:var(--warn)22;color:var(--warn);border:1px solid var(--warn)55;font-size:9px">approval</span>' : ''}</li>`;
-            }).join('');
-            return `<div style="border:1px solid var(--border);border-left:3px solid ${sc};border-radius:10px;padding:14px">
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px">
-                <span style="font-weight:650;color:${sc}">${p.name}</span>
-                <span class="badge ${p.severity}">${p.severity}</span>
-              </div>
-              <div style="font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:8px">${p.description}</div>
-              <div style="font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Steps</div>
-              <ul style="margin:0 0 0 18px;padding:0;font-size:12px">${steps}</ul>
-            </div>`;
-          }).join('') + `</div>`;
-      } else cb.innerHTML = '<span style="color:var(--muted)">Playbook engine unavailable</span>';
-      // Ledger
-      const lb = document.getElementById('pb-ledger');
-      if (led && led.runs && led.runs.length) {
-        lb.innerHTML = `<table style="width:100%"><thead><tr>
-            <th>Run</th><th>Playbook</th><th>Entity</th><th>Status</th><th>Approved by</th><th>Steps</th><th>When</th>
-          </tr></thead><tbody>` +
-          led.runs.map(r => {
-            const sc = r.status === 'done' ? 'var(--ok)' : r.status === 'approved' ? 'var(--accent)' : 'var(--warn)';
-            const done = (r.steps || []).filter(s => s.status === 'done').length;
-            return `<tr>
-              <td style="font-family:var(--mono);font-size:11px;color:var(--accent)">${r.run_id}</td>
-              <td style="font-size:12px">${r.playbook_id}</td>
-              <td style="font-family:var(--mono);font-size:11px">${r.entity || '—'}</td>
-              <td><span class="badge" style="background:${sc}22;color:${sc};border:1px solid ${sc}55">${r.status}</span></td>
-              <td style="font-size:12px;color:var(--muted)">${r.approved_by || '—'}</td>
-              <td style="font-size:12px">${done}/${(r.steps || []).length}</td>
-              <td style="font-size:11px;color:var(--muted);white-space:nowrap">${String(r.updated_at || '').substring(0, 19).replace('T', ' ')}</td>
-            </tr>`;
-          }).join('') + `</tbody></table>`;
-      } else lb.innerHTML = '<span style="color:var(--muted)">No playbook runs yet. Run one from the Incidents page (⚡ Suggested response).</span>';
+      loadRecommender();
     }
-    function stepBadge(s) {
-      const c = { done: 'var(--ok)', skipped: 'var(--muted)', requires_approval: 'var(--warn)', failed: 'var(--danger)' }[s] || 'var(--muted)';
-      const t = { requires_approval: 'needs approval', done: 'done', skipped: 'skipped', failed: 'failed' }[s] || s;
-      return `<span class="badge" style="background:${c}22;color:${c};border:1px solid ${c}55">${t}</span>`;
+
+    // ── Playbook Recommender (feedback-trained) ───────────────────────────────
+    const SEV_COLOR = { critical: 'var(--danger)', high: 'var(--warn)', medium: '#f0b429', low: 'var(--ok)' };
+    function sevCol(s) { return SEV_COLOR[(s || 'low').toLowerCase()] || 'var(--muted)'; }
+    let recState = null;
+    async function loadRecommender() {
+      const box = document.getElementById('pb-recommender');
+      box.innerHTML = `<div class="empty" style="padding:30px;text-align:center">Training on analyst feedback & scanning recurring patterns…</div>`;
+      const [rec, q] = await Promise.all([
+        get(`${API}/playbooks/recommendations`),
+        get(`${API}/playbooks/label-queue?limit=12`),
+      ]);
+      recState = rec;
+      renderModelStatus(rec);
+      if (!rec) { box.innerHTML = `<div class="card"><div class="cb"><div class="empty">Recommender unavailable.</div></div></div>`; return; }
+      if (rec.status !== 'ready') renderCollecting(rec, q);
+      else renderRecommendations(rec, q);
     }
-    async function suggestResponse(incidentId, btn) {
-      btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Matching…';
-      const r = await get(`${API}/playbooks/suggest?incident_id=${encodeURIComponent(incidentId)}`);
-      btn.disabled = false; btn.textContent = orig;
-      if (!r) return;
-      const panel = btn.closest('.cb');
-      let box = panel.querySelector('.pb-panel');
-      if (!box) { box = document.createElement('div'); box.className = 'pb-panel'; box.style.marginTop = '12px'; panel.appendChild(box); }
-      const b = r.blast_radius || {};
-      const sugg = (r.suggestions || []).map((s, idx) => {
-        const sc = s.severity === 'critical' ? 'var(--danger)' : s.severity === 'high' ? 'var(--warn)' : 'var(--accent)';
-        const steps = s.steps.map(st =>
-          `<li style="margin:2px 0">${st.label}${st.mutates ? ' <span class="badge" style="background:var(--warn)22;color:var(--warn);border:1px solid var(--warn)55">approval</span>' : ''}</li>`).join('');
-        return `<div style="border:1px solid var(--border);border-left:3px solid ${sc};border-radius:6px;padding:10px 12px;margin-bottom:8px">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-            <span style="font-weight:600;color:${sc}">${s.name}</span>
-            <span class="badge ${s.severity}">${s.severity}</span>
-          </div>
-          <div style="font-size:11px;color:var(--muted);margin:4px 0">${s.description}</div>
-          <div style="font-size:11px;color:var(--muted2,#9aa)">Matched: ${(s.reasons || []).join('; ')}</div>
-          <ul style="margin:6px 0 8px 18px;padding:0;font-size:12px">${steps}</ul>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn" style="font-size:11px" onclick="runPlaybook('${s.playbook_id}','${incidentId}',false,this)">Run safe steps</button>
-            <button class="btn pri" style="font-size:11px" onclick="runPlaybook('${s.playbook_id}','${incidentId}',true,this)">Approve &amp; run all</button>
-          </div>
-          <div class="pb-result" data-pb="${s.playbook_id}"></div>
-        </div>`;
-      }).join('') || '<div style="color:var(--muted);font-size:12px">No predefined playbook matched. Investigate manually.</div>';
-      box.innerHTML = `
-        <div style="background:var(--bg2);border-radius:8px;padding:12px">
-          <div style="font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.05em;margin-bottom:6px">⚡ SUGGESTED RESPONSE</div>
-          <div style="font-size:12px;margin-bottom:8px;line-height:1.5">${r.summary || ''}</div>
-          <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-bottom:10px">
-            <span>Blast radius:</span>
-            <span><b style="color:var(--fg)">${b.hosts ?? 0}</b> hosts</span>
-            <span><b style="color:var(--fg)">${b.users ?? 0}</b> users</span>
-            <span><b style="color:var(--fg)">${b.dst_ips ?? 0}</b> destinations</span>
-            <span><b style="color:var(--fg)">${(b.events ?? 0).toLocaleString()}</b> events</span>
-          </div>
-          ${sugg}
-        </div>`;
+    function renderModelStatus(rec) {
+      const el = document.getElementById('rec-model-status'); if (!el || !rec) return;
+      if (rec.status === 'ready') {
+        el.innerHTML = `<span class="rec-dot" style="background:var(--ok)"></span> Model ready · <b>${rec.labels}</b> labels · in-sample acc ${(rec.train_accuracy ?? 0).toFixed(2)}`;
+      } else {
+        el.innerHTML = `<span class="rec-dot" style="background:var(--warn)"></span> Collecting labels · <b>${rec.labels}</b>/${rec.needed} (need ≥${rec.need_per_class} of each class)`;
+      }
     }
-    async function runPlaybook(playbookId, incidentId, approve, btn) {
-      const label = btn.textContent; btn.disabled = true; btn.textContent = 'Running…';
-      let r;
-      try {
-        const resp = await fetch(`${API}/playbooks/run`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playbook_id: playbookId, incident_id: incidentId, approve, approved_by: 'analyst' })
-        });
-        r = await resp.json();
-      } catch (e) { r = null; }
-      btn.disabled = false; btn.textContent = label;
-      if (!r || !r.steps) return;
-      const out = btn.closest('div').parentElement.querySelector(`.pb-result[data-pb="${playbookId}"]`);
-      const rows = r.steps.map(s =>
-        `<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:4px 0;border-bottom:1px solid var(--border)">
-          <span style="font-size:12px">${s.label}</span>
-          <span style="white-space:nowrap">${stepBadge(s.status)}</span>
+    function queueItem(item) {
+      const cov = item.covered ? `<span class="badge" style="background:var(--muted)22;color:var(--muted)">covered</span>` : `<span class="badge" style="background:var(--accent)22;color:var(--accent)">gap</span>`;
+      return `<div class="rec-q" data-ent="${item.example_entity}">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px"><b>${item.title.replace(/_/g,' ')}</b> ${cov}
+            <span class="muted" style="font-size:11px">${(item.events||0).toLocaleString()} events · ${item.ips} IPs · ${item.critical} critical</span></div>
+          <div class="muted" style="font-size:11px;margin-top:3px">e.g. <span style="font-family:var(--mono);color:var(--accent)">${item.example_entity}</span> — ${item.example_detail}</div>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin:0 0 6px 0">${s.output || ''}</div>`).join('');
-      out.innerHTML = `<div style="margin-top:8px;background:var(--bg3);border-radius:6px;padding:8px 10px">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Run <b>${r.run_id}</b> · status <b>${r.status}</b>${r.approved_by ? ' · approved by ' + r.approved_by : ''}</div>
-        ${rows}
-      </div>`;
+        <div class="rec-q-btns">
+          <button class="btn pri" style="font-size:11px;padding:5px 10px" onclick="labelPattern('${item.example_entity}','${item.threat_type}','true_positive',this)">✓ True positive</button>
+          <button class="btn danger" style="font-size:11px;padding:5px 10px" onclick="labelPattern('${item.example_entity}','${item.threat_type}','false_positive',this)">✕ False positive</button>
+        </div></div>`;
     }
+    function renderCollecting(rec, q) {
+      const pct = Math.min(100, Math.round(rec.labels / rec.needed * 100));
+      const queue = (q && q.queue || []).map(queueItem).join('') || '<div class="muted">No unlabelled recurring patterns right now.</div>';
+      document.getElementById('pb-recommender').innerHTML = `
+        <div class="card ds-card"><div class="cb" style="text-align:center;padding:26px 20px">
+          <div style="font-size:34px">🧠</div>
+          <div style="font-size:17px;font-weight:700;margin:8px 0 4px">The recommender is learning from your triage</div>
+          <div class="muted" style="font-size:13px;max-width:560px;margin:0 auto 14px;line-height:1.6">
+            It recommends playbooks only from <b style="color:var(--text)">analyst-confirmed</b> true/false-positive calls — no guessing.
+            You have <b style="color:var(--text)">${rec.labels}</b> of <b>${rec.needed}</b> labels (and need ≥${rec.need_per_class} of each class).
+            Label a few recurring patterns below to unlock it.</div>
+          <div class="rec-prog"><div class="rec-prog-f" style="width:${pct}%"></div></div>
+        </div></div>
+        <div class="card ds-card"><div class="ch"><span class="ct">⚡ Fast labelling queue</span>
+          <span class="muted" style="font-size:11px">recurring patterns — one click trains the model</span></div>
+          <div class="cb"><div class="rec-q-list">${queue}</div></div></div>`;
+    }
+    function renderRecommendations(rec, q) {
+      const recs = (rec.recommendations || []).map((r, i) => {
+        const conf = Math.round(r.tp_confidence * 100);
+        const confCol = conf >= 80 ? 'var(--danger)' : conf >= 60 ? 'var(--warn)' : 'var(--accent)';
+        const steps = r.draft_steps.map(s => `<li>${(s.label || s.action)}${s.requires_approval ? ' <span class="badge warn" style="font-size:9px">approval</span>' : ''}</li>`).join('');
+        const mits = (r.mitigations || []).map(m => `<span class="rec-mit" title="${escapeHTML(m.detail || '')}"><b>${m.id}</b> ${escapeHTML(m.name || '')}</span>`).join('') || '<span class="muted" style="font-size:11px">—</span>';
+        return `<div class="rec-card">
+          <div class="rec-rank">#${i + 1}</div>
+          <div style="flex:1;min-width:0">
+            <div class="rec-head">
+              <span class="rec-title">${escapeHTML(r.title)}</span>
+              ${r.technique ? `<span class="mitre-tag">${r.technique}</span>` : ''}
+              <span class="rec-conf" style="background:${confCol}1f;color:${confCol};border:1px solid ${confCol}55">TP ${conf}%</span>
+              <span class="badge" style="margin-left:auto;background:var(--accent)1f;color:var(--accent)">new playbook</span>
+            </div>
+            <div class="rec-why">${escapeHTML(r.why)}</div>
+            <div class="rec-stats">
+              <span><b>${(r.events||0).toLocaleString()}</b> events</span>
+              <span><b>${r.distinct_ips}</b> source IPs</span>
+              <span><b>${r.critical}</b> critical</span>
+              <span><b>${r.span_days}</b>d span</span>
+            </div>
+            <div class="rec-grid">
+              <div><div class="rec-sub">Draft response</div><ol class="rec-steps">${steps}</ol></div>
+              <div><div class="rec-sub">ATT&CK mitigations</div><div class="rec-mits">${mits}</div></div>
+            </div>
+          </div></div>`;
+      }).join('') || `<div class="card"><div class="cb"><div class="empty" style="padding:24px">No uncovered recurring patterns cleared the model's confidence bar — your playbooks already cover what recurs. 👍</div></div></div>`;
+      const queue = (q && q.queue || []).map(queueItem).join('');
+      document.getElementById('pb-recommender').innerHTML = `
+        <div class="card ds-card ds-mit-card"><div class="ch">
+          <span class="ct">🛡 Recommended new playbooks</span>
+          <span class="muted" style="font-size:11px">ranked by recurrence × model TP-confidence × severity — uncovered gaps only</span></div>
+          <div class="cb"><div class="rec-list">${recs}</div></div></div>
+        ${queue ? `<div class="card ds-card"><div class="ch"><span class="ct">⚡ Keep improving the model</span>
+          <span class="muted" style="font-size:11px">label more patterns to sharpen confidence</span></div>
+          <div class="cb"><div class="rec-q-list">${queue}</div></div></div>` : ''}`;
+    }
+    async function labelPattern(entity, threat, disposition, btn) {
+      const row = btn.closest('.rec-q'); if (row) row.style.opacity = '.5';
+      btn.disabled = true;
+      await post(`${API}/feedback`, { entity, threat_type: threat, disposition, analyst: 'analyst' });
+      toast(`Labelled ${entity} as ${disposition.replace('_', ' ')}`, disposition === 'true_positive' ? 'ok' : 'warn');
+      loadRecommender();
+    }
+    async function retrainRecommender(btn) {
+      const lbl = btn.textContent; btn.disabled = true; btn.textContent = 'Retraining…';
+      await post(`${API}/playbooks/train`);
+      btn.disabled = false; btn.textContent = lbl;
+      loadRecommender();
+    }
+
 
     // ── UEBA ──────────────────────────────────────────────────────────────────
     async function loadUEBA() {

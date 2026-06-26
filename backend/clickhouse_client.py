@@ -116,6 +116,26 @@ _EVENT_COLS = (
     "proc_cmdline, target_user, logon_type, geo_lat, geo_lon"
 )
 
+# The blocked/contacted destination NAME (URL / domain / DNS query), so the trail
+# can say "blocked facebook.com" instead of just "blocked to 31.13.93.1:443".
+# New ingests fill the `url` column directly; for rows ingested before the column
+# existed, we recover it from the full alert JSON we always keep in `raw`
+# (data.url -> data.hostname -> data.dstname -> Sysmon DNS queryName). This whole
+# expression only ever runs on the bounded, user-facing trail/logs paths — never
+# on the big ML/baseline scans, which keep using the lean _EVENT_COLS above.
+_URL_FALLBACK = (
+    "multiIf("
+    "url != '', url, "
+    "JSONExtractString(raw, 'data', 'url') != '', JSONExtractString(raw, 'data', 'url'), "
+    "JSONExtractString(raw, 'data', 'hostname') != '', JSONExtractString(raw, 'data', 'hostname'), "
+    "JSONExtractString(raw, 'data', 'dstname') != '', JSONExtractString(raw, 'data', 'dstname'), "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'queryName') != '', "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'queryName'), "
+    "'') AS url"
+)
+# UI/trail column list = lean columns + the resolved destination name.
+_EVENT_COLS_UI = _EVENT_COLS + ", " + _URL_FALLBACK
+
 
 # ── Serve-layer enrichment (works on existing rows; no re-ingest needed) ──────
 
@@ -240,7 +260,7 @@ def get_ip_events_desc(ip: str, limit: int = 100, days: int = 0) -> list[dict]:
     where = "src_ip = {ip:String}"
     if days > 0:
         where += " AND ts >= now() - INTERVAL {days:UInt32} DAY"
-    sql = (f"SELECT {_EVENT_COLS} FROM {LOGS_TABLE} WHERE {where} "
+    sql = (f"SELECT {_EVENT_COLS_UI} FROM {LOGS_TABLE} WHERE {where} "
            f"ORDER BY ts DESC LIMIT {int(min(limit, 100000))}")
     return _shape_events(_q(sql, {"ip": ip, "days": days}))
 
@@ -253,7 +273,7 @@ _TRAIL_COLS = {"ip": "src_ip", "username": "username", "host": "agent"}
 def get_entity_events_desc(field: str, value: str, limit: int = 200) -> list[dict]:
     """Events for an entity (ip | username | host), newest-first, for the trail."""
     col = _TRAIL_COLS.get(field, "src_ip")
-    sql = (f"SELECT {_EVENT_COLS} FROM {LOGS_TABLE} WHERE {col} = {{v:String}} "
+    sql = (f"SELECT {_EVENT_COLS_UI} FROM {LOGS_TABLE} WHERE {col} = {{v:String}} "
            f"ORDER BY ts DESC LIMIT {int(min(limit, 100000))}")
     return _shape_events(_q(sql, {"v": value}))
 
@@ -282,6 +302,65 @@ def get_entity_summary(field: str, value: str) -> dict:
         "src_ips": [{"ip": r["i"], "events": int(r["c"])} for r in ips],
         "users": [{"name": r["u"], "events": int(r["c"])} for r in users],
     }
+
+
+# ── Playbook recommender: feature matrix + per-log-type recurrence ──────────
+
+def get_entity_features(entities: Optional[list] = None, limit: int = 500) -> list[dict]:
+    """Per-source-IP behavioural feature row used by the feedback-trained TP
+    classifier. If `entities` is given, returns features for exactly those IPs
+    (training set); otherwise the busiest `limit` IPs (scoring set). One scan."""
+    if entities:
+        safe = ",".join("'" + str(e).replace("'", "") + "'" for e in entities if e)
+        if not safe:
+            return []
+        where = f"WHERE src_ip IN ({safe})"
+        tail = "GROUP BY entity"
+    else:
+        where = "WHERE src_ip != ''"
+        tail = f"GROUP BY entity ORDER BY events DESC LIMIT {int(min(limit, 5000))}"
+    sql = (
+        f"SELECT src_ip AS entity, count() AS events, max(rule_level) AS max_lvl, "
+        f"avg(rule_level) AS avg_lvl, "
+        f"countIf(severity = 'critical') AS crit, countIf(severity = 'high') AS high, "
+        f"uniqExact(dst_ip) AS uniq_dst, uniqExactIf(dst_port, dst_port != '') AS uniq_ports, "
+        f"uniqExactIf(username, username != '') AS uniq_users, "
+        f"uniqExact(country) AS uniq_countries, "
+        f"arrayElement(topK(1)(threat_type), 1) AS top_threat, max(ts) AS last_seen "
+        f"FROM {LOGS_TABLE} {where} {tail}"
+    )
+    rows = _q(sql)
+    return [{
+        "entity": r["entity"], "events": int(r["events"]),
+        "max_lvl": int(r.get("max_lvl") or 0), "avg_lvl": float(r.get("avg_lvl") or 0),
+        "crit": int(r["crit"]), "high": int(r["high"]),
+        "uniq_dst": int(r["uniq_dst"]), "uniq_ports": int(r["uniq_ports"]),
+        "uniq_users": int(r["uniq_users"]), "uniq_countries": int(r["uniq_countries"]),
+        "top_threat": r.get("top_threat") or "unknown", "last_seen": _iso(r.get("last_seen")),
+    } for r in rows]
+
+
+def get_threat_type_recurrence(window_days: int = 30) -> list[dict]:
+    """Per log type (threat_type): how much it recurs and how severe — the raw
+    recurrence signal the recommender ranks. One scan over recent logs."""
+    sql = (
+        f"SELECT threat_type, count() AS events, uniqExact(src_ip) AS ips, "
+        f"max(rule_level) AS max_lvl, "
+        f"countIf(severity IN ('high','critical')) AS hi, "
+        f"countIf(severity = 'critical') AS crit, "
+        f"toUInt32(dateDiff('day', min(ts), max(ts)) + 1) AS span_days, "
+        f"min(ts) AS first_seen, max(ts) AS last_seen "
+        f"FROM {LOGS_TABLE} WHERE ts >= now() - INTERVAL {int(window_days)} DAY "
+        f"AND threat_type != '' GROUP BY threat_type ORDER BY events DESC"
+    )
+    rows = _q(sql)
+    return [{
+        "threat_type": r["threat_type"], "events": int(r["events"]),
+        "ips": int(r["ips"]), "max_lvl": int(r.get("max_lvl") or 0),
+        "hi": int(r["hi"]), "crit": int(r["crit"]),
+        "span_days": int(r.get("span_days") or 1),
+        "first_seen": _iso(r.get("first_seen")), "last_seen": _iso(r.get("last_seen")),
+    } for r in rows]
 
 
 def get_ip_total_count(ip: str) -> int:
@@ -591,7 +670,7 @@ def get_recent_logs(minutes: int = 0, start: str = "", end: str = "",
                      "OR positionCaseInsensitive(agent, {q:String}) > 0)")
         params["q"] = q
     wc = (" WHERE " + " AND ".join(where)) if where else ""
-    sql = (f"SELECT {_EVENT_COLS} FROM {LOGS_TABLE}{wc} "
+    sql = (f"SELECT {_EVENT_COLS_UI} FROM {LOGS_TABLE}{wc} "
            f"ORDER BY ts DESC LIMIT {int(min(limit, 5000))}")
     return _shape_events(_q(sql, params))
 
@@ -981,6 +1060,10 @@ _RUNTIME_DDL = [
         analyst     String DEFAULT '',
         ts          DateTime64(3) DEFAULT now64(3)
     ) ENGINE = ReplacingMergeTree(ts) ORDER BY (entity, signature)""",
+    # Destination NAME (blocked/contacted URL / domain / DNS query) so the trail
+    # can name the target, not just its IP. Cheap metadata-only ALTER; the serve
+    # layer back-fills old rows from `raw` on the fly (see _URL_FALLBACK).
+    f"ALTER TABLE {LOGS_TABLE} ADD COLUMN IF NOT EXISTS url String DEFAULT ''",
 ]
 
 

@@ -169,6 +169,7 @@ for i in range(204):
         "data.src_ip": "",
         "data.action": "blocked",
         "data.dstip": "31.13.93.1",
+        "data.url": random.choice(hosts),   # the actual blocked domain (was being dropped)
         "data.srccountry": "India",
         "rule.mitre.id": "",
         "rule.mitre.tactic": "",
@@ -241,7 +242,8 @@ for i in range(9):
 # Sort by timestamp
 rows.sort(key=lambda r: r["@timestamp"])
 
-fieldnames = list(rows[0].keys())
+# union of every key across rows (some rows carry data.url, others don't)
+fieldnames = list(dict.fromkeys(k for r in rows for k in r.keys()))
 with open("sample_logs.csv","w",newline="",encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     writer.writeheader()

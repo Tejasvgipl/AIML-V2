@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS cybersentinel.logs
     username     String                   DEFAULT '',
     useragent    String                   DEFAULT '',
     signature    String                   DEFAULT '',
+    url          String                   DEFAULT '',   -- blocked/contacted URL, domain or DNS query (the destination NAME)
     -- ── Phase 1: richer Wazuh signal (previously discarded) ──────────────
     mitre_tactic    String                 DEFAULT '',   -- ATT&CK tactic name(s)
     mitre_technique String                 DEFAULT '',   -- ATT&CK technique name(s)

@@ -31,6 +31,10 @@ try:
     import ioc_intel as ioc            # STIX2-style IP -> actor/campaign enrichment
 except Exception:
     ioc = None  # type: ignore
+try:
+    import playbook_recommender as pbr  # feedback-trained "which playbooks to build" engine
+except Exception:
+    pbr = None  # type: ignore
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -2762,6 +2766,76 @@ async def playbook_runs(incident_id: str = "", limit: int = 50):
         return {"runs": []}
     runs = await _to_thread(osc.get_playbook_runs, incident_id, min(limit, 200))
     return {"runs": runs, "total": len(runs)}
+
+
+# -- Playbook Recommender: "which NEW playbooks should we build?" -------------
+# Feedback-trained true-positive classifier -> recurring, uncovered log types
+# become ranked playbook recommendations with a draft response. No heuristic
+# fallback (product decision): below a minimum labelled set it returns a
+# "collecting labels" status instead of guessing.
+
+async def _recommender_inputs():
+    """Pull everything the (pure) recommender needs from ClickHouse, once."""
+    feedback = await _to_thread(osc.get_all_feedback, 5000)
+    score_rows = await _to_thread(osc.get_entity_features, None, 800)
+    recurrence = await _to_thread(osc.get_threat_type_recurrence, 30)
+    ml_rows = await _to_thread(osc.get_all_ml_scores, 20000)
+    anomaly_set = {m["ip"] for m in ml_rows if m.get("is_anomaly")}
+    # latest disposition per entity
+    disp = {}
+    for f in feedback:
+        if f.get("entity") and f["entity"] not in disp:
+            disp[f["entity"]] = f["disposition"]
+    # training rows = labelled entities joined to their features
+    train_rows = []
+    if disp:
+        feats = await _to_thread(osc.get_entity_features, list(disp.keys()), 0)
+        fmap = {r["entity"]: r for r in feats}
+        for ent, d in disp.items():
+            r = fmap.get(ent)
+            if r:
+                train_rows.append({**r, "disposition": d})
+    covered = pbr.covered_threat_types([r["threat_type"] for r in recurrence]) if pbr else set()
+    return {"train_rows": train_rows, "score_rows": score_rows, "recurrence": recurrence,
+            "anomaly_set": anomaly_set, "covered": covered,
+            "labelled_entities": set(disp.keys())}
+
+
+@app.get("/api/playbooks/recommendations")
+async def playbook_recommendations():
+    """Ranked recommendations for NEW playbooks to build, with draft responses.
+    Pure feedback-driven: trains on analyst labels only."""
+    if not (osc and STORE_ENABLED and pbr):
+        raise HTTPException(503, "Recommender unavailable")
+    inp = await _recommender_inputs()
+    model = pbr.train(inp["train_rows"], inp["anomaly_set"])
+    result = pbr.recommend(model, inp["score_rows"], inp["recurrence"],
+                           inp["covered"], inp["anomaly_set"])
+    result["covered_playbooks"] = sorted(inp["covered"])
+    return result
+
+
+@app.post("/api/playbooks/train")
+async def playbook_train():
+    """(Re)fit the TP classifier on the current analyst labels; report honestly."""
+    if not (osc and STORE_ENABLED and pbr):
+        raise HTTPException(503, "Recommender unavailable")
+    inp = await _recommender_inputs()
+    model = pbr.train(inp["train_rows"], inp["anomaly_set"])
+    model.pop("_model", None)   # never serialise the raw model object
+    return model
+
+
+@app.get("/api/playbooks/label-queue")
+async def playbook_label_queue(limit: int = 12):
+    """Recurring, unlabelled patterns to disposition fast — the quickest way to
+    feed the feedback loop and unlock the recommender."""
+    if not (osc and STORE_ENABLED and pbr):
+        raise HTTPException(503, "Recommender unavailable")
+    inp = await _recommender_inputs()
+    queue = pbr.label_queue(inp["recurrence"], inp["covered"], inp["score_rows"],
+                            inp["labelled_entities"], min(limit, 40))
+    return {"queue": queue, "labels": len(inp["labelled_entities"])}
 
 
 # -- Risk-Based Alerting (RBA): per-entity decaying risk watch-list -----------
