@@ -142,7 +142,17 @@ _URL_FALLBACK = (
 # Only ever read on the bounded trail/logs/search paths (never the big ML scans).
 _RAW_SOURCE = (
     "JSONExtractString(raw, 'id') AS alert_id, "
-    "JSONExtractString(raw, 'timestamp') AS ts_raw"
+    "JSONExtractString(raw, 'timestamp') AS ts_raw, "
+    # Sysmon / Windows process telemetry — "what the endpoint actually ran".
+    # Pulled from raw so it works on every row regardless of column population.
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'image') AS proc_image_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'commandLine') AS proc_cmdline_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'parentImage') AS proc_parent_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'parentCommandLine') AS proc_parent_cmdline_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'user') AS proc_user_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'parentUser') AS proc_parent_user_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'integrityLevel') AS proc_integrity_r, "
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'hashes') AS proc_hashes_r"
 )
 # UI/trail column list = lean columns + resolved destination name + source id/time.
 _EVENT_COLS_UI = _EVENT_COLS + ", " + _URL_FALLBACK + ", " + _RAW_SOURCE
@@ -277,6 +287,22 @@ def _shape_events(rows: list[dict]) -> list[dict]:
         src["user_display"] = ("" if _is_machine_account(src.get("username", ""), src.get("agent", ""))
                                else str(src.get("username", "") or ""))
         src["event_id"] = _event_id(src)
+        # Process telemetry: prefer the raw-extracted value (always accurate),
+        # fall back to the stored column. Only present on UI/trail queries.
+        def _pick(*keys):
+            for k in keys:
+                v = str(src.get(k, "") or "").strip()
+                if v:
+                    return v
+            return ""
+        src["proc_image"] = _pick("proc_image_r", "proc_image")
+        src["proc_cmdline"] = _pick("proc_cmdline_r", "proc_cmdline")
+        src["proc_parent"] = _pick("proc_parent_r", "proc_parent")
+        src["proc_parent_cmdline"] = _pick("proc_parent_cmdline_r")
+        src["proc_user"] = _pick("proc_user_r")
+        src["proc_parent_user"] = _pick("proc_parent_user_r")
+        src["proc_integrity"] = _pick("proc_integrity_r")
+        src["proc_hashes"] = _pick("proc_hashes_r")
         out.append(src)
     return out
 

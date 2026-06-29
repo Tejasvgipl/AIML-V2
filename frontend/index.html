@@ -3313,6 +3313,18 @@ tr:hover td{background:#161b22}</style></head>
       const tsTip = tsExact
         ? 'Exact timestamp from alert.json (original timezone preserved)'
         : 'Stored time normalised to UTC — alert.json offset not available for this row';
+      // Process activity (Sysmon / Windows): what the endpoint actually ran, who
+      // spawned it, as which user, at what integrity, and the binary hashes.
+      const cmdStyle = 'font-family:var(--mono);font-size:11px;color:var(--text);word-break:break-all;white-space:pre-wrap;display:block;margin-top:2px';
+      const hasProc = e.proc_image || e.proc_cmdline || e.proc_parent || e.proc_parent_cmdline;
+      const integHot = /(system|high|administrator)/i.test(e.proc_integrity || '');
+      const procRows = hasProc ?
+        k('Process', (e.proc_cmdline || e.proc_image) ? `<code style="${cmdStyle}">${escapeHTML(e.proc_cmdline || e.proc_image)}</code>` : '') +
+        k('Spawned by', (e.proc_parent_cmdline || e.proc_parent) ? `<code style="${cmdStyle}">${escapeHTML(e.proc_parent_cmdline || e.proc_parent)}</code>` : '') +
+        k('Run as', e.proc_user || e.target_user || '') +
+        (e.proc_integrity ? k('Integrity', `<span class="badge ${integHot ? 'high' : 'low'}">${escapeHTML(e.proc_integrity)}</span>`) : '') +
+        (e.proc_hashes ? k('Hashes', `<code style="${cmdStyle}" title="Click to copy" onclick="copyEid(event,'${(e.proc_hashes || '').replace(/'/g, '')}')">${escapeHTML(e.proc_hashes)}</code>`) : '')
+        : '';
       return `<div class="tev tev-${blocked ? 'block' : allowed ? 'allow' : 'obs'}">
         <div class="tev-head">
           <span class="tts" title="${tsTip}">${escapeHTML(tsHead)}</span>
@@ -3324,12 +3336,14 @@ tr:hover td{background:#161b22}</style></head>
         </div>
         <div class="tev-body">
           ${k('Identity', ident)}
+          ${k('Endpoint (agent)', e.agent ? `<b>${escapeHTML(e.agent)}</b> <span style="font-size:10px;color:var(--muted)">Wazuh agent.name</span>` : '')}
           ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}${portService(e.dst_port) ? ` <span class="tev-svc">${portService(e.dst_port)}</span>` : ''}`)}
           ${k(blocked ? 'Target (blocked)' : 'Target', e.url ? `<span class="tev-url">${escapeHTML(e.url)}</span>` : '')}
           ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id">#${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
           ${k('User', e.user_display !== undefined ? e.user_display : e.username)}
           ${k('Country', e.country)}
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
+          ${procRows}
           ${k('Alert ID', e.alert_id ? `<span class="tev-id" onclick="copyEid(event,'${e.alert_id}')" title="Wazuh alert id (the &quot;id&quot; field in alert.json) — click to copy">${escapeHTML(e.alert_id)}</span> <span style="font-size:10px;color:var(--muted)">from alert.json</span>` : `<span style="font-size:10px;color:var(--muted)">no id in source for this row</span>`)}
           ${tsExact ? k('Stored (UTC)', escapeHTML(tsUTC) + ' UTC') : ''}
         </div>
