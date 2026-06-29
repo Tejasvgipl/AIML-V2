@@ -564,8 +564,15 @@ body[data-page="blocklist"]     { --accent: #ff5468; --accent-2: #a78bfa; }
 body[data-page="ingest"]        { --accent: #2dd4a7; --accent-2: #10b981; }
 body[data-page="reports"]       { --accent: #8b5cf6; --accent-2: #22d3ee; }
 
-/* Accent line under the header tints to the active section */
-.topbar { position: relative; }
+/* Accent line under the header tints to the active section.
+   sticky (not relative) keeps the header — and its Back/Forward buttons —
+   pinned to the top of the scrolling .main pane; still a positioned context
+   for the ::after accent line. */
+.topbar { position: sticky; top: 0; z-index: 20; }
+/* Zero the main pane's top padding (set !important elsewhere) so the sticky
+   header pins flush to the very top — no scrolled content peeking above it.
+   Higher specificity (.shell .main) beats the .main !important rule. */
+.shell .main { padding-top: 0 !important; }
 .topbar::after {
   content: ""; position: absolute; left: 0; right: 0; bottom: 8px; height: 2px;
   background: var(--grad); opacity: .55; border-radius: 2px;
