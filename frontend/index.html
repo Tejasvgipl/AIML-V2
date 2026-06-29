@@ -2195,32 +2195,6 @@
             <div class="msub">P0 flagged</div>
           </div>
         </div>
-        <!-- ── Cyber Resilience Score ─────────────────────────────────────── -->
-        <div class="card" style="margin-bottom:20px">
-          <div class="ch">
-            <span class="ct">Cyber Resilience Score</span>
-            <span style="font-size:11px;color:var(--muted)" id="res-computed"></span>
-          </div>
-          <div class="cb">
-            <div style="display:flex;align-items:center;gap:36px;flex-wrap:wrap">
-              <div style="text-align:center;min-width:110px">
-                <div id="res-ring" style="width:100px;height:100px;border-radius:50%;background:conic-gradient(var(--bg3) 360deg);display:flex;align-items:center;justify-content:center;margin:0 auto">
-                  <div style="width:78px;height:78px;border-radius:50%;background:var(--bg2);display:flex;flex-direction:column;align-items:center;justify-content:center">
-                    <div id="res-score" style="font-size:26px;font-weight:700;line-height:1;color:var(--muted)">—</div>
-                    <div style="font-size:10px;color:var(--muted)">/100</div>
-                  </div>
-                </div>
-                <div id="res-grade" style="margin-top:8px;font-size:24px;font-weight:700;color:var(--muted)">—</div>
-                <div style="font-size:11px;color:var(--muted)">Resilience Grade</div>
-              </div>
-              <div style="flex:1;min-width:240px" id="res-components">
-                <div style="color:var(--muted);font-size:12px">Loading resilience score…</div>
-              </div>
-            </div>
-            <div id="res-narrative" style="margin-top:12px;font-size:12px;color:var(--muted);border-top:1px solid var(--border);padding-top:10px"></div>
-          </div>
-        </div>
-
         <div class="cg2">
           <div class="cbox">
             <h3>Top threats (real categories)</h3>
@@ -2880,7 +2854,7 @@ tr:hover td{background:#161b22}</style></head>
       };
       document.getElementById('page-title').textContent = T[name] || name;
       document.body.dataset.page = name;
-      if (name === 'overview') { refreshAll(); loadResilience(); }
+      if (name === 'overview') { refreshAll(); }
       if (name === 'logs') loadLogs();
       if (name === 'ml') loadAnomalies();
       if (name === 'deviations') loadDeviations();
@@ -4270,41 +4244,6 @@ tr:hover td{background:#161b22}</style></head>
       a.click();
     }
 
-    // ── Cyber Resilience Score ─────────────────────────────────────────────────
-    async function loadResilience() {
-      const r = await get(`${API}/resilience`); if (!r) return;
-      const score = r.score;
-      const col = score >= 80 ? 'var(--ok)' : score >= 60 ? 'var(--warn)' : 'var(--danger)';
-      const deg = Math.round(score * 3.6);
-      document.getElementById('res-score').textContent = score;
-      document.getElementById('res-score').style.color = col;
-      document.getElementById('res-grade').textContent = r.grade;
-      document.getElementById('res-grade').style.color = col;
-      document.getElementById('res-ring').style.background = `conic-gradient(${col} ${deg}deg, var(--bg3) ${deg}deg)`;
-      document.getElementById('res-computed').textContent = 'Updated ' + toIST(r.computed_at);
-      const comps = r.components;
-      let html = '';
-      for (const c of Object.values(comps)) {
-        const cc = c.pct >= 75 ? 'var(--ok)' : c.pct >= 40 ? 'var(--warn)' : 'var(--danger)';
-        html += `<div style="margin-bottom:10px">
-          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
-            <span style="color:var(--text)">${c.label}</span>
-            <span style="color:${cc}">${c.score}/${c.max} pts &nbsp;·&nbsp; ${c.detail}</span>
-          </div>
-          <div style="height:5px;background:var(--bg3);border-radius:3px">
-            <div style="height:5px;width:${c.pct}%;background:${cc};border-radius:3px;transition:width .6s ease"></div>
-          </div></div>`;
-      }
-      document.getElementById('res-components').innerHTML = html;
-      const weak = Object.values(comps).filter(c => c.pct < 50).map(c => c.label);
-      const narrative = score >= 80
-        ? `Strong security posture across ${r.active_ips} active IPs — ML coverage, baselines, and threat response are all healthy.`
-        : score >= 55
-        ? `Moderate resilience. ${weak.length ? 'Focus on: ' + weak.join(', ') + '.' : 'Reduce active critical threats to improve.'}`
-        : `Low resilience. Immediate action needed on: ${weak.join(', ')}. Score ${r.active_ips} more IPs and establish baselines.`;
-      document.getElementById('res-narrative').textContent = narrative;
-    }
-
     // ── ML Anomaly ────────────────────────────────────────────────────────────
     async function scoreIP(ipOverride = null) {
       const ip = ipOverride || document.getElementById('ml-ip').value.trim(); if (!ip) return;
@@ -5249,9 +5188,7 @@ tr:hover td{background:#161b22}</style></head>
     });
     refreshReportEndpoints();
     refreshAll();
-    loadResilience();
     setInterval(refreshAll, 30000);
-    setInterval(loadResilience, 180000);
 
     // ── Background prefetch: warm every section so clicking a tab is instant ──
     // Each loader writes into its (hidden) page div on success and never blanks
