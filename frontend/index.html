@@ -3330,7 +3330,9 @@ tr:hover td{background:#161b22}</style></head>
           <span class="src-badge src-${e.log_source || 'endpoint'}">${e.log_source || 'endpoint'}</span>
           ${actHtml}
           <span class="tev-threat">${e.threat_label || (e.threat_type || '').replace(/_/g, ' ')}</span>
-          ${e.event_id ? `<span class="tev-eid" onclick="copyEid(event,'${e.event_id}')" title="CyberSentinel internal reference — a deterministic hash of this event, NOT the Wazuh alert id. Click to copy">${e.event_id}</span>` : ''}
+          ${e.alert_id
+            ? `<span class="tev-eid" onclick="copyEid(event,'${e.alert_id}')" title="Wazuh / OpenSearch _id — search this exact value in your alerts index or alerts.json. Click to copy">_id ${escapeHTML(e.alert_id)}</span>`
+            : (e.event_id ? `<span class="tev-eid" style="opacity:.65" onclick="copyEid(event,'${e.event_id}')" title="Internal reference (hash) — no Wazuh id on this row. NOT searchable in your data. Click to copy">${e.event_id}</span>` : '')}
         </div>
         <div class="tev-body">
           ${k('Identity', ident)}
@@ -3342,8 +3344,7 @@ tr:hover td{background:#161b22}</style></head>
           ${k('Country', e.country)}
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
           ${procRows}
-          ${k('Alert ID', e.alert_id ? `<span class="tev-id" onclick="copyEid(event,'${e.alert_id}')" title="Wazuh alert id (the &quot;id&quot; field in alert.json) — click to copy">${escapeHTML(e.alert_id)}</span> <span style="font-size:10px;color:var(--muted)">from alert.json</span>` : `<span style="font-size:10px;color:var(--muted)">no id in source for this row</span>`)}
-          ${tsExact ? k('Alert time (alert.json)', `<span style="font-family:var(--mono);font-size:11px">${escapeHTML(tsExact)}</span>`) : ''}
+          ${tsExact ? k('Alert time (alert.json)', `<span style="font-family:var(--mono);font-size:11px">${escapeHTML(tsExact)}</span> <span style="font-size:10px;color:var(--muted)">(IST shown above)</span>`) : ''}
         </div>
       </div>`;
     }
