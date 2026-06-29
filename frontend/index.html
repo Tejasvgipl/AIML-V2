@@ -3012,12 +3012,25 @@ tr:hover td{background:#161b22}</style></head>
       if (!list.length) return '<span class="ent-none">none</span>';
       const mode = kind === 'host' ? 'host' : 'username';
       const verb = kind === 'host' ? 'agent' : 'user';
-      const shown = list.slice(0, max).map(x =>
+      const chip = x =>
         `<span class="ent-chip ent-${kind} ent-chip-go" data-v="${escapeHTML(x.name)}" ` +
         `onclick="event.stopPropagation();goTrailEntity('${mode}', this.dataset.v)" ` +
-        `title="Trail this ${verb} · ${Number(x.events || 0).toLocaleString()} events">${escapeHTML(x.name)}</span>`).join('');
-      const extra = list.length > max ? `<span class="ent-chip ent-more" onclick="event.stopPropagation()">+${list.length - max}</span>` : '';
-      return shown + extra;
+        `title="Trail this ${verb} · ${Number(x.events || 0).toLocaleString()} events">${escapeHTML(x.name)}</span>`;
+      const head = list.slice(0, max).map(chip).join('');
+      if (list.length <= max) return head;
+      // The "+N" chip now EXPANDS to reveal the hidden identities (was a dead label).
+      const rest = list.slice(max).map(chip).join('');
+      const n = list.length - max;
+      return head +
+        `<span class="ent-rest" style="display:none">${rest}</span>` +
+        `<span class="ent-chip ent-more" style="cursor:pointer" title="Show ${n} more — click to expand" ` +
+        `onclick="event.stopPropagation();toggleMoreChips(this,${n})">+${n}</span>`;
+    }
+    function toggleMoreChips(btn, n) {
+      const rest = btn.previousElementSibling;
+      const open = rest.style.display !== 'none';
+      rest.style.display = open ? 'none' : 'contents';
+      btn.textContent = open ? ('+' + n) : '- less';
     }
     // Build the identity headline honestly: a real user, a host/sensor (with a
     // tooltip explaining agent-N is the reporting endpoint, not a person), or a
