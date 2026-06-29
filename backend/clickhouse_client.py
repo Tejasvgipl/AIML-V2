@@ -133,8 +133,19 @@ _URL_FALLBACK = (
     "JSONExtractString(raw, 'data', 'win', 'eventdata', 'queryName'), "
     "'') AS url"
 )
-# UI/trail column list = lean columns + the resolved destination name.
-_EVENT_COLS_UI = _EVENT_COLS + ", " + _URL_FALLBACK
+# Exact values taken verbatim from the alert.json document we keep in `raw`, so an
+# analyst can tie a trail row 1:1 to their source file:
+#   • alert_id = Wazuh's own document id (the alert's "id" field). Distinct from our
+#     EVT-... id, which is a deterministic content hash, NOT the Wazuh id.
+#   • ts_raw   = the ORIGINAL timestamp string WITH its timezone offset. We store the
+#     `ts` column as UTC (the source offset is lost there); ts_raw preserves it.
+# Only ever read on the bounded trail/logs/search paths (never the big ML scans).
+_RAW_SOURCE = (
+    "JSONExtractString(raw, 'id') AS alert_id, "
+    "JSONExtractString(raw, 'timestamp') AS ts_raw"
+)
+# UI/trail column list = lean columns + resolved destination name + source id/time.
+_EVENT_COLS_UI = _EVENT_COLS + ", " + _URL_FALLBACK + ", " + _RAW_SOURCE
 
 
 # ── Serve-layer enrichment (works on existing rows; no re-ingest needed) ──────
