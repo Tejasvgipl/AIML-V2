@@ -2284,11 +2284,11 @@
                 <div class="ipm-v mv-a" id="t-total">—</div>
               </div>
               <div class="ipm">
-                <div class="ipm-l">First seen (UTC)</div>
+                <div class="ipm-l">First seen (IST)</div>
                 <div class="ipm-v" style="font-size:11px;font-family:var(--mono)" id="t-first">—</div>
               </div>
               <div class="ipm">
-                <div class="ipm-l">Last seen (UTC)</div>
+                <div class="ipm-l">Last seen (IST)</div>
                 <div class="ipm-v" style="font-size:11px;font-family:var(--mono)" id="t-last">—</div>
               </div>
               <div class="ipm">
@@ -3225,8 +3225,8 @@ tr:hover td{background:#161b22}</style></head>
       const kindTag = mode === 'ip' ? '' : ` <span class="ent-kind ent-kind-${mode === 'host' ? 'host' : 'user'}">${mode === 'host' ? 'agent' : 'user'}</span>`;
       document.getElementById('t-ip').innerHTML = escapeHTML(value) + kindTag;
       document.getElementById('t-total').textContent = sum.total;
-      document.getElementById('t-first').textContent = (sum.first_seen || '').substring(0, 19).replace('T', ' ');
-      document.getElementById('t-last').textContent = (sum.last_seen || '').substring(0, 19).replace('T', ' ');
+      document.getElementById('t-first').textContent = toIST(sum.first_seen);
+      document.getElementById('t-last').textContent = toIST(sum.last_seen);
       const ttEntries = Object.entries(sum.threat_types || {}).filter(([k]) => k && k !== 'unknown').sort((a, b) => b[1] - a[1]);
       document.getElementById('t-threat').textContent = ((ttEntries[0] || ['—'])[0] || '—').replace(/_/g, ' ');
       const sv = sum.severities ? Object.entries(sum.severities).sort((a, b) => b[1] - a[1])[0] : ['low', 0];
@@ -3304,15 +3304,13 @@ tr:hover td{background:#161b22}</style></head>
           (ent.stable === false ? ` <span class="tev-warn" title="${(ent.note || '').replace(/"/g, '&quot;')}">&#9888; IP not stable identity</span>` : '')
         : (e.src_ip || '—');
       const k = (label, val) => val ? `<div class="tev-row"><span class="tev-k">${label}</span><span class="tev-v">${val}</span></div>` : '';
-      // Time: show the EXACT timestamp from alert.json (original timezone) when we
-      // have it; otherwise the stored value, explicitly labelled UTC. We also show
-      // the stored-UTC value in the body so the conversion is never hidden.
+      // Time: headline is always shown in IST (Asia/Kolkata), labelled. The exact
+      // verbatim alert.json timestamp (with its own offset) is kept in a body row
+      // for traceability, so nothing is hidden.
       const tsExact = (e.ts_raw || '').trim();
-      const tsUTC = (e['@timestamp'] || e.ts || '').substring(0, 19).replace('T', ' ');
-      const tsHead = tsExact || (tsUTC ? tsUTC + ' UTC' : '—');
-      const tsTip = tsExact
-        ? 'Exact timestamp from alert.json (original timezone preserved)'
-        : 'Stored time normalised to UTC — alert.json offset not available for this row';
+      const tsHead = toIST(tsExact || e['@timestamp'] || e.ts);
+      const tsTip = 'Indian Standard Time (Asia/Kolkata)' +
+        (tsExact ? ' — exact alert.json time: ' + tsExact : ' (converted from stored UTC)');
       // Process activity (Sysmon / Windows): what the endpoint actually ran, who
       // spawned it, as which user, at what integrity, and the binary hashes.
       const cmdStyle = 'font-family:var(--mono);font-size:11px;color:var(--text);word-break:break-all;white-space:pre-wrap;display:block;margin-top:2px';
@@ -3345,7 +3343,7 @@ tr:hover td{background:#161b22}</style></head>
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
           ${procRows}
           ${k('Alert ID', e.alert_id ? `<span class="tev-id" onclick="copyEid(event,'${e.alert_id}')" title="Wazuh alert id (the &quot;id&quot; field in alert.json) — click to copy">${escapeHTML(e.alert_id)}</span> <span style="font-size:10px;color:var(--muted)">from alert.json</span>` : `<span style="font-size:10px;color:var(--muted)">no id in source for this row</span>`)}
-          ${tsExact ? k('Stored (UTC)', escapeHTML(tsUTC) + ' UTC') : ''}
+          ${tsExact ? k('Alert time (alert.json)', `<span style="font-family:var(--mono);font-size:11px">${escapeHTML(tsExact)}</span>`) : ''}
         </div>
       </div>`;
     }
@@ -3689,7 +3687,7 @@ tr:hover td{background:#161b22}</style></head>
                       : allowed ? '<span class="badge low">allowed</span>'
                       : '<span style="color:var(--muted)">—</span>';
         return `<tr>
-        <td style="font-size:11px;white-space:nowrap">${(e['@timestamp'] || '').substring(0, 19).replace('T', ' ')}${e.event_id ? `<br><span class="log-eid" onclick="copyEid(event,'${e.event_id}')" title="Event ID — click to copy">${e.event_id}</span>` : ''}</td>
+        <td style="font-size:11px;white-space:nowrap" title="${e.ts_raw ? 'alert.json: ' + escapeHTML(e.ts_raw) : ''}">${toIST(e.ts_raw || e['@timestamp'])}${e.event_id ? `<br><span class="log-eid" onclick="copyEid(event,'${e.event_id}')" title="Event ID — click to copy">${e.event_id}</span>` : ''}</td>
         <td style="color:var(--accent);cursor:pointer" onclick="goTrail('${e.src_ip}')">${e.src_ip || '—'}</td>
         <td><span class="src-badge src-${e.log_source || 'endpoint'}">${e.log_source || 'endpoint'}</span></td>
         <td>${e.threat_label || (e.threat_type || '').replace(/_/g, ' ')}</td>
@@ -5231,17 +5229,24 @@ tr:hover td{background:#161b22}</style></head>
     setInterval(prefetchAll, 120000);
 
     // ── IST timestamp formatter (UTC → Asia/Kolkata) ─────────────────────
+    // Render any timestamp in IST (Asia/Kolkata), labelled. Handles both:
+    //  • ISO strings WITH an offset (e.g. "...+00:00" from the API, or the
+    //    alert.json "...+0530") — parsed as-is, then converted to IST.
+    //  • bare ClickHouse UTC strings ("2026-06-18 09:40:32.729000", no zone) —
+    //    treated as UTC. The old version wrongly appended 'Z' to offset strings,
+    //    producing an invalid date and silently falling back to raw UTC.
     function toIST(ts) {
       if (!ts || ts === '—') return '—';
-      // ClickHouse returns "2026-06-18 09:40:32.729000" (UTC, no Z suffix)
-      const d = new Date(String(ts).replace(' ', 'T').replace(/(\.\d+)?$/, 'Z'));
-      if (isNaN(d)) return String(ts).slice(0, 16);
+      let s = String(ts).trim().replace(' ', 'T');
+      if (!/(Z|[+\-]\d{2}:?\d{2})$/.test(s)) s += 'Z';   // no zone -> it's UTC
+      const d = new Date(s);
+      if (isNaN(d)) return String(ts).slice(0, 19).replace('T', ' ');
       return d.toLocaleString('en-IN', {
         timeZone: 'Asia/Kolkata',
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', second: '2-digit',
         hour12: false
-      }).replace(/\//g, '-');
+      }).replace(/\//g, '-') + ' IST';
     }
 
     // ── Grafana quick-access banner ───────────────────────────────────────
