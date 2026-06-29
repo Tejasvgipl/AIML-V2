@@ -55,10 +55,15 @@
       background: var(--bg2);
       border-right: 1px solid var(--border);
       display: flex;
-      flex-direction: column
+      flex-direction: column;
+      height: 100vh;
+      overflow-y: auto;
+      position: sticky;
+      top: 0
     }
 
     .main {
+      height: 100vh;
       overflow-y: auto
     }
 
@@ -1809,8 +1814,17 @@
         grid-template-columns: 1fr
       }
 
+      /* Single-column: sidebar stacks on top, let the document scroll so the
+         sticky topbar anchors to the viewport instead of a 100vh main pane. */
+      .main {
+        height: auto;
+        overflow-y: visible
+      }
+
       .sidebar {
-        position: relative
+        position: relative;
+        height: auto;
+        overflow-y: visible
       }
 
       .nav {
