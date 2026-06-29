@@ -193,16 +193,39 @@ def _better_threat(ev: dict) -> str:
 _SYNTH_AGENT = re.compile(r"^agent-\d+$", re.I)
 
 
+def _is_machine_account(user: str, agent: str = "") -> bool:
+    """Is this 'user' actually a machine/computer name, not a person?
+    Windows/AD computer accounts end in '$' (e.g. DESKTOP-AB12$), and some
+    sources leak the endpoint's own hostname into the user field. We never want
+    a laptop name shown as an identity — those resolve to the Wazuh agent.name
+    (the installed sensor) instead."""
+    u = str(user).strip()
+    if not u:
+        return False
+    if u.endswith("$"):                                   # AD computer account
+        return True
+    if agent and u.lower() == str(agent).strip().lower():  # hostname leaked as user
+        return True
+    return False
+
+
 def _resolve_entity(ev: dict) -> dict:
     """Stable identity for an event. Priority: real user (username OR target_user)
     -> host/sensor (Wazuh agent) -> IP. IP is a LOCATION, not identity (DHCP
     reassigns it). 'agent-N' is a synthetic Wazuh agent ID — a reporting SENSOR,
-    NOT a person — so it is labelled honestly and flagged has_user=False."""
-    user = str(ev.get("username", "")).strip() or str(ev.get("target_user", "")).strip()
+    NOT a person — so it is labelled honestly and flagged has_user=False.
+    Machine/computer accounts (laptop names) are NOT people: they resolve to the
+    Wazuh agent.name, never shown as a user identity."""
+    host = str(ev.get("agent", "")).strip()
+    user = ""
+    for cand in (ev.get("username"), ev.get("target_user")):
+        c = str(cand or "").strip()
+        if c and not _is_machine_account(c, host):
+            user = c
+            break
     if user:
         return {"id": f"user:{user}", "type": "user", "label": user,
                 "stable": True, "has_user": True}
-    host = str(ev.get("agent", "")).strip()
     if host:
         synth = bool(_SYNTH_AGENT.match(host))
         return {"id": f"host:{host}", "type": "sensor" if synth else "host",
@@ -238,6 +261,10 @@ def _shape_events(rows: list[dict]) -> list[dict]:
         src["log_source"] = _derive_log_source(src)
         src["threat_label"] = _better_threat(src)
         src["entity"] = _resolve_entity(src)
+        # User shown in the trail: blank out machine/computer accounts so a laptop
+        # name never appears as a "User" — the resolved identity carries agent.name.
+        src["user_display"] = ("" if _is_machine_account(src.get("username", ""), src.get("agent", ""))
+                               else str(src.get("username", "") or ""))
         src["event_id"] = _event_id(src)
         out.append(src)
     return out
@@ -499,8 +526,13 @@ def get_hot_ip_summaries(size: int = 30) -> list[dict]:
         )
         for r in ident_rows:
             m = ident_map.setdefault(r["src_ip"], {"users": {}, "hosts": {}})
-            u = (r.get("username") or "").strip() or (r.get("target_user") or "").strip()
             h, c = (r.get("agent") or "").strip(), int(r["cnt"])
+            u = ""
+            for cand in (r.get("username"), r.get("target_user")):
+                cc = (cand or "").strip()
+                if cc and not _is_machine_account(cc, h):
+                    u = cc
+                    break
             if u:
                 m["users"][u] = m["users"].get(u, 0) + c
             if h:

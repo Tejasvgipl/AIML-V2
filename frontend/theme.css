@@ -451,6 +451,10 @@ body { background:
 .ent-user { background: rgba(88,166,255,.15); color: #58a6ff; }
 .ent-host { background: rgba(63,185,80,.15); color: #3fb950; }
 .ent-more { background: var(--surface); color: var(--muted); }
+/* Clickable identity chips / IP line — trail that entity */
+.ent-chip-go { cursor: pointer; transition: filter .12s, box-shadow .12s; }
+.ent-chip-go:hover { filter: brightness(1.25); box-shadow: 0 0 0 1px rgba(255,255,255,.18) inset; }
+.ent-card-ip.ent-chip-go:hover { color: var(--text); }
 .ent-none { font-size: 11px; color: var(--muted); font-style: italic; }
 .ent-kind-sensor { color: #d29922; }
 .ent-kind-user { color: #58a6ff; }

@@ -1977,7 +1977,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=15-recommender">
+  <link rel="stylesheet" href="theme.css?v=16-agent-trail">
 </head>
 
 <body>
@@ -2224,7 +2224,7 @@
                 <th>Source IP</th>
                 <th>Resolved identity</th>
                 <th>Users on IP</th>
-                <th>Sensors on IP</th>
+                <th>Agents on IP</th>
                 <th>Events</th>
                 <th>Top threat</th>
                 <th>Severity</th>
@@ -2243,7 +2243,7 @@
               style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:13px;outline:none">
               <option value="ip">Trail by IP</option>
               <option value="username">Trail by Username</option>
-              <option value="host">Trail by Host</option>
+              <option value="host">Trail by Agent</option>
             </select>
             <input id="trail-input" placeholder="Enter IP (e.g. 85.11.187.36)"
               onkeydown="if(event.key==='Enter')loadTrail()"
@@ -2927,11 +2927,18 @@ tr:hover td{background:#161b22}</style></head>
       return (real.sort((a, b) => b[1] - a[1])[0]) || ['unknown', 0];
     }
     // Render the users/hosts seen on an IP as compact chips (top N + "+more").
+    // Chips for the identities on an IP. Clicking a chip trails THAT identity:
+    // a user chip → trail by username; an agent chip → trail by Wazuh agent.name
+    // (so you see the agent's own activity and every IP it reported from).
     function identChips(list = [], kind = 'user', max = 4) {
       if (!list.length) return '<span class="ent-none">none</span>';
+      const mode = kind === 'host' ? 'host' : 'username';
+      const verb = kind === 'host' ? 'agent' : 'user';
       const shown = list.slice(0, max).map(x =>
-        `<span class="ent-chip ent-${kind}" title="${escapeHTML(x.name)} · ${Number(x.events || 0).toLocaleString()} events">${escapeHTML(x.name)}</span>`).join('');
-      const extra = list.length > max ? `<span class="ent-chip ent-more">+${list.length - max}</span>` : '';
+        `<span class="ent-chip ent-${kind} ent-chip-go" data-v="${escapeHTML(x.name)}" ` +
+        `onclick="event.stopPropagation();goTrailEntity('${mode}', this.dataset.v)" ` +
+        `title="Trail this ${verb} · ${Number(x.events || 0).toLocaleString()} events">${escapeHTML(x.name)}</span>`).join('');
+      const extra = list.length > max ? `<span class="ent-chip ent-more" onclick="event.stopPropagation()">+${list.length - max}</span>` : '';
       return shown + extra;
     }
     // Build the identity headline honestly: a real user, a host/sensor (with a
@@ -2950,14 +2957,15 @@ tr:hover td{background:#161b22}</style></head>
     function renderEntityCard(h) {
       const [threatName] = topThreat(h.threat_types);
       const [sev] = severityRank(h.severities);
-      return `<div class="ent-card ent-sev-${sev}" onclick="goTrail('${h.ip}')">
+      return `<div class="ent-card ent-sev-${sev}">
         <div class="ent-card-head">
           <span class="ent-title">${identityTitle(h.identity, h.ip)}</span>
           <span class="badge ${sev}">${sev}</span>
         </div>
-        <div class="ent-card-ip">${h.ip} · ${Number(h.total || 0).toLocaleString()} events · ${String(threatName).replace(/_/g, ' ')}</div>
-        <div class="ent-card-row"><span class="ent-lbl">Users</span><span class="ent-vals">${identChips(h.users, 'user', 3)}</span></div>
-        <div class="ent-card-row"><span class="ent-lbl">Sensors</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
+        <div class="ent-card-ip ent-chip-go" onclick="goTrailEntity('ip', '${h.ip}')" title="Trail this source IP">
+          &#128279; <b>${h.ip}</b> · ${Number(h.total || 0).toLocaleString()} events · ${String(threatName).replace(/_/g, ' ')}</div>
+        <div class="ent-card-row"><span class="ent-lbl" title="Accounts seen on this IP — click to trail the user">Users</span><span class="ent-vals">${identChips(h.users, 'user', 3)}</span></div>
+        <div class="ent-card-row"><span class="ent-lbl" title="Wazuh agent (agent.name) reporting these events — click to trail the agent's endpoint">Agents</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
       </div>`;
     }
     // Filterable table of every source IP and the identities behind it.
@@ -3103,7 +3111,18 @@ tr:hover td{background:#161b22}</style></head>
       } catch(e) { console.error('refreshAll error:', e); }
     }
     function doSearch() { const q = document.getElementById('ip-search').value.trim(); if (!q) return; goTrail(q); }
-    function goTrail(ip) { nav('trail'); document.getElementById('trail-mode').value = 'ip'; onTrailModeChange(); document.getElementById('trail-input').value = ip; loadTrail(); }
+    // Trail any entity. mode = 'ip' | 'username' | 'host' (host = Wazuh agent.name).
+    // Trailing a user/agent shows every IP that identity used, so the endpoint and
+    // its IP are visible inside the trail — not just a bare address.
+    function goTrailEntity(mode, value) {
+      if (!value) return;
+      nav('trail');
+      document.getElementById('trail-mode').value = mode;
+      onTrailModeChange();
+      document.getElementById('trail-input').value = value;
+      loadTrail();
+    }
+    function goTrail(ip) { goTrailEntity('ip', ip); }
     function copyEid(ev, id) {
       ev.stopPropagation();
       if (navigator.clipboard) navigator.clipboard.writeText(id).then(() => toast('Copied ' + id)).catch(() => toast(id));
@@ -3124,7 +3143,7 @@ tr:hover td{background:#161b22}</style></head>
       document.getElementById('ai-ip-input').value = ip;
       await aiFullInvestigate();
     }
-    const TRAIL_PLACEHOLDER = { ip: 'Enter IP (e.g. 85.11.187.36)', username: 'Enter username (e.g. jdoe)', host: 'Enter host (e.g. BANK-WS-19)' };
+    const TRAIL_PLACEHOLDER = { ip: 'Enter IP (e.g. 85.11.187.36)', username: 'Enter username (e.g. jdoe)', host: 'Enter Wazuh agent name (e.g. Harsh_777)' };
     function onTrailModeChange() {
       const m = document.getElementById('trail-mode').value;
       document.getElementById('trail-input').placeholder = TRAIL_PLACEHOLDER[m] || TRAIL_PLACEHOLDER.ip;
@@ -3138,7 +3157,7 @@ tr:hover td{background:#161b22}</style></head>
       // mode anchor them to the most-active source IP this identity used.
       curIP = mode === 'ip' ? value : (sum.src_ips && sum.src_ips[0] ? sum.src_ips[0].ip : value);
       document.getElementById('trail-panel').style.display = 'block';
-      const kindTag = mode === 'ip' ? '' : ` <span class="ent-kind ent-kind-${mode === 'host' ? 'host' : 'user'}">${mode}</span>`;
+      const kindTag = mode === 'ip' ? '' : ` <span class="ent-kind ent-kind-${mode === 'host' ? 'host' : 'user'}">${mode === 'host' ? 'agent' : 'user'}</span>`;
       document.getElementById('t-ip').innerHTML = escapeHTML(value) + kindTag;
       document.getElementById('t-total').textContent = sum.total;
       document.getElementById('t-first').textContent = (sum.first_seen || '').substring(0, 19).replace('T', ' ');
@@ -3234,7 +3253,7 @@ tr:hover td{background:#161b22}</style></head>
           ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}${portService(e.dst_port) ? ` <span class="tev-svc">${portService(e.dst_port)}</span>` : ''}`)}
           ${k(blocked ? 'Target (blocked)' : 'Target', e.url ? `<span class="tev-url">${escapeHTML(e.url)}</span>` : '')}
           ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id">#${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
-          ${k('User', e.username)}
+          ${k('User', e.user_display !== undefined ? e.user_display : e.username)}
           ${k('Country', e.country)}
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
         </div>
