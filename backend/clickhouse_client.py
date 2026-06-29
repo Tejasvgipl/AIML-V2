@@ -152,7 +152,17 @@ _RAW_SOURCE = (
     "JSONExtractString(raw, 'data', 'win', 'eventdata', 'user') AS proc_user_r, "
     "JSONExtractString(raw, 'data', 'win', 'eventdata', 'parentUser') AS proc_parent_user_r, "
     "JSONExtractString(raw, 'data', 'win', 'eventdata', 'integrityLevel') AS proc_integrity_r, "
-    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'hashes') AS proc_hashes_r"
+    "JSONExtractString(raw, 'data', 'win', 'eventdata', 'hashes') AS proc_hashes_r, "
+    # Firewall (Fortigate etc.) POLICY id — which policy allowed/blocked the
+    # traffic. Distinct from the Wazuh rule id. Prefer the decoded data.policyid,
+    # fall back to parsing `policyid=NN` out of the raw full_log. Also grab the
+    # policy UUID and sub/dst category when present.
+    "multiIf(JSONExtractString(raw, 'data', 'policyid') != '', JSONExtractString(raw, 'data', 'policyid'), "
+    "extract(JSONExtractString(raw, 'full_log'), 'policyid=\"?([0-9]+)') != '', "
+    "extract(JSONExtractString(raw, 'full_log'), 'policyid=\"?([0-9]+)'), '') AS policy_id_r, "
+    "JSONExtractString(raw, 'data', 'poluuid') AS policy_uuid_r, "
+    "if(JSONExtractString(raw, 'data', 'policytype') != '', JSONExtractString(raw, 'data', 'policytype'), "
+    "JSONExtractString(raw, 'data', 'subtype')) AS policy_type_r"
 )
 # UI/trail column list = lean columns + resolved destination name + source id/time.
 _EVENT_COLS_UI = _EVENT_COLS + ", " + _URL_FALLBACK + ", " + _RAW_SOURCE
@@ -303,6 +313,10 @@ def _shape_events(rows: list[dict]) -> list[dict]:
         src["proc_parent_user"] = _pick("proc_parent_user_r")
         src["proc_integrity"] = _pick("proc_integrity_r")
         src["proc_hashes"] = _pick("proc_hashes_r")
+        # Firewall policy (Fortigate etc.)
+        src["policy_id"] = _pick("policy_id_r")
+        src["policy_uuid"] = _pick("policy_uuid_r")
+        src["policy_type"] = _pick("policy_type_r")
         out.append(src)
     return out
 

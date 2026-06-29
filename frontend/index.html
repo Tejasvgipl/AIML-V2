@@ -3339,7 +3339,8 @@ tr:hover td{background:#161b22}</style></head>
           ${k('Endpoint (agent)', e.agent ? `<b>${escapeHTML(e.agent)}</b> <span style="font-size:10px;color:var(--muted)">Wazuh agent.name</span>` : '')}
           ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}${portService(e.dst_port) ? ` <span class="tev-svc">${portService(e.dst_port)}</span>` : ''}`)}
           ${k(blocked ? 'Target (blocked)' : 'Target', e.url ? `<span class="tev-url">${escapeHTML(e.url)}</span>` : '')}
-          ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id">#${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
+          ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id" title="Wazuh rule id">rule #${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
+          ${k('Firewall policy', e.policy_id ? `<span class="tev-id" onclick="copyEid(event,'${e.policy_id}')" title="Firewall policy id (data.policyid) — the policy that matched this traffic. Click to copy">policy #${escapeHTML(e.policy_id)}</span>${e.policy_type ? ` <span style="font-size:10px;color:var(--muted)">${escapeHTML(e.policy_type)}</span>` : ''}${e.policy_uuid ? ` <span style="font-size:10px;color:var(--muted)" title="poluuid">${escapeHTML(e.policy_uuid)}</span>` : ''}` : '')}
           ${k('User', e.user_display !== undefined ? e.user_display : e.username)}
           ${k('Country', e.country)}
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
