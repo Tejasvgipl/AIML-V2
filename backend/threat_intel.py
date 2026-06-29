@@ -30,6 +30,39 @@ def tactic_rank(tactic: str) -> int:
         return len(TACTIC_ORDER)  # unknown tactics sort last
 
 
+# ── Lockheed Martin Cyber Kill Chain (the classic 7 stages) ─────────────────
+# ATT&CK (14 tactics) is finer-grained and post-compromise heavy; the Cyber Kill
+# Chain is the coarser 7-phase intrusion lifecycle analysts expect. We always
+# show all 7 as a skeleton and overlay the observed ATT&CK tactics onto them.
+LOCKHEED_PHASES = [
+    "Reconnaissance", "Weaponization", "Delivery", "Exploitation",
+    "Installation", "Command & Control", "Actions on Objectives",
+]
+# Widely-used ATT&CK→Kill-Chain overlay. Tactics with no pre-compromise Lockheed
+# equivalent fold into the nearest phase (documented, not invented attribution).
+ATTACK_TO_LOCKHEED = {
+    "Reconnaissance":       "Reconnaissance",
+    "Resource Development": "Weaponization",
+    "Initial Access":       "Delivery",
+    "Execution":            "Exploitation",
+    "Privilege Escalation": "Exploitation",
+    "Defense Evasion":      "Exploitation",
+    "Persistence":          "Installation",
+    "Credential Access":    "Command & Control",
+    "Discovery":            "Command & Control",
+    "Lateral Movement":     "Command & Control",
+    "Command and Control":  "Command & Control",
+    "Collection":           "Actions on Objectives",
+    "Exfiltration":         "Actions on Objectives",
+    "Impact":               "Actions on Objectives",
+}
+
+
+def lockheed_phase(tactic: str) -> str:
+    """Map an ATT&CK tactic to its Lockheed Cyber Kill Chain phase ('' if none)."""
+    return ATTACK_TO_LOCKHEED.get((tactic or "").strip(), "")
+
+
 # ── Knowledge base ─────────────────────────────────────────────────────────────
 # Keyed by ATT&CK technique id. `aliases` lets a threat_type or keyword resolve
 # to the technique without an exact id match.

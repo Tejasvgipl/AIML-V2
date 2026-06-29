@@ -1933,6 +1933,14 @@
       display: flex; align-items: center; padding: 0 2px;
       color: var(--border); font-size: 18px; flex-shrink: 0; font-weight: 300;
     }
+    /* Lockheed Cyber Kill Chain — unreached phases shown but dimmed */
+    .kc-lh-off {
+      opacity: 0.42; cursor: default;
+      border-top-style: dashed;
+      background: repeating-linear-gradient(45deg, var(--bg3), var(--bg3) 7px, rgba(255,255,255,0.02) 7px, rgba(255,255,255,0.02) 14px);
+    }
+    .kc-lh-off:hover { transform: none; box-shadow: none; }
+    .kc-stage-arrow.kc-lh-dim { opacity: 0.4; }
 
     /* Detail expand panel */
     .kc-detail {
@@ -4590,6 +4598,34 @@ tr:hover td{background:#161b22}</style></head>
           <div style="font-size:11px;color:var(--muted)">${toIST(n.first_seen)}${n.last_seen&&n.last_seen!==n.first_seen?' — '+toIST(n.last_seen):''} · ${n.events} event${n.events!==1?'s':''}</div>
           ${blockedBlock}${allowedBlock}${noIpMsg}${topoBlock}
         </div>`;
+      } else if (type === 'lockheed') {
+        const p = (d.lockheed || [])[idx]; if (!p) return;
+        const col = ((p.severities||{}).critical || (p.severities||{}).high) ? '#ef4444' : 'var(--accent)';
+        const sevHtml = Object.entries(p.severities||{}).filter(([,v])=>v)
+          .map(([k,v])=>`<span class="badge ${k}">${k} ${v}</span>`).join('');
+        const techsHtml = (p.techniques||[])
+          .map(t=>`<div class="kc-tech-badge"><span style="color:var(--accent);font-weight:600">${t.id}</span> ${t.name} <span style="color:var(--muted)">×${t.count}</span></div>`)
+          .join('');
+        const tacChips = (p.attack_tactics||[]).map(t=>`<span class="badge medium">${t}</span>`).join(' ');
+        html = `<div class="kc-detail" style="border-top:3px solid ${col}">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+            <h4 style="color:${col};margin:0">Phase ${p.num} — ${p.phase}</h4>
+            <span style="font-size:11px;color:var(--muted)">Lockheed Martin Cyber Kill Chain</span>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Mapped from ATT&amp;CK tactic(s): ${tacChips || '—'}</div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+            <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Events</div>
+              <div style="font-size:24px;font-weight:700;color:${col}">${p.events}</div></div>
+            <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">First Seen</div>
+              <div style="font-size:12px;color:var(--text);margin-top:4px">${toIST(p.first_seen)}</div></div>
+            <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Last Seen</div>
+              <div style="font-size:12px;color:var(--text);margin-top:4px">${toIST(p.last_seen)}</div></div>
+            ${sevHtml ? `<div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Severity</div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:4px">${sevHtml}</div></div>` : ''}
+          </div>
+          ${techsHtml ? `<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Techniques Observed</div>
+            <div class="kc-tech-row">${techsHtml}</div>` : ''}
+        </div>`;
       } else if (type === 'attck') {
         const s = d.attckStages[idx]; if (!s) return;
         const col = d.tacticColors[s.tactic] || 'var(--accent)';
@@ -4656,9 +4692,14 @@ tr:hover td{background:#161b22}</style></head>
         <div class="cb" style="padding-top:0">
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px">
             <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid var(--accent)">
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Cyber Kill Chain</div>
+              <div style="font-size:26px;font-weight:700;color:var(--accent)">${r.lockheed_reached != null ? r.lockheed_reached : '—'}<span style="font-size:14px;color:var(--muted)"> / 7</span></div>
+              <div style="font-size:11px;color:var(--muted)">Lockheed phases reached</div>
+            </div>
+            <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid var(--accent)">
               <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">ATT&CK Stages Reached</div>
-              <div style="font-size:26px;font-weight:700;color:var(--accent)">${stages.length}</div>
-              <div style="font-size:11px;color:var(--muted)">of 14 tactics</div>
+              <div style="font-size:26px;font-weight:700;color:var(--accent)">${stages.length}<span style="font-size:14px;color:var(--muted)"> / 14</span></div>
+              <div style="font-size:11px;color:var(--muted)">tactics observed</div>
             </div>
             <div style="background:var(--bg3);border-radius:8px;padding:12px;border-left:3px solid ${deepestColor}">
               <div style="font-size:10px;color:var(--muted);text-transform:uppercase;margin-bottom:4px">Deepest Stage</div>
@@ -4701,9 +4742,34 @@ tr:hover td{background:#161b22}</style></head>
 
       const netPath    = r.network_path || [];
       const attckStages = r.stages || [];
+      const lockheed   = r.lockheed || [];
 
       // Store for click handlers
-      window._kcData = { netPath, attckStages, tacticColors, ip, totalEvents: r.total_events };
+      window._kcData = { netPath, attckStages, lockheed, tacticColors, ip, totalEvents: r.total_events };
+
+      // ── Cyber Kill Chain (Lockheed Martin · 7 phases, always all shown) ───
+      const lhReached = r.lockheed_reached != null ? r.lockheed_reached : lockheed.filter(p => p.reached).length;
+      const phaseIcon = { 'Reconnaissance':'🔍','Weaponization':'🧪','Delivery':'📦','Exploitation':'💥','Installation':'🛠','Command & Control':'📡','Actions on Objectives':'🎯' };
+      const lockheedFlowHtml = lockheed.length ? `
+        <div class="kc-section-label">Cyber Kill Chain · Lockheed Martin — <b style="color:var(--accent)">${lhReached}/7</b> phases reached</div>
+        <div class="kc-flow-wrap"><div class="kc-attck-row">
+          ${lockheed.map((p, i) => {
+            const hot = (p.severities||{}).critical || (p.severities||{}).high;
+            const col = !p.reached ? 'var(--muted)' : (hot ? '#ef4444' : 'var(--accent)');
+            const tacs = (p.attack_tactics || []).join(' · ');
+            return `
+              ${i > 0 ? `<div class="kc-stage-arrow${p.reached ? '' : ' kc-lh-dim'}" style="animation:kcStageIn .3s ease ${i*.07}s backwards">›</div>` : ''}
+              <div class="kc-stage kc-lh${p.reached ? '' : ' kc-lh-off'}" style="--stage-col:${col};animation:kcStageIn .4s ease ${i*.09}s backwards" ${p.reached ? `onclick="kcNodeDetail('lockheed',${i},this)"` : 'title="Not observed for this entity"'}>
+                <div class="kc-stage-num">PHASE ${p.num}</div>
+                <div class="kc-stage-tactic">${phaseIcon[p.phase] || ''} ${p.phase}</div>
+                <div class="kc-stage-count">${p.reached ? `${p.events} events` : 'not observed'}</div>
+                ${p.reached && tacs ? `<div class="kc-stage-tech">${tacs}</div>` : ''}
+              </div>`;
+          }).join('')}
+        </div></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px;padding-left:2px">
+          All 7 phases shown — lit = observed on this entity, dimmed = not seen. ATT&amp;CK tactic detail below.
+        </div>` : '';
 
       // ── Network Path (horizontal flow) ─────────────────────────────────────
       const netFlowHtml = netPath.length ? `
@@ -4757,7 +4823,7 @@ tr:hover td{background:#161b22}</style></head>
         </div>` : '';
 
       document.getElementById('kc-stages').innerHTML =
-        netFlowHtml + attckFlowHtml +
+        netFlowHtml + lockheedFlowHtml + attckFlowHtml +
         `<div id="kc-detail-panel" style="display:none;margin-top:20px"></div>`;
 
       // ── Correlation panel ───────────────────────────────────────────────

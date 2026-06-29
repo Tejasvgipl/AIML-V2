@@ -1750,6 +1750,36 @@ def _event_tactic(ev: dict) -> tuple[str, str, str]:
     return (ev.get("mitre_tactic", "") or "Unknown"), (mitre or ""), (ev.get("mitre_technique", "") or "")
 
 
+def _build_lockheed(attack_stages: list) -> list:
+    """Fold the observed ATT&CK tactic stages onto the 7-phase Lockheed Cyber Kill
+    Chain. Always returns all 7 phases in order, each flagged reached/not-reached,
+    with rolled-up events, techniques, severities and first/last-seen."""
+    phases = ti.LOCKHEED_PHASES if ti else [
+        "Reconnaissance", "Weaponization", "Delivery", "Exploitation",
+        "Installation", "Command & Control", "Actions on Objectives"]
+    out = {p: {"phase": p, "num": i + 1, "reached": False, "events": 0,
+               "attack_tactics": [], "techniques": [], "severities": {},
+               "first_seen": "", "last_seen": ""}
+           for i, p in enumerate(phases)}
+    for s in attack_stages:
+        ph = ti.lockheed_phase(s["tactic"]) if ti else ""
+        if not ph or ph not in out:
+            continue
+        p = out[ph]
+        p["reached"] = True
+        p["events"] += s.get("events", 0)
+        p["attack_tactics"].append(s["tactic"])
+        p["techniques"].extend(s.get("techniques", []))
+        for k, v in (s.get("severities") or {}).items():
+            p["severities"][k] = p["severities"].get(k, 0) + v
+        fs, ls = s.get("first_seen", ""), s.get("last_seen", "")
+        if fs and (not p["first_seen"] or fs < p["first_seen"]):
+            p["first_seen"] = fs
+        if ls and ls > p["last_seen"]:
+            p["last_seen"] = ls
+    return [out[p] for p in phases]
+
+
 @app.get("/api/killchain/{ip}")
 async def kill_chain(ip: str):
     """Lay an entity's activity out along the ATT&CK kill chain, ordered by tactic
@@ -2108,11 +2138,19 @@ async def kill_chain(ip: str):
         "velocity": velocity,
     }
 
+    # Lockheed Martin Cyber Kill Chain — always all 7 phases (reached or not), with
+    # the observed ATT&CK tactics/techniques folded into each. This is the headline;
+    # `stages` (ATT&CK) stays as the detail underneath.
+    lockheed = _build_lockheed(ordered)
+
     result = {
         "ip": ip,
         "total_events": len(events),
         "network_path": network_path,
         "stages": ordered,
+        "lockheed": lockheed,
+        "lockheed_reached": sum(1 for p in lockheed if p["reached"]),
+        "lockheed_total": len(lockheed),
         "progression": progression,
         "max_stage": deepest["tactic"] if deepest else None,
         "reached_impact": bool(deepest and deepest["rank"] >= ti.TACTIC_ORDER.index("Lateral Movement")) if ti else False,
