@@ -1202,6 +1202,22 @@
       letter-spacing: .02em
     }
 
+    .nav-arrows { display: flex; gap: 6px; margin-right: 4px; }
+    .nav-btn {
+      width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+      font-size: 20px; line-height: 1; font-weight: 700;
+      color: var(--accent); cursor: pointer;
+      background: rgba(18, 27, 38, .86);
+      border: 1px solid rgba(73, 182, 255, .24); border-radius: 9px;
+      transition: background .15s, border-color .15s, transform .1s, color .15s;
+    }
+    .nav-btn:hover:not(:disabled) {
+      background: rgba(73, 182, 255, .16); border-color: var(--accent);
+      box-shadow: 0 0 14px rgba(73, 182, 255, .25);
+    }
+    .nav-btn:active:not(:disabled) { transform: translateY(1px); }
+    .nav-btn:disabled { opacity: .32; cursor: default; color: var(--muted); }
+
     .srch {
       background: rgba(18, 27, 38, .86);
       border-color: rgba(73, 182, 255, .24);
@@ -2039,6 +2055,10 @@
     </aside>
     <main class="main">
       <div class="topbar">
+        <div class="nav-arrows">
+          <button class="nav-btn" id="nav-back" onclick="navBack()" title="Back (Alt+←)" disabled aria-label="Back">‹</button>
+          <button class="nav-btn" id="nav-fwd" onclick="navForward()" title="Forward (Alt+→)" disabled aria-label="Forward">›</button>
+        </div>
         <h1 id="page-title">Overview</h1>
         <div class="srch">
           <svg width="13" height="13" fill="none" stroke="var(--muted)" viewBox="0 0 24 24">
@@ -2785,7 +2805,42 @@ tr:hover td{background:#161b22}</style></head>
     let charts = {}, curIP = '', HOT_IPS = [];
     let TRAIL_EVENTS = [], trailFilter = { source: '', user: '' };
 
+    // ── In-app page history (browser-style Back / Forward) ──────────────────
+    let _navHist = ['overview'];
+    let _navIdx = 0;
+    let _navingHistory = false;   // true while replaying history, so we don't re-push
+    function _pushNav(name) {
+      if (_navingHistory) return;
+      if (_navHist[_navIdx] === name) return;        // ignore re-nav to the same page
+      _navHist = _navHist.slice(0, _navIdx + 1);     // drop any forward entries
+      _navHist.push(name);
+      _navIdx = _navHist.length - 1;
+      if (_navHist.length > 50) { _navHist.shift(); _navIdx--; }  // cap memory
+      _updateNavButtons();
+    }
+    function navBack() {
+      if (_navIdx <= 0) return;
+      _navIdx--; _navingHistory = true; nav(_navHist[_navIdx]); _navingHistory = false;
+      _updateNavButtons();
+    }
+    function navForward() {
+      if (_navIdx >= _navHist.length - 1) return;
+      _navIdx++; _navingHistory = true; nav(_navHist[_navIdx]); _navingHistory = false;
+      _updateNavButtons();
+    }
+    function _updateNavButtons() {
+      const b = document.getElementById('nav-back'), f = document.getElementById('nav-fwd');
+      if (b) b.disabled = _navIdx <= 0;
+      if (f) f.disabled = _navIdx >= _navHist.length - 1;
+    }
+    document.addEventListener('keydown', e => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); navBack(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); navForward(); }
+    });
+
     function nav(name) {
+      _pushNav(name);
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.ni').forEach(n => n.classList.remove('active'));
       const pageEl = document.getElementById('page-' + name);
