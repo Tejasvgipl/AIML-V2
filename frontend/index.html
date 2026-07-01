@@ -3399,7 +3399,6 @@ tr:hover td{background:#161b22}</style></head>
           ${k('Country', e.country)}
           ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>${mitreName(e.mitre) ? ` <span style="font-size:11px;color:var(--muted)">${escapeHTML(mitreName(e.mitre))}</span>` : ''}` : '')}
           ${procRows}
-          ${tsExact ? k('Alert time (alert.json)', `<span style="font-family:var(--mono);font-size:11px">${escapeHTML(tsExact)}</span> <span style="font-size:10px;color:var(--muted)">(IST shown above)</span>`) : ''}
         </div>
       </div>`;
     }
