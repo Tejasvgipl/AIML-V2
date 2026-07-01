@@ -3291,6 +3291,59 @@ tr:hover td{background:#161b22}</style></head>
         `${evs.length} of ${TRAIL_EVENTS.length} events` + (trailFilter.source || trailFilter.user ? ' (filtered)' : '');
       document.getElementById('trail-events').innerHTML = evs.length ? evs.map(trailEventCard).join('') : '<div class="empty">No events match the filter</div>';
     }
+    // Values pulled from raw Wazuh JSON sometimes arrive still JSON-escaped
+    // (RUPALI\\HP, \"C:\\Program Files\\...). Un-escape for human display. This is
+    // a no-op on already-clean values (a normal path has no \\ or \" sequences).
+    function deEsc(s) {
+      return String(s == null ? '' : s).replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+    }
+    // Short MITRE technique names so the analyst doesn't have to look up the id.
+    const MITRE_NAMES = {
+      'T1059': 'Command / script execution', 'T1059.001': 'PowerShell',
+      'T1059.003': 'Windows command shell (cmd.exe)', 'T1078': 'Valid accounts',
+      'T1110': 'Brute force', 'T1021': 'Remote services / lateral movement',
+      'T1046': 'Network / service scanning', 'T1071': 'Web / C2 traffic',
+      'T1105': 'File download / transfer', 'T1547': 'Boot / logon autostart',
+      'T1053': 'Scheduled task', 'T1055': 'Process injection',
+      'T1003': 'Credential dumping', 'T1027': 'Obfuscated / packed files',
+      'T1566': 'Phishing', 'T1190': 'Exploit public-facing app'
+    };
+    function mitreName(m) {
+      if (!m) return '';
+      const id = String(m).split(/[,\s]/)[0];
+      return MITRE_NAMES[id] || MITRE_NAMES[id.split('.')[0]] || '';
+    }
+    // Leaf executable name out of a full path or command line ("...\\RSServCmd.exe").
+    function exeLeaf(s) {
+      s = deEsc(s || '').trim();
+      // Quoted path ("C:\Program Files\..\x.exe" args) -> take up to the closing
+      // quote (paths contain spaces). Unquoted -> up to the first space.
+      const path = s[0] === '"' ? s.slice(1).split('"')[0] : s.split(/\s+/)[0];
+      return path.split(/[\\/]/).pop() || '';
+    }
+    // One-sentence, plain-English "what happened" for a trail event.
+    function trailPlain(e, blocked, allowed) {
+      const host = e.agent ? deEsc(e.agent) : (e.src_ip || 'the source host');
+      const who = deEsc((e.user_display !== undefined ? e.user_display : e.username) || '');
+      const what = e.rule || e.threat_label || String(e.threat_type || '').replace(/_/g, ' ') || 'activity';
+      const child = exeLeaf(e.proc_image || e.proc_cmdline);
+      const parent = exeLeaf(e.proc_parent || e.proc_parent_cmdline);
+      let s = who
+        ? `On <b>${escapeHTML(host)}</b>, user <b>${escapeHTML(who)}</b> triggered a detection: <b>${escapeHTML(what)}</b>.`
+        : `On <b>${escapeHTML(host)}</b> a detection fired: <b>${escapeHTML(what)}</b>.`;
+      if (child) s += ` The process <b>${escapeHTML(child)}</b>` +
+        (parent ? ` was launched by <b>${escapeHTML(parent)}</b>` : ' ran') +
+        (e.proc_integrity ? ` at <b>${escapeHTML(deEsc(e.proc_integrity))}</b> integrity` : '') + '.';
+      s += blocked ? ' The firewall <b>blocked</b> it.'
+         : allowed ? ' The traffic was <b>allowed</b>.'
+         : ' It was detected on the endpoint (no block/allow action).';
+      const mn = mitreName(e.mitre);
+      s += ` Matched <b>Wazuh detection rule #${escapeHTML(String(e.rule_id || '?'))}</b>` +
+        (e.rule_level ? ` (severity level ${escapeHTML(String(e.rule_level))}/15)` : '') +
+        (e.mitre ? `, MITRE ${escapeHTML(e.mitre)}${mn ? ' — ' + escapeHTML(mn) : ''}` : '') + '.';
+      if (e.policy_id) s += ` Firewall policy <b>#${escapeHTML(e.policy_id)}</b> is what ${blocked ? 'blocked' : allowed ? 'allowed' : 'matched'} the traffic.`;
+      return s;
+    }
     function trailEventCard(e) {
       const sc = e.severity || 'low';
       const act = (e.action || '').toLowerCase();
@@ -3300,7 +3353,7 @@ tr:hover td{background:#161b22}</style></head>
                     : allowed ? '<span class="badge low">ALLOWED</span>' : '';
       const ent = e.entity || {};
       const ident = ent.label
-        ? `${escapeHTML(ent.label)} <span class="tev-etype">${ent.type || ''}</span>` +
+        ? `${escapeHTML(deEsc(ent.label))} <span class="tev-etype">${ent.type || ''}</span>` +
           (ent.stable === false ? ` <span class="tev-warn" title="${(ent.note || '').replace(/"/g, '&quot;')}">&#9888; IP not stable identity</span>` : '')
         : (e.src_ip || '—');
       const k = (label, val) => val ? `<div class="tev-row"><span class="tev-k">${label}</span><span class="tev-v">${val}</span></div>` : '';
@@ -3317,10 +3370,10 @@ tr:hover td{background:#161b22}</style></head>
       const hasProc = e.proc_image || e.proc_cmdline || e.proc_parent || e.proc_parent_cmdline;
       const integHot = /(system|high|administrator)/i.test(e.proc_integrity || '');
       const procRows = hasProc ?
-        k('Process', (e.proc_cmdline || e.proc_image) ? `<code style="${cmdStyle}">${escapeHTML(e.proc_cmdline || e.proc_image)}</code>` : '') +
-        k('Spawned by', (e.proc_parent_cmdline || e.proc_parent) ? `<code style="${cmdStyle}">${escapeHTML(e.proc_parent_cmdline || e.proc_parent)}</code>` : '') +
-        k('Run as', e.proc_user || e.target_user || '') +
-        (e.proc_integrity ? k('Integrity', `<span class="badge ${integHot ? 'high' : 'low'}">${escapeHTML(e.proc_integrity)}</span>`) : '') +
+        k('Process', (e.proc_cmdline || e.proc_image) ? `<code style="${cmdStyle}">${escapeHTML(deEsc(e.proc_cmdline || e.proc_image))}</code>` : '') +
+        k('Spawned by', (e.proc_parent_cmdline || e.proc_parent) ? `<code style="${cmdStyle}">${escapeHTML(deEsc(e.proc_parent_cmdline || e.proc_parent))}</code>` : '') +
+        k('Run as', deEsc(e.proc_user || e.target_user || '')) +
+        (e.proc_integrity ? k('Integrity', `<span class="badge ${integHot ? 'high' : 'low'}">${escapeHTML(deEsc(e.proc_integrity))}</span>`) : '') +
         (e.proc_hashes ? k('Hashes', `<code style="${cmdStyle}" title="Click to copy" onclick="copyEid(event,'${(e.proc_hashes || '').replace(/'/g, '')}')">${escapeHTML(e.proc_hashes)}</code>`) : '')
         : '';
       return `<div class="tev tev-${blocked ? 'block' : allowed ? 'allow' : 'obs'}">
@@ -3335,15 +3388,16 @@ tr:hover td{background:#161b22}</style></head>
             : (e.event_id ? `<span class="tev-eid" style="opacity:.65" onclick="copyEid(event,'${e.event_id}')" title="Internal reference (hash) — no Wazuh id on this row. NOT searchable in your data. Click to copy">${e.event_id}</span>` : '')}
         </div>
         <div class="tev-body">
+          <div class="tev-plain" style="font-size:12.5px;line-height:1.55;color:var(--text);background:var(--panel-2,rgba(127,127,127,.08));border-left:3px solid var(--accent,#3b82f6);border-radius:6px;padding:8px 10px;margin-bottom:10px">${trailPlain(e, blocked, allowed)}</div>
           ${k('Identity', ident)}
-          ${k('Endpoint (agent)', e.agent ? `<b>${escapeHTML(e.agent)}</b> <span style="font-size:10px;color:var(--muted)">Wazuh agent.name</span>` : '')}
+          ${k('Endpoint (agent)', e.agent ? `<b>${escapeHTML(deEsc(e.agent))}</b> <span style="font-size:10px;color:var(--muted)">Wazuh agent.name</span>` : '')}
           ${k('Flow', `${e.src_ip || '—'} &rarr; ${e.dst_ip || '—'}${e.dst_port ? ':' + e.dst_port : ''}${portService(e.dst_port) ? ` <span class="tev-svc">${portService(e.dst_port)}</span>` : ''}`)}
           ${k(blocked ? 'Target (blocked)' : 'Target', e.url ? `<span class="tev-url">${escapeHTML(e.url)}</span>` : '')}
-          ${k('Rule / Policy', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id" title="Wazuh rule id">rule #${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id">lvl ${e.rule_level}</span>` : ''}`)}
-          ${k('Firewall policy', e.policy_id ? `<span class="tev-id" onclick="copyEid(event,'${e.policy_id}')" title="Firewall policy id (data.policyid) — the policy that matched this traffic. Click to copy">policy #${escapeHTML(e.policy_id)}</span>${e.policy_type ? ` <span style="font-size:10px;color:var(--muted)">${escapeHTML(e.policy_type)}</span>` : ''}${e.policy_uuid ? ` <span style="font-size:10px;color:var(--muted)" title="poluuid">${escapeHTML(e.policy_uuid)}</span>` : ''}` : '')}
-          ${k('User', e.user_display !== undefined ? e.user_display : e.username)}
+          ${k('Detection rule', `${e.rule || '—'}${e.rule_id ? ` <span class="tev-id" title="Wazuh detection rule id — the rule that fired. NOT the firewall policy.">rule #${e.rule_id}</span>` : ''}${e.rule_level ? ` <span class="tev-id" title="Wazuh rule severity, 0-15">lvl ${e.rule_level}/15</span>` : ''}`)}
+          ${k('Firewall policy', e.policy_id ? `<span class="tev-id" onclick="copyEid(event,'${e.policy_id}')" title="Firewall policy id (data.policyid) — only on firewall traffic events, tells you WHICH policy allowed/blocked it. Distinct from the detection rule id above. Click to copy">policy #${escapeHTML(e.policy_id)}</span>${e.policy_type ? ` <span style="font-size:10px;color:var(--muted)">${escapeHTML(e.policy_type)}</span>` : ''}${e.policy_uuid ? ` <span style="font-size:10px;color:var(--muted)" title="poluuid">${escapeHTML(e.policy_uuid)}</span>` : ''}` : (hasProc ? '<span style="font-size:11px;color:var(--muted)">— (endpoint event, no firewall policy)</span>' : ''))}
+          ${k('User', deEsc(e.user_display !== undefined ? e.user_display : (e.username || '')))}
           ${k('Country', e.country)}
-          ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>` : '')}
+          ${k('MITRE', e.mitre ? `<span class="mitre-tag">${e.mitre}</span>${mitreName(e.mitre) ? ` <span style="font-size:11px;color:var(--muted)">${escapeHTML(mitreName(e.mitre))}</span>` : ''}` : '')}
           ${procRows}
           ${tsExact ? k('Alert time (alert.json)', `<span style="font-family:var(--mono);font-size:11px">${escapeHTML(tsExact)}</span> <span style="font-size:10px;color:var(--muted)">(IST shown above)</span>`) : ''}
         </div>
