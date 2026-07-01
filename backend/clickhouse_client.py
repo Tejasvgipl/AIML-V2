@@ -140,9 +140,18 @@ _URL_FALLBACK = (
 #   • ts_raw   = the ORIGINAL timestamp string WITH its timezone offset. We store the
 #     `ts` column as UTC (the source offset is lost there); ts_raw preserves it.
 # Only ever read on the bounded trail/logs/search paths (never the big ML scans).
-_RAW_SOURCE = (
+# Cheap, universally useful: the source id + original-offset timestamp. Two JSON
+# parses per row, safe to read on the logs LIST (which shows correct time + can
+# tie a row to its alert.json).
+_RAW_TIME = (
     "JSONExtractString(raw, 'id') AS alert_id, "
-    "JSONExtractString(raw, 'timestamp') AS ts_raw, "
+    "JSONExtractString(raw, 'timestamp') AS ts_raw"
+)
+# HEAVY: Sysmon process telemetry + firewall policy id (incl. a regex over
+# full_log). ~13 JSON parses + a regex PER ROW. These fields are only ever
+# rendered in the single-entity TRAIL event card — NEVER in the logs list — so
+# this set must stay off the logs-explorer query (it was making it 30s+ slow).
+_RAW_PROCESS = (
     # Sysmon / Windows process telemetry — "what the endpoint actually ran".
     # Pulled from raw so it works on every row regardless of column population.
     "JSONExtractString(raw, 'data', 'win', 'eventdata', 'image') AS proc_image_r, "
@@ -164,8 +173,13 @@ _RAW_SOURCE = (
     "if(JSONExtractString(raw, 'data', 'policytype') != '', JSONExtractString(raw, 'data', 'policytype'), "
     "JSONExtractString(raw, 'data', 'subtype')) AS policy_type_r"
 )
-# UI/trail column list = lean columns + resolved destination name + source id/time.
-_EVENT_COLS_UI = _EVENT_COLS + ", " + _URL_FALLBACK + ", " + _RAW_SOURCE
+# Logs-LIST column set: lean columns + resolved destination name + cheap id/time.
+# No heavy process/policy extraction (the list never renders those) — keeps the
+# logs explorer fast even on large real-Wazuh raw blobs.
+_EVENT_COLS_LIST = _EVENT_COLS + ", " + _URL_FALLBACK + ", " + _RAW_TIME
+# TRAIL column set = the list set PLUS the heavy per-event process/policy fields
+# that only the single-entity trail card shows.
+_EVENT_COLS_UI = _EVENT_COLS_LIST + ", " + _RAW_PROCESS
 
 
 # ── Serve-layer enrichment (works on existing rows; no re-ingest needed) ──────
@@ -753,7 +767,7 @@ def get_recent_logs(minutes: int = 0, start: str = "", end: str = "",
                      "OR positionCaseInsensitive(agent, {q:String}) > 0)")
         params["q"] = q
     wc = (" WHERE " + " AND ".join(where)) if where else ""
-    sql = (f"SELECT {_EVENT_COLS_UI} FROM {LOGS_TABLE}{wc} "
+    sql = (f"SELECT {_EVENT_COLS_LIST} FROM {LOGS_TABLE}{wc} "
            f"ORDER BY ts DESC LIMIT {int(min(limit, 5000))}")
     return _shape_events(_q(sql, params))
 
