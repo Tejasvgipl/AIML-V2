@@ -2016,7 +2016,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=20-ml-dev">
+  <link rel="stylesheet" href="theme.css?v=21-hero">
 </head>
 
 <body>
@@ -2089,26 +2089,16 @@
       <div id="page-overview" class="page active">
         <section class="ops-hero">
           <div class="ops-main">
-            <div class="ops-kicker">Security Command Center</div>
-            <div class="ops-title" id="ops-posture">Analysing live posture</div>
-            <div class="ops-copy" id="ops-copy">Ingested events, behavioural baselines, anomaly scores, and analyst
-              controls are synced into one operational view.</div>
-            <div class="ops-tape">
-              <span>LIVE TELEMETRY STREAM</span>
-              <span>BASELINE ENGINE ONLINE</span>
-              <span>ML SIGNALS INDEXED</span>
-              <span>AI EXPLAIN READY</span>
+            <div class="ops-kicker"><span class="ops-live-dot"></span>Live situation &middot; CyberSentinel</div>
+            <div class="ops-title" id="ops-posture">Reading the wire&hellip;</div>
+            <div class="ops-copy" id="ops-copy">Correlating telemetry, baselines and behaviour&hellip;</div>
+            <div class="ops-tape" id="ops-live-chips"></div>
+          </div>
+          <div class="ops-start">
+            <div class="ops-start-head">START HERE <span class="ops-start-sub">your top moves, ranked</span></div>
+            <div id="ops-start-list">
+              <div class="empty" style="padding:14px">Ranking priorities&hellip;</div>
             </div>
-          </div>
-          <div class="ops-chip">
-            <div class="ops-chip-l">Event Volume</div>
-            <div class="ops-chip-v mv-a" id="ops-total">—</div>
-            <div class="ops-chip-s">logs retained</div>
-          </div>
-          <div class="ops-chip">
-            <div class="ops-chip-l">Critical Signals</div>
-            <div class="ops-chip-v mv-d" id="ops-critical">—</div>
-            <div class="ops-chip-s">IPs requiring attention</div>
           </div>
         </section>
         <section class="situation-board">
@@ -3386,6 +3376,96 @@ tr:hover td{background:#161b22}</style></head>
       </tr>`;
       }).join('');
     }
+    /* ── Hero: the first-look situation banner ──
+       Verdict headline + one concrete sentence + live chips + a ranked
+       "start here" queue built from real signals (hot sources, UEBA risk,
+       telemetry intelligence). Everything is clickable and goes somewhere. */
+    function renderHero(s, hot, k) {
+      const { hotCount, criticalCount, alertCount, totalLogs } = k;
+      // Verdict headline — say the situation like a human shift-lead would.
+      let title, copy;
+      if (criticalCount > 25) {
+        title = `<span class="ops-red">${criticalCount} sources</span> are hammering you right now`;
+        copy = `Heavy pressure: ${hotCount.toLocaleString()} active hostile sources across ${totalLogs.toLocaleString()} watched events. Work the queue on the right, top to bottom.`;
+      } else if (criticalCount > 0) {
+        title = `<span class="ops-red">${criticalCount} critical source${criticalCount > 1 ? 's' : ''}</span> need${criticalCount > 1 ? '' : 's'} you now`;
+        copy = `${hotCount.toLocaleString()} sources active, ${alertCount.toLocaleString()} behavioural deviations open. The rest of the floor is steady.`;
+      } else if (hotCount > 0) {
+        title = `Watching <span class="ops-cyan">${hotCount.toLocaleString()} sources</span> — no critical pressure`;
+        copy = `${totalLogs.toLocaleString()} events under watch. Nothing is on fire; review deviations when convenient.`;
+      } else {
+        title = `All quiet on <span class="ops-cyan">${totalLogs.toLocaleString()}</span> watched events`;
+        copy = 'No hostile sources, no critical signals. Baselines and ledgers keep learning in the background.';
+      }
+      document.getElementById('ops-posture').innerHTML = title;
+      document.getElementById('ops-copy').textContent = copy;
+      // Live chips — every chip is a real number and a real destination.
+      const chips = [
+        { t: `${criticalCount.toLocaleString()} critical`, hot: criticalCount > 0, go: "nav('deviations')" },
+        { t: `${alertCount.toLocaleString()} deviations`, hot: false, go: "nav('deviations')" },
+        { t: `${(s.unique_ips || 0).toLocaleString()} sources tracked`, hot: false, go: "nav('logs')" },
+        { t: s.ai_configured ? 'AI online' : 'AI key missing', hot: !s.ai_configured, go: "nav('aiinvestigate')" },
+      ];
+      document.getElementById('ops-live-chips').innerHTML = chips.map(c =>
+        `<span class="ops-chip-live${c.hot ? ' hot' : ''}" onclick="${c.go}">${c.t}</span>`).join('');
+      // START HERE — rank the three most valuable next actions.
+      const items = [];
+      const top = (hot || [])[0];
+      if (top) {
+        const [threatName] = topThreat(top.threat_types);
+        const [sev] = severityRank(top.severities);
+        items.push({
+          rank: 1, sev: sev || 'high',
+          text: `<b>${escapeHTML(top.identity?.label || top.ip)}</b> — ${escapeHTML(String(threatName || 'most active source').replace(/_/g, ' '))} · ${Number(top.total || 0).toLocaleString()} events`,
+          go: () => goTrail(top.ip),
+        });
+      }
+      renderStartHere(items);   // paint what we have instantly
+      // enrich asynchronously from the cached intel + UEBA endpoints
+      get(`${API}/telemetry/summary`).then(t => {
+        if (!t || t.error) return;
+        if (t.silent_agents > 0) items.push({
+          rank: 0, sev: 'high',
+          text: `<b>${t.silent_agents} sensor${t.silent_agents > 1 ? 's' : ''} went quiet</b> — dead agent or someone killed telemetry`,
+          go: () => nav('intelligence'),
+        });
+        if (t.beacons > 0) items.push({
+          rank: 0, sev: 'critical',
+          text: `<b>${t.beacons} beacon pattern${t.beacons > 1 ? 's' : ''}</b> hiding inside allowed traffic`,
+          go: () => nav('intelligence'),
+        });
+        if (items.length < 3 && t.novelties_7d > 0) items.push({
+          rank: 0, sev: 'medium',
+          text: `<b>${t.novelties_7d} first-ever events</b> this week — new users, binaries, countries`,
+          go: () => nav('intelligence'),
+        });
+        renderStartHere(items);
+      });
+      get(`${API}/ueba/risk`).then(u => {
+        const r = u && u.users && u.users[0];
+        if (r && r.score >= 45) {
+          items.push({
+            rank: 0, sev: r.level,
+            text: `<b>${escapeHTML(r.user)}</b> is acting out of character — risk ${r.score}/100`,
+            go: () => nav('ueba'),
+          });
+          renderStartHere(items);
+        }
+      });
+    }
+    function renderStartHere(items) {
+      const sevRank = { critical: 0, high: 1, medium: 2, low: 3 };
+      const list = items.slice().sort((a, b) => (sevRank[a.sev] ?? 9) - (sevRank[b.sev] ?? 9)).slice(0, 3);
+      window._opsGo = list.map(i => i.go);
+      document.getElementById('ops-start-list').innerHTML = list.length
+        ? list.map((i, n) => `
+          <div class="ops-start-item" onclick="window._opsGo[${n}]()">
+            <span class="ops-start-n ${i.sev}">${n + 1}</span>
+            <span class="ops-start-t">${i.text}</span>
+            <span class="ops-start-go">&rarr;</span>
+          </div>`).join('')
+        : '<div class="empty" style="padding:14px">Nothing needs you — enjoy it while it lasts.</div>';
+    }
     async function refreshAll() {
       try {
       // Single round trip — falls back to separate calls if overview endpoint unavailable
@@ -3424,8 +3504,6 @@ tr:hover td{background:#161b22}</style></head>
       setNum('m-hot', hotCount);
       setNum('m-balerts', alertCount);
       setNum('m-crit', criticalCount);
-      setNum('ops-total', totalLogs);
-      setNum('ops-critical', criticalCount);
       document.getElementById('threat-index').textContent = threatIndex;
       document.getElementById('threat-dial').style.setProperty('--risk', threatIndex);
       document.getElementById('dial-hot').textContent = 'HOT ' + hotCount.toLocaleString();
@@ -3446,14 +3524,7 @@ tr:hover td{background:#161b22}</style></head>
       const covValue = document.getElementById('sig-coverage-v');
       if (covEl) covEl.style.width = coverage + '%';
       if (covValue) covValue.textContent = coverage + '%';
-      const posture = criticalCount > 25 ? 'Critical attack pressure' : criticalCount > 0 ? 'Elevated threat posture' : hotCount > 0 ? 'Active monitoring posture' : 'Stable monitoring posture';
-      const copy = criticalCount > 25
-        ? `${criticalCount} critical IPs and ${hotCount} hot IPs are visible. Prioritise deviations, high-risk ML scores, and active block controls.`
-        : criticalCount > 0
-          ? `${criticalCount} critical IPs detected across ${totalLogs.toLocaleString()} retained logs. Review high-impact deviations first.`
-          : `${totalLogs.toLocaleString()} logs are retained with ${hotCount} hot IPs currently indexed for rapid triage.`;
-      document.getElementById('ops-posture').textContent = posture;
-      document.getElementById('ops-copy').textContent = copy;
+      renderHero(s, hot || [], { hotCount, criticalCount, alertCount, totalLogs });
       document.getElementById('last-ref').textContent = 'Refreshed ' + new Date().toLocaleTimeString();
       const aiReady = s.ai_configured;
       document.getElementById('ai-status').innerHTML = aiReady
