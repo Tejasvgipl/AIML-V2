@@ -370,6 +370,22 @@ def get_entity_events_desc(field: str, value: str, limit: int = 200) -> list[dic
     return _shape_events(_q(sql, {"v": value}))
 
 
+def get_hourly_trend(hours: int = 24) -> list[dict]:
+    """Events per hour (total + blocked-severity split) from the SummingMergeTree
+    rollup — a few hundred rows, never touches the raw logs table."""
+    rows = _q(
+        f"""
+        SELECT hour,
+               sum(events) AS total,
+               sumIf(events, severity IN ('high','critical')) AS hot
+        FROM {CLICKHOUSE_DB}.agg_threat_hourly
+        WHERE hour >= now() - INTERVAL {{h:UInt32}} HOUR
+        GROUP BY hour ORDER BY hour ASC
+        """, {"h": int(hours)})
+    return [{"hour": _iso(r["hour"]), "total": int(r["total"]), "hot": int(r["hot"])}
+            for r in rows]
+
+
 def get_entity_summary(field: str, value: str) -> dict:
     """count + first/last + threat/severity/log-source/IP breakdown for an entity."""
     col = _TRAIL_COLS.get(field, "src_ip")

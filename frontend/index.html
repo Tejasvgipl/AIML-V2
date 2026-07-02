@@ -2016,7 +2016,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=17-sticky-header">
+  <link rel="stylesheet" href="theme.css?v=18-obsidian">
 </head>
 
 <body>
@@ -2040,6 +2040,7 @@
         <div class="ni active" onclick="nav('overview')"><span class="ndot nd-r"></span>Overview</div>
         <div class="ni" onclick="nav('trail')"><span class="ndot nd-w"></span>IP Trail</div>
         <div class="ni" onclick="nav('logs')"><span class="ndot nd-g"></span>Logs Explorer</div>
+        <div class="ni" onclick="nav('intelligence')"><span class="ndot" style="background:var(--accent-2);color:var(--accent-2)"></span>Intelligence</div>
         <div class="ns">Baselines</div>
         <div class="ni" onclick="nav('deviations')"><span class="ndot nd-r"></span>Deviations</div>
         <div class="ni" onclick="nav('bslexplorer')"><span class="ndot nd-w"></span>Baseline Explorer</div>
@@ -2197,6 +2198,16 @@
         </div>
         <div class="cg2">
           <div class="cbox">
+            <h3>Activity pulse — last 24h</h3>
+            <div class="cwrap"><canvas id="ch-trend"></canvas></div>
+          </div>
+          <div class="cbox">
+            <h3>Severity split</h3>
+            <div class="cwrap"><canvas id="ch-sev"></canvas></div>
+          </div>
+        </div>
+        <div class="cg2">
+          <div class="cbox">
             <h3>Top threats (real categories)</h3>
             <div class="cwrap"><canvas id="ch-threats"></canvas></div>
           </div>
@@ -2253,6 +2264,75 @@
           </table>
         </div>
       </div>
+      <!-- ══ TELEMETRY INTELLIGENCE: value from the 95% of logs that never alert ══ -->
+      <div id="page-intelligence" class="page">
+        <div class="ti-strip">
+          <div class="ti-kpi" onclick="document.getElementById('ti-silence').scrollIntoView({behavior:'smooth'})">
+            <div class="ti-kpi-n" id="ti-k-silent">—</div>
+            <div class="ti-kpi-l">Agents silent / degraded</div>
+            <div class="ti-kpi-s">stopped or dropped reporting</div>
+          </div>
+          <div class="ti-kpi" onclick="document.getElementById('ti-firstseen').scrollIntoView({behavior:'smooth'})">
+            <div class="ti-kpi-n" id="ti-k-nov">—</div>
+            <div class="ti-kpi-l">Novelties (7d)</div>
+            <div class="ti-kpi-s">first-ever users, binaries, countries</div>
+          </div>
+          <div class="ti-kpi" onclick="document.getElementById('ti-beacons').scrollIntoView({behavior:'smooth'})">
+            <div class="ti-kpi-n" id="ti-k-beacons">—</div>
+            <div class="ti-kpi-l">Suspected beacons</div>
+            <div class="ti-kpi-s">machine-regular flows (C2 pattern)</div>
+          </div>
+          <div class="ti-kpi" onclick="document.getElementById('ti-policies').scrollIntoView({behavior:'smooth'})">
+            <div class="ti-kpi-n" id="ti-k-pol">—</div>
+            <div class="ti-kpi-l">Policy findings</div>
+            <div class="ti-kpi-s">firewall policy drift / surges</div>
+          </div>
+          <div class="ti-kpi" onclick="document.getElementById('ti-coverage').scrollIntoView({behavior:'smooth'})">
+            <div class="ti-kpi-n" id="ti-k-blind">—</div>
+            <div class="ti-kpi-l">Agents with blind spots</div>
+            <div class="ti-kpi-s">missing process / auth / FIM telemetry</div>
+          </div>
+        </div>
+
+        <div class="card" id="ti-silence">
+          <div class="ch">
+            <span class="ct">1 · Silence Sentinel — who stopped reporting</span>
+            <span class="ti-why">A quiet agent is a broken agent or a compromised one (attackers kill telemetry first — MITRE T1562). Each agent is judged against ITS OWN reporting rhythm.</span>
+          </div>
+          <div class="cb" id="ti-silence-body"><div class="empty">Loading agent health…</div></div>
+        </div>
+
+        <div class="ti-grid">
+          <div class="card" id="ti-firstseen">
+            <div class="ch">
+              <span class="ct">2 · First-Seen Ledger — org-wide novelty</span>
+            </div>
+            <div class="cb" id="ti-firstseen-body"><div class="empty">Building novelty ledger…</div></div>
+          </div>
+          <div class="card" id="ti-beacons">
+            <div class="ch">
+              <span class="ct">3 · Beaconing — heartbeats in allowed traffic</span>
+            </div>
+            <div class="cb" id="ti-beacons-body"><div class="empty">Analysing flow timing…</div></div>
+          </div>
+        </div>
+
+        <div class="ti-grid">
+          <div class="card" id="ti-policies">
+            <div class="ch">
+              <span class="ct">4 · Firewall Policy Analytics — drift &amp; surges</span>
+            </div>
+            <div class="cb" id="ti-policies-body"><div class="empty">Profiling policies…</div></div>
+          </div>
+          <div class="card" id="ti-coverage">
+            <div class="ch">
+              <span class="ct">5 · Blind-Spot Map — where you can't see</span>
+            </div>
+            <div class="cb" id="ti-coverage-body"><div class="empty">Mapping telemetry coverage…</div></div>
+          </div>
+        </div>
+      </div>
+
       <div id="page-trail" class="page">
         <div class="card" style="margin-bottom:16px">
           <div class="cb" style="display:flex;gap:10px">
@@ -2828,6 +2908,136 @@ tr:hover td{background:#161b22}</style></head>
       else if (e.key === 'ArrowRight') { e.preventDefault(); navForward(); }
     });
 
+    /* ══ Telemetry Intelligence — five silent-value modules ══ */
+    async function loadIntelligence() {
+      // Fire all six in parallel; each endpoint is TTL-cached server-side.
+      get(`${API}/telemetry/summary`).then(s => {
+        if (!s || s.error) return;
+        setNum('ti-k-silent', s.silent_agents ?? 0);
+        setNum('ti-k-nov', s.novelties_7d ?? 0);
+        setNum('ti-k-beacons', s.beacons ?? 0);
+        setNum('ti-k-pol', s.policy_findings ?? 0);
+        setNum('ti-k-blind', s.blind_agents ?? 0);
+        const hot = (id, v) => { const el = document.getElementById(id).closest('.ti-kpi'); el.classList.toggle('hot', v > 0); el.classList.toggle('ok', !v); };
+        hot('ti-k-silent', s.silent_agents); hot('ti-k-beacons', s.beacons); hot('ti-k-blind', s.blind_agents);
+      });
+      get(`${API}/telemetry/silence`).then(renderSilence);
+      get(`${API}/telemetry/first-seen`).then(renderFirstSeen);
+      get(`${API}/telemetry/beacons`).then(renderBeacons);
+      get(`${API}/telemetry/policies`).then(renderPolicies);
+      get(`${API}/telemetry/coverage`).then(renderCoverage);
+    }
+    function renderSilence(d) {
+      const el = document.getElementById('ti-silence-body');
+      if (!d || !d.agents) { el.innerHTML = '<div class="empty">No agent telemetry yet.</div>'; return; }
+      if (!d.agents.length) { el.innerHTML = '<div class="empty">No agents with enough history in the window.</div>'; return; }
+      const S = { silent_critical: 'SILENT — CRITICAL', silent: 'SILENT', degraded: 'DEGRADED', ok: 'REPORTING' };
+      el.innerHTML =
+        `<div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+           <b>${d.summary.ok}</b> healthy · <b style="color:var(--warn)">${d.summary.degraded}</b> degraded ·
+           <b style="color:var(--danger)">${d.summary.silent}</b> silent — judged against each agent's own ${d.window_days}-day rhythm</div>` +
+        d.agents.slice(0, 40).map(a => `
+          <div class="ti-agent ${a.status}">
+            <span class="ti-status ${a.status}">${S[a.status] || a.status}</span>
+            <span class="ti-agent-name ent-chip-go" onclick="goTrailEntity('host','${escapeHTML(a.agent)}')" title="Open this agent's trail">${escapeHTML(a.agent)}</span>
+            <span class="ti-agent-meta">${a.status.startsWith('silent')
+              ? `quiet ${a.quiet_for} (normal max ${a.expected_max_gap})`
+              : a.status === 'degraded'
+                ? `volume down ${a.drop_pct}% vs its daily average`
+                : `${a.events_24h.toLocaleString()} events / 24h`}</span>
+          </div>`).join('');
+    }
+    function renderFirstSeen(d) {
+      const el = document.getElementById('ti-firstseen-body');
+      if (!d) { el.innerHTML = '<div class="empty">Ledger unavailable.</div>'; return; }
+      const t = (ts) => toIST(ts).replace(' IST', '');
+      const row = (badge, html, ts) =>
+        `<div class="ti-nov"><span class="ti-nov-badge">${badge}</span><span class="ti-nov-txt">${html}</span><span class="ti-nov-time">${t(ts)}</span></div>`;
+      let h = d.learning_mode
+        ? `<div class="ti-finding" style="border-left-color:var(--accent)">Ledger is still learning (history starts ${t(d.history_from)}). "New" flags get meaningful once the org baseline is older than ${d.window_days * 2} days.</div>`
+        : '';
+      h += (d.new_user_host_pairs || []).slice(0, 10).map(x => row('NEW PAIR',
+        `<b>${escapeHTML(x.username)}</b> logged activity on <b>${escapeHTML(x.agent)}</b> for the first time ever`, x.first_ts)).join('');
+      h += (d.new_binaries || []).slice(0, 10).map(x => row('NEW BINARY',
+        `first org-wide execution of <b>${escapeHTML(x.proc_image)}</b> (${x.events} runs since)`, x.first_ts)).join('');
+      h += (d.new_agents || []).slice(0, 6).map(x => row('NEW AGENT',
+        `<b>${escapeHTML(x.agent)}</b> started reporting`, x.first_ts)).join('');
+      h += (d.new_countries || []).slice(0, 6).map(x => row('NEW COUNTRY',
+        `first traffic involving <b>${escapeHTML(x.country)}</b>`, x.first_ts)).join('');
+      if (d.rare_binaries && d.rare_binaries.length) {
+        h += `<div style="font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin:14px 0 6px">Rare binaries (prevalence ≤ 2 machines)</div>` +
+          d.rare_binaries.slice(0, 8).map(x =>
+            `<div class="ti-nov"><span class="ti-nov-badge" style="background:rgba(251,191,36,.15);color:#fcd34d">RARE</span>
+             <span class="ti-nov-txt"><b>${escapeHTML(x.proc_image)}</b> — on ${x.on_agents} machine${x.on_agents > 1 ? 's' : ''}, ${x.runs} runs</span></div>`).join('');
+      }
+      el.innerHTML = h || '<div class="empty">Nothing new in the window — the environment is stable.</div>';
+    }
+    function renderBeacons(d) {
+      const el = document.getElementById('ti-beacons-body');
+      if (!d || !d.beacons) { el.innerHTML = '<div class="empty">Flow analysis unavailable.</div>'; return; }
+      if (!d.beacons.length) { el.innerHTML = '<div class="empty">No machine-regular flows in the last ' + d.window_hours + 'h — nothing beacon-like.</div>'; return; }
+      el.innerHTML =
+        `<div class="ti-why" style="margin-bottom:10px">Humans are bursty; implants are clockwork. These flows repeat on a near-perfect timer — the C2 pattern no rule catches because each packet looks normal.</div>` +
+        d.beacons.slice(0, 20).map(b => `
+          <div class="ti-beacon${b.likely_infra ? ' infra' : ''}">
+            <div class="ti-beacon-flow">
+              <span class="ent-chip-go" onclick="goTrail('${b.src_ip}')" title="Trail this source">${b.src_ip}</span>
+              &rarr; ${b.dst_ip}${b.dst_port ? ':' + b.dst_port : ''}
+              <span class="ti-period">every ~${b.period}</span>
+              ${b.likely_infra ? '<span class="ent-kind">likely infra</span>' : `<span class="badge critical" style="margin-left:6px">score ${b.score}</span>`}
+            </div>
+            <div class="ti-beacon-meta">
+              <span><b>${b.hits}</b> hits</span>
+              <span>regularity cv <b>${b.cv}</b></span>
+              <span><b>${b.allowed_hits}</b> allowed / <b>${b.blocked_hits}</b> blocked</span>
+              ${b.agent ? `<span>agent <b>${escapeHTML(b.agent)}</b></span>` : ''}
+              ${b.country ? `<span>${escapeHTML(b.country)}</span>` : ''}
+            </div>
+            <div style="font-size:11.5px;color:${b.likely_infra ? 'var(--muted)' : 'var(--danger)'};margin-top:5px">${escapeHTML(b.verdict)}</div>
+          </div>`).join('');
+    }
+    function renderPolicies(d) {
+      const el = document.getElementById('ti-policies-body');
+      if (!d || !d.policies) { el.innerHTML = '<div class="empty">Policy analytics unavailable.</div>'; return; }
+      if (!d.policies.length) { el.innerHTML = '<div class="empty">No firewall policy ids found in the window (needs Fortigate-style logs with data.policyid).</div>'; return; }
+      let h = '';
+      if (d.findings.length) {
+        h += d.findings.map(f => `<div class="ti-finding ${f.kind}">${escapeHTML(f.detail)}</div>`).join('');
+      } else {
+        h += '<div class="ti-why" style="margin-bottom:10px">No drift findings — every policy is behaving like its own recent history.</div>';
+      }
+      h += `<table class="tbl" style="margin-top:10px"><thead><tr>
+              <th>Policy</th><th>Hits (${d.window_days}d)</th><th>24h</th><th>Allow / Block</th><th>Sources</th><th>Dests</th></tr></thead><tbody>` +
+        d.policies.slice(0, 15).map(p => `
+          <tr>
+            <td><span class="tev-id" style="cursor:pointer" onclick="copyEid(event,'${p.policy_id}')" title="Click to copy">policy #${escapeHTML(p.policy_id)}</span>
+                ${p.surge_x ? `<span class="badge critical" style="margin-left:6px">${p.surge_x}x surge</span>` : ''}
+                ${p.went_quiet ? '<span class="badge medium" style="margin-left:6px">went quiet</span>' : ''}</td>
+            <td>${p.hits.toLocaleString()}</td><td>${p.hits_24h.toLocaleString()}</td>
+            <td><span style="color:var(--ok)">${p.allowed.toLocaleString()}</span> / <span style="color:var(--danger)">${p.blocked.toLocaleString()}</span></td>
+            <td>${p.src_count}</td><td>${p.dst_count}</td>
+          </tr>`).join('') + '</tbody></table>';
+      h += `<div class="ti-why" style="margin-top:8px">${escapeHTML(d.note)}</div>`;
+      el.innerHTML = h;
+    }
+    function renderCoverage(d) {
+      const el = document.getElementById('ti-coverage-body');
+      if (!d || !d.agents) { el.innerHTML = '<div class="empty">Coverage map unavailable.</div>'; return; }
+      if (!d.agents.length) { el.innerHTML = '<div class="empty">No agents reporting yet.</div>'; return; }
+      const dot = (n) => `<span class="ti-cov-dot ${n ? 'on' : 'off'}" title="${n ? n.toLocaleString() + ' events' : 'ZERO events of this class — blind'}"></span>`;
+      el.innerHTML =
+        `<div class="ti-why" style="margin-bottom:10px">An agent with zero <b>process</b> telemetry has no Sysmon — execution there is invisible. Zero <b>auth</b> = logons invisible. Zero <b>FIM</b> = file tampering invisible.</div>
+         <table class="tbl"><thead><tr><th>Agent</th><th>Process</th><th>Auth</th><th>FIM</th><th>Events</th><th>Gaps</th></tr></thead><tbody>` +
+        d.agents.slice(0, 40).map(a => `
+          <tr>
+            <td class="ent-chip-go" style="font-weight:700;cursor:pointer" onclick="goTrailEntity('host','${escapeHTML(a.agent)}')">${escapeHTML(a.agent)}</td>
+            <td>${dot(a.process)}</td><td>${dot(a.auth)}</td><td>${dot(a.fim)}</td>
+            <td>${a.total.toLocaleString()}</td>
+            <td>${a.gaps.length ? a.gaps.map(g => `<span class="ti-gap-tag">no ${g}</span>`).join('') : '<span style="color:var(--ok);font-size:11px">full</span>'}</td>
+          </tr>`).join('') + '</tbody></table>' +
+        `<div style="font-size:12px;color:var(--muted);margin-top:10px"><b>${d.summary.with_gaps}</b> of ${d.summary.agents} agents have at least one blind spot.</div>`;
+    }
+
     function nav(name) {
       _pushNav(name);
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -2847,6 +3057,7 @@ tr:hover td{background:#161b22}</style></head>
       });
       const T = {
         overview: 'Overview', trail: 'IP Trail', logs: 'Logs Explorer',
+        intelligence: 'Telemetry Intelligence',
         deviations: 'Baseline Deviations', bslexplorer: 'Baseline Explorer',
         aiinvestigate: 'AI Investigator', nlquery: 'SOC Query', ml: 'ML Anomaly',
         incidents: 'Incident Triage', ueba: 'UEBA — Users & Entities', killchain: 'ATT&CK Kill Chain',
@@ -2856,6 +3067,7 @@ tr:hover td{background:#161b22}</style></head>
       document.body.dataset.page = name;
       if (name === 'overview') { refreshAll(); }
       if (name === 'logs') loadLogs();
+      if (name === 'intelligence') loadIntelligence();
       if (name === 'ml') loadAnomalies();
       if (name === 'deviations') loadDeviations();
       if (name === 'incidents') { loadIncidents(); loadEntityRisk(); loadAttackCoverage(); }
@@ -2900,23 +3112,80 @@ tr:hover td{background:#161b22}</style></head>
         return await r.json();
       } catch (e) { toast('API: ' + e.message, 'err'); return null; }
     }
-    const COLORS = ['#f85149', '#e3b341', '#58a6ff', '#3fb950', '#bc8cff', '#f0883e', '#39d353', '#ffa657', '#79c0ff', '#d2a8ff'];
-    function pie(id, counts) {
+    const COLORS = ['#38bdf8', '#34d399', '#fbbf24', '#fb7185', '#c084fc', '#fb923c', '#22d3ee', '#a3e635', '#818cf8', '#f472b6'];
+    const CHART_GRID = 'rgba(96,165,250,.08)', CHART_TICK = '#8ea3c0';
+    function pie(id, counts, palette) {
       const labels = Object.keys(counts), data = Object.values(counts);
       if (charts[id]) charts[id].destroy();
       charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
         type: 'doughnut',
-        data: { labels, datasets: [{ data, backgroundColor: COLORS.slice(0, labels.length), borderWidth: 0 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#8b949e', font: { size: 10 }, boxWidth: 10, padding: 8 } } } }
+        data: { labels, datasets: [{ data, backgroundColor: (palette || COLORS).slice(0, labels.length), borderWidth: 2, borderColor: '#04070d', hoverOffset: 6 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, cutout: '68%',
+          animation: { animateRotate: true, duration: 900, easing: 'easeOutQuart' },
+          plugins: { legend: { position: 'right', labels: { color: CHART_TICK, font: { size: 10.5 }, boxWidth: 10, boxHeight: 10, padding: 9, usePointStyle: true, pointStyle: 'circle' } } }
+        }
       });
     }
-    function bar(id, labels, data, color = '#58a6ff', horizontal = false) {
+    function bar(id, labels, data, color = '#38bdf8', horizontal = false) {
       if (charts[id]) charts[id].destroy();
       charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
         type: 'bar',
-        data: { labels, datasets: [{ data, backgroundColor: color, borderRadius: 3 }] },
-        options: { indexAxis: horizontal ? 'y' : 'x', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: '#21262d' } }, y: { ticks: { color: '#8b949e', font: { size: 10, family: 'Courier New' } }, grid: { color: '#21262d' } } } }
+        data: { labels, datasets: [{ data, backgroundColor: color + 'cc', hoverBackgroundColor: color, borderRadius: 5, borderSkipped: false }] },
+        options: {
+          indexAxis: horizontal ? 'y' : 'x', responsive: true, maintainAspectRatio: false,
+          animation: { duration: 800, easing: 'easeOutQuart' },
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { color: CHART_TICK, font: { size: 10 } }, grid: { color: CHART_GRID } },
+            y: { ticks: { color: CHART_TICK, font: { size: 10, family: 'Geist Mono, monospace' } }, grid: { color: CHART_GRID } }
+          }
+        }
       });
+    }
+    // Gradient area chart (activity-over-time). datasets = [{label,data,color}]
+    function area(id, labels, datasets) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (charts[id]) charts[id].destroy();
+      const ctx = el.getContext('2d');
+      charts[id] = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: datasets.map(d => {
+            const g = ctx.createLinearGradient(0, 0, 0, 210);
+            g.addColorStop(0, d.color + '55'); g.addColorStop(1, d.color + '00');
+            return { label: d.label, data: d.data, borderColor: d.color, backgroundColor: g,
+                     fill: true, tension: .4, pointRadius: 0, pointHitRadius: 12, borderWidth: 2 };
+          })
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+          animation: { duration: 900, easing: 'easeOutQuart' },
+          plugins: { legend: { display: datasets.length > 1, labels: { color: CHART_TICK, font: { size: 10.5 }, usePointStyle: true, pointStyle: 'circle', boxHeight: 6 } } },
+          scales: {
+            x: { ticks: { color: CHART_TICK, font: { size: 9.5 }, maxTicksLimit: 8 }, grid: { display: false } },
+            y: { ticks: { color: CHART_TICK, font: { size: 10 } }, grid: { color: CHART_GRID }, beginAtZero: true }
+          }
+        }
+      });
+    }
+    // Animated count-up for KPI numerals (2027 dashboards breathe; numbers settle in)
+    function setNum(id, value, suffix = '') {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const target = Number(value);
+      if (!isFinite(target)) { el.textContent = value; return; }
+      const from = Number((el.textContent || '0').replace(/[^\d.-]/g, '')) || 0;
+      if (from === target) { el.textContent = target.toLocaleString() + suffix; return; }
+      const t0 = performance.now(), dur = 700;
+      el.classList.remove('mv-pop'); void el.offsetWidth; el.classList.add('mv-pop');
+      (function tick(t) {
+        const p = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+        el.textContent = Math.round(from + (target - from) * e).toLocaleString() + suffix;
+        if (p < 1) requestAnimationFrame(tick);
+      })(t0);
     }
     function escapeHTML(value) {
       return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -3098,13 +3367,13 @@ tr:hover td{background:#161b22}</style></head>
         const sevPressure = criticalCount + (hotCount * 0.4);
         threatIndex = Math.max(0, Math.min(99, Math.round(100 * (1 - Math.exp(-sevPressure / 55)))));
       }
-      document.getElementById('m-total').textContent = s.total_logs.toLocaleString();
-      document.getElementById('m-ips').textContent = s.unique_ips.toLocaleString();
-      document.getElementById('m-hot').textContent = hotCount;
-      document.getElementById('m-balerts').textContent = alertCount;
-      document.getElementById('m-crit').textContent = criticalCount;
-      document.getElementById('ops-total').textContent = totalLogs.toLocaleString();
-      document.getElementById('ops-critical').textContent = criticalCount;
+      setNum('m-total', s.total_logs);
+      setNum('m-ips', s.unique_ips);
+      setNum('m-hot', hotCount);
+      setNum('m-balerts', alertCount);
+      setNum('m-crit', criticalCount);
+      setNum('ops-total', totalLogs);
+      setNum('ops-critical', criticalCount);
       document.getElementById('threat-index').textContent = threatIndex;
       document.getElementById('threat-dial').style.setProperty('--risk', threatIndex);
       document.getElementById('dial-hot').textContent = 'HOT ' + hotCount.toLocaleString();
@@ -3142,9 +3411,32 @@ tr:hover td{background:#161b22}</style></head>
         const top = Object.entries(s.threat_counts)
           .filter(([k]) => k && k !== 'unknown')
           .sort((a, b) => b[1] - a[1]).slice(0, 8);
-        bar('ch-threats', top.map(([k]) => k.replace(/_/g, ' ')), top.map(([, v]) => v), '#f0883e', true);
+        bar('ch-threats', top.map(([k]) => k.replace(/_/g, ' ')), top.map(([, v]) => v), '#38bdf8', true);
       }
       if (s.alert_type_counts && Object.keys(s.alert_type_counts).length) pie('ch-devtypes', s.alert_type_counts);
+      // Severity split donut (severity_counts already ships in /api/stats)
+      if (s.severity_counts && Object.keys(s.severity_counts).length) {
+        const order = ['critical', 'high', 'medium', 'low', 'unknown'];
+        const sevPal = { critical: '#fb7185', high: '#fb923c', medium: '#fbbf24', low: '#34d399', unknown: '#5c7093' };
+        const sc = {};
+        order.forEach(k => { if (s.severity_counts[k]) sc[k] = s.severity_counts[k]; });
+        Object.keys(s.severity_counts).forEach(k => { if (!(k in sc) && s.severity_counts[k]) sc[k] = s.severity_counts[k]; });
+        pie('ch-sev', sc, Object.keys(sc).map(k => sevPal[k] || '#818cf8'));
+      }
+      // 24h activity pulse from the hourly rollup (one cheap cached call)
+      get(`${API}/trend/hourly?hours=24`).then(r => {
+        if (!r || !r.trend || !r.trend.length) {
+          const c = document.getElementById('ch-trend');
+          if (c && !charts['ch-trend']) c.parentElement.innerHTML =
+            '<div class="empty static" style="padding-top:80px">No events in the last 24h — the pulse fills as live logs arrive.</div>';
+          return;
+        }
+        const lab = r.trend.map(p => toIST(p.hour).replace(/.*?(\d{1,2}:\d{2}).*/, '$1'));
+        area('ch-trend', lab, [
+          { label: 'all events', data: r.trend.map(p => p.total), color: '#38bdf8' },
+          { label: 'high/critical', data: r.trend.map(p => p.hot), color: '#fb7185' },
+        ]);
+      });
       if (hot) {
         HOT_IPS = hot;
         document.getElementById('hot-count').textContent =

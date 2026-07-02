@@ -35,6 +35,10 @@ try:
     import playbook_recommender as pbr  # feedback-trained "which playbooks to build" engine
 except Exception:
     pbr = None  # type: ignore
+try:
+    import telemetry_intel as tint     # value from the 95% of logs that never alert
+except Exception:
+    tint = None  # type: ignore
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -3008,6 +3012,85 @@ async def attack_coverage():
                     "coverage_pct": round(covered / total_tech * 100) if total_tech else 0},
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# -- Telemetry Intelligence: value from logs that never fire an alert ----------
+# All endpoints are TTL-cached: ClickHouse sees at most one aggregation scan per
+# module per cache window regardless of how many dashboards are open.
+
+_TINT_CACHE: dict[str, tuple[float, dict]] = {}
+_TINT_LOCK = asyncio.Lock()
+
+
+async def _tint_cached(key: str, ttl: int, fn, *args) -> dict:
+    now = time.time()
+    hit = _TINT_CACHE.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    async with _TINT_LOCK:                     # single flight per key
+        hit = _TINT_CACHE.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        data = await _to_thread(fn, *args)
+        _TINT_CACHE[key] = (time.time(), data)
+        return data
+
+
+def _tint_ok():
+    if not (tint and STORE_ENABLED and osc):
+        raise HTTPException(503, "Telemetry intelligence requires the log store")
+
+
+@app.get("/api/trend/hourly")
+async def trend_hourly(hours: int = 24):
+    """Per-hour event volume from the rollup table (cheap, for overview chart)."""
+    if not (STORE_ENABLED and osc):
+        return {"trend": []}
+    return {"trend": await _tint_cached(f"trend:{hours}", 60,
+                                        osc.get_hourly_trend, hours)}
+
+
+@app.get("/api/telemetry/silence")
+async def telemetry_silence(days: int = 14):
+    """Silence Sentinel: agents that stopped or degraded reporting."""
+    _tint_ok()
+    return await _tint_cached(f"sil:{days}", 120, tint.silence_report, days)
+
+
+@app.get("/api/telemetry/first-seen")
+async def telemetry_first_seen(days: int = 7):
+    """First-Seen Ledger: org-wide novelty + rare-binary prevalence."""
+    _tint_ok()
+    return await _tint_cached(f"fsn:{days}", 300, tint.first_seen_report, days)
+
+
+@app.get("/api/telemetry/beacons")
+async def telemetry_beacons(hours: int = 24, min_hits: int = 12):
+    """Beaconing: machine-regular flows hiding inside allowed traffic."""
+    _tint_ok()
+    return await _tint_cached(f"bea:{hours}:{min_hits}", 300,
+                              tint.beacon_report, hours, min_hits)
+
+
+@app.get("/api/telemetry/policies")
+async def telemetry_policies(days: int = 7):
+    """Firewall policy analytics: per-policy behaviour + drift findings."""
+    _tint_ok()
+    return await _tint_cached(f"pol:{days}", 600, tint.policy_report, days)
+
+
+@app.get("/api/telemetry/coverage")
+async def telemetry_coverage():
+    """Blind-spot map: per-agent telemetry gaps + tactic visibility."""
+    _tint_ok()
+    return await _tint_cached("cov", 600, tint.coverage_report)
+
+
+@app.get("/api/telemetry/summary")
+async def telemetry_summary():
+    """KPI strip for the overview (aggregates the five modules, cached)."""
+    _tint_ok()
+    return await _tint_cached("sum", 180, tint.intel_summary)
 
 
 # -- search + health -----------------------------------------------------------
