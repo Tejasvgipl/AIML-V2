@@ -250,8 +250,24 @@ async def rescore_all():
 
 
 @app.get("/api/ml/score/{ip}")
-async def score_ip(ip: str):
+async def score_ip(ip: str, live: bool = False):
+    """Score for one IP.
+
+    Default (live=false): return the STORED score - the exact number the
+    anomalies list shows - so every view of this IP agrees. Features are
+    still extracted for display, but the score numbers are the stored ones.
+    live=true: recompute on current features, persist, and bust the
+    anomalies-list cache so the list updates to match immediately.
+    """
+    global _anomalies_cache_ts
     features = await _to_thread(extract_ip_features, ip)
+
+    if not live:
+        stored = await _to_thread(osc.get_ml_score, ip) if (STORE_ENABLED and osc) else None
+        if stored:
+            return {**stored, "features": features or None, "source": "stored"}
+        # nothing stored yet -> fall through and compute a first score
+
     if not features:
         intel_pts, intel_detail = _intel_points(ip)
         if intel_pts:
@@ -259,6 +275,7 @@ async def score_ip(ip: str):
                  "is_anomaly": False, "band": "medium" if intel_pts >= 35 else "low",
                  "components": {"intel": {"points": intel_pts, **intel_detail}}}
             await _to_thread(_persist, s)
+            _anomalies_cache_ts = 0.0
             return {**s, "source": "intel_only"}
         return {"ip": ip, "found": False}
 
@@ -273,6 +290,7 @@ async def score_ip(ip: str):
 
     s = fuse_risk(features, anomaly_score, is_anom)
     await _to_thread(_persist, s)
+    _anomalies_cache_ts = 0.0   # the list must reflect this new score at once
     return {**s, "features": features, "source": "live"}
 
 

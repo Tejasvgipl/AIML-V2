@@ -2016,7 +2016,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=19-obsidian-ueba">
+  <link rel="stylesheet" href="theme.css?v=20-ml-dev">
 </head>
 
 <body>
@@ -4324,28 +4324,27 @@ tr:hover td{background:#161b22}</style></head>
     function renderDevCard(a) {
       const sc = a.severity || 'low';
       const exp = alertWhy(a.type, sc);
-      const when = (a.ts || '').substring(0, 19).replace('T', ' ');
+      const when = a.ts ? toIST(a.ts) : '';
+      const typeLabel = (a.type || 'deviation').replace(/_/g, ' ');
       const det = a.details ? Object.entries(a.details).slice(0, 4).map(([k, v]) =>
-        `<span class="dev-detchip"><b>${k.replace(/_/g, ' ')}</b> ${Array.isArray(v) ? v.slice(0, 3).join(', ') : v}</span>`).join('') : '';
+        `<span class="dev-detchip"><b>${k.replace(/_/g, ' ')}</b> <span class="dev-detval">${Array.isArray(v) ? v.slice(0, 3).join(', ') : v}</span></span>`).join('') : '';
       return `<div class="dev-card ${sc}">
         <div class="dev-card-head">
-          <span class="dev-card-ip" onclick="goTrail('${a.ip}')">${a.ip}</span>
-          <span class="dev-card-type">${(a.type || '').replace(/_/g, ' ')}</span>
+          <span class="dev-sev-ico ${sc}" title="${sc}"></span>
+          <span class="dev-card-type">${typeLabel}</span>
           <span class="badge ${sc}">${sc}</span>
-          <span class="dev-card-time">${when}</span>
+          <span class="dev-card-ip" onclick="goTrail('${a.ip}')" title="Open IP trail">${a.ip}</span>
+          <span class="dev-card-time" title="Indian Standard Time">${when}</span>
         </div>
-        <div class="dev-sec what">
-          <span class="dev-sec-tag">What happened</span>
-          <p>${a.message || ''}</p>
-        </div>
+        <p class="dev-lead">${a.message || ''}</p>
         <div class="dev-grid2">
           <div class="dev-sec why"><span class="dev-sec-tag">Why it matters</span><p>${exp.why}</p></div>
           <div class="dev-sec act"><span class="dev-sec-tag">Recommended action</span><p>${exp.action}</p></div>
         </div>
         ${det ? `<div class="dev-detgrid">${det}</div>` : ''}
         <div class="dev-card-foot">
-          <button class="btn ai" onclick="aiExplainAlert('${a.ip}','${a.type}',this)">✦ AI summary</button>
-          <button class="btn" onclick="goTrail('${a.ip}')">View IP trail →</button>
+          <button class="btn ai" onclick="aiExplainAlert('${a.ip}','${a.type}',this)">&#10022; AI summary</button>
+          <button class="btn" onclick="goTrail('${a.ip}')">View IP trail &rarr;</button>
         </div>
         <div id="ai-alert-${a.ip}-${a.type}" class="dev-ai-box" style="display:none"></div>
       </div>`;
@@ -4663,15 +4662,21 @@ tr:hover td{background:#161b22}</style></head>
     }
 
     // ── ML Anomaly ────────────────────────────────────────────────────────────
-    async function scoreIP(ipOverride = null) {
+    async function scoreIP(ipOverride = null, live = false) {
       const ip = ipOverride || document.getElementById('ml-ip').value.trim(); if (!ip) return;
       document.getElementById('ml-ip').value = ip;
-      const r = await get(`${ML}/score/${ip}`); if (!r) return;
+      const r = await get(`${ML}/score/${ip}${live ? '?live=true' : ''}`); if (!r) return;
+      // A live re-score changed the stored value — refresh the list so every
+      // view shows the same number.
+      if (live) loadAnomalies();
       document.getElementById('score-panel').style.display = 'block';
       const rc = r.risk_score > 70 ? 'var(--danger)' : r.risk_score > 40 ? 'var(--warn)' : 'var(--ok)';
       const conf = computeConfidence(r);
+      const srcNote = r.source === 'stored'
+        ? `as shown in the anomalies list &middot; scored ${r.scored_at ? toIST(r.scored_at) : 'earlier'}`
+        : r.source === 'live' ? 'recomputed just now &mdash; list updated to match' : '';
       document.getElementById('score-body').innerHTML = `
-        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px">
+        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:4px">
           <div><div style="font-size:11px;color:var(--muted)">Risk score</div><div style="font-size:40px;font-weight:700;color:${rc}">${r.risk_score ?? '—'}/100</div></div>
           <div><div style="font-size:11px;color:var(--muted)">Anomaly score</div><div style="font-size:28px;font-weight:700">${r.anomaly_score ?? '—'}</div></div>
           <div><div style="font-size:11px;color:var(--muted)">Confidence</div><div style="font-size:28px;font-weight:700;color:${confidenceColor(conf)}">${conf}/100</div><div style="font-size:11px;color:var(--muted)">${confidenceLabel(conf)}</div></div>
@@ -4685,8 +4690,12 @@ tr:hover td{background:#161b22}</style></head>
           <span style="color:var(--warn)">Baseline alerts: <b>${r.features.baseline_alerts}</b> &nbsp;|&nbsp; Critical alerts: <b>${r.features.critical_alerts}</b></span>
         </div>` : ''}
         ${r.note ? `<div style="margin-top:8px;color:var(--warn);font-size:12px">${r.note}</div>` : ''}
+        ${srcNote ? `<div style="font-size:11px;color:var(--faint);margin-bottom:10px;font-family:var(--mono)">${srcNote}</div>` : ''}
         ${r.anomaly_score !== undefined && r.risk_score !== undefined ? explainMLScore(r) : ''}
-        <div style="margin-top:12px"><button class="btn ai" onclick="aiMLExplainFor('${ip}')">Ask AI why this score</button></div>`;
+        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn ai" onclick="aiMLExplainFor('${ip}')">Ask AI why this score</button>
+          <button class="btn" title="Recompute on current features and update the stored score + list" onclick="scoreIP('${ip}', true)">&#8635; Re-score now</button>
+        </div>`;
     }
     function openMLScore(ip) { document.getElementById('ml-ip').value = ip; scoreIP(ip); }
     async function loadAnomalies() {

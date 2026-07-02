@@ -953,6 +953,43 @@ body[data-page="intelligence"]  { --accent: #22d3ee; --accent-2: #34d399; }
 }
 .ti-head-l { display: inline-flex; align-items: center; }
 
+/* ── DEVIATIONS v2: from text wall to scannable triage cards ───────────── */
+.dev-sev-tile { overflow: hidden; }
+.dev-sev-tile .dst-count { font-size: 30px !important; letter-spacing: -1px; }
+.dev-sev-tile::after {
+  content: ""; position: absolute; right: -26px; top: -26px; width: 76px; height: 76px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(142,163,192,.08), transparent 70%);
+}
+.dev-sev-tile.critical::after { background: radial-gradient(circle, rgba(251,113,133,.14), transparent 70%); }
+.dev-sev-tile.high::after     { background: radial-gradient(circle, rgba(251,146,60,.12), transparent 70%); }
+.dev-sev-tile.medium::after   { background: radial-gradient(circle, rgba(251,191,36,.10), transparent 70%); }
+.dev-sev-tile.low::after      { background: radial-gradient(circle, rgba(52,211,153,.10), transparent 70%); }
+
+.dev-card {
+  background: var(--surface) !important;
+  transition: transform .16s, border-color .16s, box-shadow .16s;
+}
+.dev-card:hover { transform: translateY(-2px); box-shadow: 0 12px 34px -24px rgba(0,0,0,.8); }
+.dev-card.critical:hover { border-color: rgba(251,113,133,.45); }
+.dev-card.high:hover     { border-color: rgba(251,146,60,.45); }
+.dev-card.medium:hover   { border-color: rgba(251,191,36,.4); }
+.dev-card.low:hover      { border-color: rgba(52,211,153,.4); }
+.dev-sev-ico { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+.dev-sev-ico.critical { background: var(--danger); box-shadow: 0 0 10px rgba(251,113,133,.8); animation: statusBlink 1.8s infinite; }
+.dev-sev-ico.high     { background: #fb923c; box-shadow: 0 0 8px rgba(251,146,60,.7); }
+.dev-sev-ico.medium   { background: var(--warn); }
+.dev-sev-ico.low      { background: var(--ok); }
+.dev-card-type { font-size: 14.5px !important; font-weight: 750 !important; text-transform: capitalize; letter-spacing: -.2px; }
+.dev-card-ip { margin-left: auto; font-size: 12.5px !important; background: rgba(56,189,248,.10);
+  border: 1px solid rgba(56,189,248,.22); border-radius: 7px; padding: 2px 9px; }
+.dev-card-ip:hover { background: rgba(56,189,248,.2); text-decoration: none !important; }
+.dev-lead { margin: 0 0 12px; font-size: 13.5px; line-height: 1.65; color: var(--text); font-weight: 500;
+  padding: 10px 12px; background: rgba(56,189,248,.05); border-left: 3px solid var(--accent); border-radius: 7px; }
+.dev-grid2 { background: rgba(8,13,23,.5) !important; }
+.dev-detval { font-family: var(--mono); color: var(--text); }
+.dev-list { max-height: 700px !important; }
+.dev-ip-list { max-height: 700px !important; }
+
 /* ── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 880px) {
   #login-screen { grid-template-columns: 1fr; }
