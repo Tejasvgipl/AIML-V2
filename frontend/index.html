@@ -2016,7 +2016,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=23-hero-compact">
+  <link rel="stylesheet" href="theme.css?v=24-ml-vol">
 </head>
 
 <body>
@@ -2090,9 +2090,13 @@
         <section class="ops-hero">
           <div class="ops-main">
             <div class="ops-kicker"><span class="ops-live-dot"></span>CyberSentinel AI &middot; autonomous triage</div>
-            <div class="ops-title" id="ops-posture"><span class="ops-ai">AI</span> is reading the wire&hellip;</div>
+            <div class="ops-title" id="ops-posture"><span class="ops-ai">ML</span> is reading the wire&hellip;</div>
             <div class="ops-copy" id="ops-copy">Anomaly model, behavioural baselines and identity risk engines are correlating live telemetry&hellip;</div>
             <div class="ops-tape" id="ops-live-chips"></div>
+          </div>
+          <div class="ops-vol" title="Total events ingested and retained in the log store">
+            <div class="ops-vol-n" id="ops-total">&mdash;</div>
+            <div class="ops-vol-l">logs ingested</div>
           </div>
           <div class="ops-start">
             <div class="ops-start-head">START HERE <span class="ops-start-sub">your top moves, ranked</span></div>
@@ -3387,17 +3391,18 @@ tr:hover td{background:#161b22}</style></head>
       let title, copy;
       const engines = 'Anomaly, baseline, identity-risk, beacon and novelty engines score every event as it lands.';
       if (criticalCount > 0) {
-        title = `<span class="ops-ai">AI</span> triaged everything — <span class="ops-red">${criticalCount.toLocaleString()}</span> need a human`;
+        title = `<span class="ops-ai">ML</span> triaged everything — <span class="ops-red">critical</span> items need a human`;
         copy = `${engines} ${hotCount.toLocaleString()} sources running hot — your ranked queue is on the right.`;
       } else if (hotCount > 0) {
-        title = `<span class="ops-ai">AI</span> triaged everything — <span class="ops-cyan">nothing critical</span>`;
+        title = `<span class="ops-ai">ML</span> triaged everything — <span class="ops-cyan">nothing critical</span>`;
         copy = `${engines} ${hotCount.toLocaleString()} sources worth a look when convenient.`;
       } else {
-        title = `<span class="ops-ai">AI</span> on watch — <span class="ops-cyan">all clear</span>`;
+        title = `<span class="ops-ai">ML</span> on watch — <span class="ops-cyan">all clear</span>`;
         copy = `${engines} Nothing has broken from its learned baseline.`;
       }
       document.getElementById('ops-posture').innerHTML = title;
       document.getElementById('ops-copy').textContent = copy;
+      setNum('ops-total', totalLogs);
       // Live chips — every chip is a real number and a real destination.
       const chips = [
         { t: `${criticalCount.toLocaleString()} escalated to human`, hot: criticalCount > 0, go: "nav('deviations')" },
