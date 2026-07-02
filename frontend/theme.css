@@ -953,12 +953,12 @@ body[data-page="intelligence"]  { --accent: #22d3ee; --accent-2: #34d399; }
 }
 .ti-head-l { display: inline-flex; align-items: center; }
 
-/* ── HERO v2: verdict headline + START HERE queue ──────────────────────── */
-.ops-hero { display: grid !important; grid-template-columns: 1.35fr 1fr; align-items: center; gap: 28px !important; }
+/* ── HERO v2: verdict headline + START HERE queue (compact) ────────────── */
+.ops-hero { display: grid !important; grid-template-columns: 1.35fr 1fr; align-items: center; gap: 22px !important; padding: 18px 22px !important; }
 @media (max-width: 1000px) { .ops-hero { grid-template-columns: 1fr; } }
 .ops-live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
   margin-right: 8px; animation: pulse 2s infinite; vertical-align: 1px; }
-.ops-title { font-size: clamp(26px, 3vw, 38px) !important; line-height: 1.12 !important; letter-spacing: -1px !important; font-weight: 850 !important; margin: 10px 0 10px; }
+.ops-title { font-size: clamp(20px, 2.1vw, 27px) !important; line-height: 1.18 !important; letter-spacing: -.6px !important; font-weight: 800 !important; margin: 7px 0 7px; }
 .ops-red { background: linear-gradient(120deg, #fda4af, #fb7185); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 40px rgba(251,113,133,.25); }
 /* The "AI" word: living gradient — the one animated flourish of the headline */
 .ops-ai {
@@ -969,7 +969,7 @@ body[data-page="intelligence"]  { --accent: #22d3ee; --accent-2: #34d399; }
 }
 @keyframes aiFlow { from { background-position: 0% 0; } to { background-position: 220% 0; } }
 .ops-cyan { background: linear-gradient(120deg, #7dd3fc, #22d3ee); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
-.ops-copy { font-size: 13.5px !important; line-height: 1.65; max-width: 560px; }
+.ops-copy { font-size: 12.5px !important; line-height: 1.55; max-width: 560px; }
 .ops-chip-live {
   display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
   background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
@@ -981,15 +981,15 @@ body[data-page="intelligence"]  { --accent: #22d3ee; --accent-2: #34d399; }
 .ops-chip-live.hot::before { background: var(--danger); animation: statusBlink 1.6s infinite; }
 .ops-chip-live:hover { color: var(--text); border-color: rgba(56,189,248,.45); transform: translateY(-1px); }
 .ops-start {
-  background: rgba(8,13,23,.55); border: 1px solid var(--border); border-radius: 16px;
-  padding: 16px 16px 10px; backdrop-filter: blur(10px);
+  background: rgba(8,13,23,.55); border: 1px solid var(--border); border-radius: 14px;
+  padding: 12px 12px 6px; backdrop-filter: blur(10px);
   box-shadow: inset 0 1px 0 rgba(232,240,251,.05);
 }
-.ops-start-head { font-size: 11px; font-weight: 800; letter-spacing: 1.6px; color: var(--accent); margin-bottom: 10px; }
+.ops-start-head { font-size: 10.5px; font-weight: 800; letter-spacing: 1.6px; color: var(--accent); margin-bottom: 7px; }
 .ops-start-sub { font-weight: 500; letter-spacing: .2px; text-transform: none; color: var(--faint); font-size: 10.5px; margin-left: 8px; }
 .ops-start-item {
-  display: flex; align-items: center; gap: 12px; cursor: pointer;
-  padding: 10px 10px; border-radius: 10px; margin-bottom: 4px;
+  display: flex; align-items: center; gap: 11px; cursor: pointer;
+  padding: 7px 9px; border-radius: 10px; margin-bottom: 3px;
   transition: background .13s, transform .13s;
 }
 .ops-start-item:hover { background: rgba(56,189,248,.07); transform: translateX(3px); }
