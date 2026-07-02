@@ -21,15 +21,76 @@ in main.py so ClickHouse sees at most one scan per module per cache window):
 import logging
 from datetime import datetime, timezone
 
-from clickhouse_client import _q, _iso, LOGS_TABLE
+from clickhouse_client import _q, _iso, LOGS_TABLE, CLICKHOUSE_DB, get_client
 
 logger = logging.getLogger("telemetry-intel")
+
+FIRST_SEEN_TABLE = f"{CLICKHOUSE_DB}.first_seen"
 
 _ALLOWED = "('allow','allowed','accept','accepted','pass','permit','permitted')"
 _BLOCKED = "('deny','denied','drop','dropped','block','blocked','reject','rejected')"
 
 # Ports whose regular cadence is expected infrastructure, not C2.
 _INFRA_PORTS = {"53", "123", "514", "1514", "1515", "5601"}
+
+
+# ── Real-time scale schema ──────────────────────────────────────────────────
+# The first-seen ledger is maintained by MATERIALIZED VIEWS: ClickHouse updates
+# it incrementally on every insert block, so novelty queries read a tiny table
+# of unique entities instead of scanning crores of log rows. policy_id becomes
+# a real column filled at ingest (watcher) so policy analytics stops parsing
+# raw JSON for new data. All statements are idempotent (IF NOT EXISTS).
+
+_FS_KINDS = {
+    # kind -> (key expression, row filter)
+    "user_host":   ("concat(username, '|', agent)",
+                    "username != '' AND agent != '' AND NOT endsWith(username, '$') "
+                    "AND lower(username) != lower(agent)"),
+    "binary":      ("proc_image", "proc_image != ''"),
+    "binary_host": ("concat(proc_image, '|', agent)", "proc_image != '' AND agent != ''"),
+    "agent":       ("agent", "agent != ''"),
+    "country":     ("country", "country != ''"),
+    "port":        ("dst_port", "dst_port != ''"),
+}
+
+
+def ensure_intel_schema() -> bool:
+    """Startup migration: policy_id column + first-seen ledger (+MVs) + one-time
+    backfill. Safe to run on every boot."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.command(
+            f"ALTER TABLE {LOGS_TABLE} ADD COLUMN IF NOT EXISTS "
+            f"policy_id LowCardinality(String) DEFAULT ''")
+        client.command(f"""
+            CREATE TABLE IF NOT EXISTS {FIRST_SEEN_TABLE} (
+                kind     LowCardinality(String),
+                key      String,
+                first_ts SimpleAggregateFunction(min, DateTime64(3)),
+                events   SimpleAggregateFunction(sum, UInt64)
+            ) ENGINE = AggregatingMergeTree ORDER BY (kind, key)""")
+        for kind, (key_expr, flt) in _FS_KINDS.items():
+            client.command(f"""
+                CREATE MATERIALIZED VIEW IF NOT EXISTS {CLICKHOUSE_DB}.mv_fs_{kind}
+                TO {FIRST_SEEN_TABLE} AS
+                SELECT '{kind}' AS kind, {key_expr} AS key,
+                       min(ts) AS first_ts, toUInt64(count()) AS events
+                FROM {LOGS_TABLE} WHERE {flt} GROUP BY key""")
+        # one-time backfill so history predating the MVs is in the ledger
+        n = _q(f"SELECT count() c FROM {FIRST_SEEN_TABLE}")
+        if n and int(n[0]["c"]) == 0:
+            for kind, (key_expr, flt) in _FS_KINDS.items():
+                client.command(f"""
+                    INSERT INTO {FIRST_SEEN_TABLE}
+                    SELECT '{kind}' AS kind, {key_expr} AS key, min(ts), toUInt64(count())
+                    FROM {LOGS_TABLE} WHERE {flt} GROUP BY key""")
+            logger.info("first_seen ledger backfilled")
+        return True
+    except Exception as e:
+        logger.error(f"ensure_intel_schema: {e}")
+        return False
 
 
 def _now_utc() -> datetime:
@@ -129,11 +190,11 @@ def silence_report(days: int = 14, min_events: int = 10) -> dict:
 # ── 2. First-Seen Ledger ────────────────────────────────────────────────────
 
 def first_seen_report(days: int = 7) -> dict:
-    """Org-wide novelty: entities whose FIRST EVER appearance is inside the
-    window. Every log row contributes to the 'known' ledger; only genuine
-    novelty surfaces. Near-zero false positives by construction."""
+    """Org-wide novelty read from the MV-maintained ledger: O(unique entities)
+    regardless of log volume, updated in real time on every insert block.
+    Near-zero false positives by construction."""
     p = {"days": int(days)}
-    lookback = _q(f"SELECT min(ts) AS m, max(ts) AS x FROM {LOGS_TABLE}")
+    lookback = _q(f"SELECT min(first_ts) AS m FROM {FIRST_SEEN_TABLE}")
     global_min = lookback[0]["m"] if lookback else None
     learning = False
     if isinstance(global_min, datetime):
@@ -141,36 +202,45 @@ def first_seen_report(days: int = 7) -> dict:
         history_days = (_now_utc() - gm).total_seconds() / 86400
         learning = history_days < days * 2  # not enough history to call things "new"
 
-    def fs(select: str, where: str, group: str, limit: int = 60) -> list[dict]:
-        return _q(
-            f"""
-            SELECT {select}, min(ts) AS first_ts, count() AS events
-            FROM {LOGS_TABLE}
-            WHERE {where}
-            GROUP BY {group}
-            HAVING first_ts >= now() - INTERVAL {{days:UInt32}} DAY
-            ORDER BY first_ts DESC
-            LIMIT {limit}
-            """, p)
+    # One pass over the tiny ledger for every kind (min/sum finalise any
+    # not-yet-merged AggregatingMergeTree parts).
+    nov = _q(
+        f"""
+        SELECT kind, key, min(first_ts) AS first_ts, sum(events) AS events
+        FROM {FIRST_SEEN_TABLE}
+        WHERE kind != 'binary_host'
+        GROUP BY kind, key
+        HAVING first_ts >= now() - INTERVAL {{days:UInt32}} DAY
+        ORDER BY first_ts DESC
+        LIMIT 400
+        """, p)
+    by_kind: dict[str, list[dict]] = {}
+    for r in nov:
+        by_kind.setdefault(r["kind"], []).append(r)
 
-    new_agents = fs("agent", "agent != ''", "agent")
-    new_pairs = fs(
-        "username, agent",
-        "username != '' AND agent != '' AND NOT endsWith(username, '$') "
-        "AND lower(username) != lower(agent)",
-        "username, agent",
-    )
-    new_binaries = fs("proc_image", "proc_image != ''", "proc_image")
-    new_countries = fs("country", "country != ''", "country", 30)
-    new_ports = fs("dst_port", "dst_port != ''", "dst_port", 30)
+    def unpack(kind: str, fields: tuple, limit: int) -> list[dict]:
+        out = []
+        for r in by_kind.get(kind, [])[:limit]:
+            parts = str(r["key"]).split("|")
+            d = {fields[i]: (parts[i] if i < len(parts) else "") for i in range(len(fields))}
+            d["first_ts"] = r["first_ts"]
+            d["events"] = r["events"]
+            out.append(d)
+        return out
 
-    # Org prevalence: binaries seen on very few machines = worth a look.
+    new_agents = unpack("agent", ("agent",), 60)
+    new_pairs = unpack("user_host", ("username", "agent"), 60)
+    new_binaries = unpack("binary", ("proc_image",), 60)
+    new_countries = unpack("country", ("country",), 30)
+    new_ports = unpack("port", ("dst_port",), 30)
+
+    # Org prevalence from the binary_host ledger: binaries on very few machines.
     rare_binaries = _q(
         f"""
-        SELECT proc_image, uniqExact(agent) AS on_agents, count() AS runs,
-               min(ts) AS first_ts, max(ts) AS last_ts
-        FROM {LOGS_TABLE}
-        WHERE proc_image != '' AND agent != ''
+        SELECT splitByChar('|', key)[1] AS proc_image,
+               count() AS on_agents, sum(events) AS runs, min(first_ts) AS first_ts
+        FROM {FIRST_SEEN_TABLE}
+        WHERE kind = 'binary_host'
         GROUP BY proc_image
         HAVING on_agents <= 2
         ORDER BY on_agents ASC, runs ASC
@@ -214,7 +284,27 @@ def first_seen_report(days: int = 7) -> dict:
 def beacon_report(hours: int = 24, min_hits: int = 12) -> dict:
     """Flows whose inter-arrival timing is machine-regular. cv = stddev/mean of
     the gaps; humans are bursty (cv >> 1), implant heartbeats are clockwork
-    (cv < ~0.35 even with jitter). Runs on ALL traffic incl. allowed."""
+    (cv < ~0.35 even with jitter). Runs on ALL traffic incl. allowed.
+
+    Two-pass for million-row scale: pass 1 is a cheap count-only aggregation
+    that picks candidate flows (bounded to 2000); only those flows get the
+    memory-heavy groupArray timing analysis in pass 2."""
+    params = {"hours": int(hours), "minhits": int(min_hits)}
+    cands = _q(
+        f"""
+        SELECT src_ip, dst_ip, dst_port
+        FROM {LOGS_TABLE}
+        WHERE ts >= now() - INTERVAL {{hours:UInt32}} HOUR
+          AND src_ip != '' AND dst_ip != ''
+        GROUP BY src_ip, dst_ip, dst_port
+        HAVING count() >= {{minhits:UInt32}}
+        ORDER BY count() DESC
+        LIMIT 2000
+        """, params)
+    if not cands:
+        return {"beacons": [], "summary": {"total": 0, "suspicious": 0, "infra": 0},
+                "window_hours": hours, "generated_at": _iso(_now_utc())}
+    triples = [(c["src_ip"], c["dst_ip"], c["dst_port"]) for c in cands]
     rows = _q(
         f"""
         WITH arraySort(groupArray(toUnixTimestamp(toDateTime(ts)))) AS times,
@@ -232,7 +322,7 @@ def beacon_report(hours: int = 24, min_hits: int = 12) -> dict:
                any(agent)                                AS agent
         FROM {LOGS_TABLE}
         WHERE ts >= now() - INTERVAL {{hours:UInt32}} HOUR
-          AND src_ip != '' AND dst_ip != ''
+          AND (src_ip, dst_ip, dst_port) IN {{triples:Array(Tuple(String, String, String))}}
         GROUP BY src_ip, dst_ip, dst_port
         HAVING hits >= {{minhits:UInt32}}
            AND period_s BETWEEN 5 AND 3600
@@ -240,7 +330,7 @@ def beacon_report(hours: int = 24, min_hits: int = 12) -> dict:
         ORDER BY cv ASC, hits DESC
         LIMIT 50
         """,
-        {"hours": int(hours), "minhits": int(min_hits)},
+        {**params, "triples": triples},
     )
     beacons = []
     for r in rows:
@@ -280,8 +370,11 @@ _FW_FILTER = (
     "OR rule_groups ILIKE '%firewall%' OR rule ILIKE '%fortigate%' "
     "OR location ILIKE '%fortigate%')"
 )
+# New rows carry the real policy_id column (watcher fills it at ingest);
+# legacy rows fall back to raw/full_log extraction behind the cheap prefilter.
 _PID_EXPR = (
-    "if(JSONExtractString(raw, 'data', 'policyid') != '', "
+    "multiIf(policy_id != '', policy_id, "
+    "JSONExtractString(raw, 'data', 'policyid') != '', "
     "JSONExtractString(raw, 'data', 'policyid'), "
     "extract(full_log, 'policyid=\"?([0-9]+)'))"
 )

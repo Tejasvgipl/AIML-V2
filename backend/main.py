@@ -106,6 +106,12 @@ async def _start_background_refresh():
             await _to_thread(osc.ensure_runtime_tables)
         except Exception as e:
             logger.warning(f"ensure_runtime_tables: {e}")
+        if tint:
+            try:
+                # policy_id column + first-seen ledger MVs (+one-time backfill)
+                await _to_thread(tint.ensure_intel_schema)
+            except Exception as e:
+                logger.warning(f"ensure_intel_schema: {e}")
 
     async def _refresh_fast():
         """Stats, hot-ips, resilience - lightweight."""
@@ -2398,6 +2404,49 @@ async def ueba_impossible_travel(days: int = 0):
         for f in (ub.detect_impossible_travel(evs) if ub else []):
             findings.append({**f, "username": user})
     return {"findings": findings, "total": len(findings), "users_scanned": len(by_user)}
+
+
+@app.get("/api/ueba/risk")
+async def ueba_risk(days: int = 30, limit: int = 300):
+    """UEBA v2: ranked user risk. Each identity vs ITS OWN 30-day baseline
+    (new hosts / countries / off-hours / volume / ATO pattern / criticals /
+    impossible travel / peer context) with plain-English drivers. Cached."""
+    if not (STORE_ENABLED and osc and ub):
+        return {"users": [], "baseline_days": days}
+
+    async def _compute():
+        profiles, login_events = await asyncio.gather(
+            _to_thread(osc.get_ueba_user_profiles, days, limit),
+            _to_thread(osc.get_recent_login_events, 5000, 7),
+        )
+        by_user: dict[str, list] = {}
+        for ev in (login_events or []):
+            u = (ev.get("username") or "").strip()
+            if u:
+                by_user.setdefault(u, []).append(ev)
+        travel = {u: ub.detect_impossible_travel(evs) for u, evs in by_user.items()}
+        travel = {u: f for u, f in travel.items() if f}
+        users = ub.score_user_profiles(profiles or [], travel, baseline_days=days)
+        return {
+            "users": users,
+            "baseline_days": days,
+            "population": len(profiles or []),
+            "summary": {
+                "critical": sum(1 for u in users if u["level"] == "critical"),
+                "high": sum(1 for u in users if u["level"] == "high"),
+                "medium": sum(1 for u in users if u["level"] == "medium"),
+                "low": sum(1 for u in users if u["level"] == "low"),
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    now = time.time()
+    hit = _TINT_CACHE.get("ueba_risk")
+    if hit and now - hit[0] < 120:
+        return hit[1]
+    data = await _compute()
+    _TINT_CACHE["ueba_risk"] = (time.time(), data)
+    return data
 
 
 @app.get("/api/ueba/peer-outliers")

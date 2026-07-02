@@ -74,6 +74,7 @@ INSERT_COLS = [
     "proc_image", "proc_parent", "proc_cmdline", "logon_type", "target_user",
     "sc_path", "sc_event", "sc_sha256", "geo_lat", "geo_lon",
     "decoder", "location", "full_log", "raw",
+    "policy_id",   # firewall policy that matched (Fortigate data.policyid)
 ]
 
 filter_stats = defaultdict(int)
@@ -100,6 +101,14 @@ def get_ch():
             settings={"async_insert": 1, "wait_for_async_insert": 1},
         )
         _ch_client.command("SELECT 1")
+        # Idempotent migration: the watcher may start before the backend, and
+        # its INSERT names policy_id explicitly - make sure the column exists.
+        try:
+            _ch_client.command(
+                f"ALTER TABLE {CH_TABLE} ADD COLUMN IF NOT EXISTS "
+                f"policy_id LowCardinality(String) DEFAULT ''")
+        except Exception as mig_e:
+            print(f"  ! policy_id migration skipped: {mig_e}")
         print(f"[Watcher] ClickHouse connected at {CH_HOST}:{CH_PORT}")
         return _ch_client
     except Exception as e:
@@ -409,6 +418,7 @@ def map_to_row(raw_alert: dict):
         _first(flat, "location")[:300],                              # location
         _first(flat, "full_log")[:2000],                             # full_log
         json.dumps(raw_alert),                                       # raw (no truncation)
+        _first(flat, "data.policyid", "data.policy_id"),             # policy_id
     ]
 
 

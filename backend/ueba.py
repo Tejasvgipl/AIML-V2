@@ -263,6 +263,147 @@ def detect_impossible_travel(events: list[dict]) -> list[dict]:
     return findings[:25]
 
 
+# ── UEBA v2: per-user risk scoring (market-grade pattern) ──────────────────────
+# Each user is compared to THEIR OWN 30-day baseline (the Exabeam/Securonix
+# model): what changed in the last 24h that this identity has never done
+# before? Anomalies are additive scored drivers with plain-English evidence,
+# capped at 100. Population context (peer z-scores) adds on top.
+
+RISK_LEVELS = ((70, "critical"), (45, "high"), (25, "medium"), (0, "low"))
+
+
+def _ist_hour(h_utc: int) -> str:
+    """UTC hour -> IST wall-clock label (banks read IST)."""
+    m = (h_utc * 60 + 330) % 1440
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def _hist_dict(pair) -> dict:
+    """sumMap([keys],[vals]) arrives as ([k...],[v...]) or {k:v}; normalise to
+    {key: int(count)}. Keys keep their native type (int hours, date days)."""
+    if isinstance(pair, dict):
+        return {k: int(v) for k, v in pair.items()}
+    try:
+        keys, vals = pair
+        return {k: int(v) for k, v in zip(keys, vals)}
+    except Exception:
+        return {}
+
+
+def score_user_profiles(rows: list[dict],
+                        travel_by_user: dict[str, list] | None = None,
+                        baseline_days: int = 30) -> list[dict]:
+    """Turn get_ueba_user_profiles() rows into ranked risk entries with
+    plain-English drivers. Pure function: trivially testable."""
+    travel_by_user = travel_by_user or {}
+
+    # population stats for peer context (on 24h volume + criticals)
+    peer_rows = [{"entity": r["username"], "events": r.get("ev_24", 0),
+                  "crit": r.get("crit_24", 0),
+                  "dsts": len(r.get("ports_24") or []),
+                  "ports": len(r.get("ports_24") or []),
+                  "countries": len(r.get("countries_24") or []),
+                  "srcs": len(r.get("srcs_24") or [])} for r in rows]
+    peer_hits = {p["entity"]: p for p in peer_outliers(peer_rows)}
+
+    out = []
+    for r in rows:
+        user = r["username"]
+        ev_base, ev_24 = int(r.get("ev_base", 0)), int(r.get("ev_24", 0))
+        mature = ev_base >= 50          # enough history to trust the baseline
+        drivers, score = [], 0.0
+
+        def add(pts: float, kind: str, text: str):
+            nonlocal score
+            score += pts
+            drivers.append({"kind": kind, "points": round(pts), "text": text})
+
+        # 1 — new host for this identity (classic lateral-movement tell)
+        hb = set(r.get("hosts_base") or [])
+        if mature and hb:
+            new_hosts = [h for h in (r.get("hosts_24") or []) if h not in hb]
+            for h in new_hosts[:2]:
+                add(22, "new_host",
+                    f"accessed {h} - a machine this account never touched in its "
+                    f"{baseline_days}-day baseline (usual: {', '.join(sorted(hb)[:3])})")
+
+        # 2 — new country
+        cb = set(r.get("countries_base") or [])
+        if mature and cb:
+            for c in [c for c in (r.get("countries_24") or []) if c not in cb][:2]:
+                add(28, "new_country",
+                    f"activity from {c} - never seen for this account "
+                    f"(usual: {', '.join(sorted(cb)[:3])})")
+
+        # 3 — off-hours: active in hours where the baseline is essentially zero
+        hb_hist = _hist_dict(r.get("hours_base"))
+        h24_hist = _hist_dict(r.get("hours_24"))
+        if mature and hb_hist:
+            total_b = sum(hb_hist.values()) or 1
+            usual = {h for h, n in hb_hist.items() if n / total_b >= 0.02}
+            odd = [(h, n) for h, n in h24_hist.items()
+                   if h not in usual and n >= 3]
+            if odd and usual:
+                h, n = max(odd, key=lambda x: x[1])
+                lo, hi = min(usual), max(usual)
+                add(18, "off_hours",
+                    f"{n} events at {_ist_hour(h)} IST - outside this account's usual "
+                    f"{_ist_hour(lo)}-{_ist_hour(hi)} IST working window")
+
+        # 4 — volume spike vs own daily average
+        daily_avg = ev_base / max(1, baseline_days - 1)
+        if mature and daily_avg >= 2 and ev_24 >= 30 and ev_24 / daily_avg >= 5:
+            add(15, "volume_spike",
+                f"{ev_24} events in 24h - {ev_24 / daily_avg:.0f}x this account's "
+                f"normal {daily_avg:.0f}/day")
+
+        # 5 — brute-force pressure / takeover pattern
+        fails, succ = int(r.get("fails_24", 0)), int(r.get("success_24", 0))
+        if fails >= 20 and succ >= 1:
+            add(30, "ato_pattern",
+                f"{fails} failed logins followed by {succ} successful login(s) "
+                f"in 24h - the brute-force-then-success takeover pattern")
+        elif fails >= 20:
+            add(15, "fail_burst", f"{fails} failed logins against this account in 24h")
+
+        # 6 — high/critical detections
+        crit = int(r.get("crit_24", 0))
+        if crit:
+            add(min(20, crit * 4), "critical_hits",
+                f"{crit} high/critical detection(s) in the last 24h")
+
+        # 7 — impossible travel (from the geo detector, merged by user)
+        for f in (travel_by_user.get(user) or [])[:1]:
+            add(35, "impossible_travel", f.get("message", "impossible travel detected"))
+
+        # 8 — peer outlier context
+        pz = peer_hits.get(user)
+        if pz:
+            add(12, "peer_outlier",
+                f"deviates from the user population (max z={pz['max_z']}): "
+                + ", ".join(d['feature'] for d in pz['drivers'][:3]))
+
+        if not drivers:
+            continue
+        score = min(100.0, score)
+        level = next(lvl for thr, lvl in RISK_LEVELS if score >= thr)
+        days7 = _hist_dict(r.get("days_7"))
+        out.append({
+            "user": user,
+            "score": round(score),
+            "level": level,
+            "drivers": sorted(drivers, key=lambda d: -d["points"]),
+            "ev_24": ev_24, "ev_base": ev_base,
+            "baseline_mature": mature,
+            "hosts": sorted(set((r.get("hosts_base") or []) + (r.get("hosts_24") or [])))[:6],
+            "countries": sorted(set((r.get("countries_base") or []) + (r.get("countries_24") or [])))[:6],
+            "sparkline": [int(v) for _, v in sorted(days7.items())][-7:],
+            "last_seen": r.get("last_ts", ""),
+        })
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
 # ── peer-group anomaly ─────────────────────────────────────────────────────────
 
 PEER_FEATURES = ["events", "crit", "dsts", "ports", "countries", "srcs"]

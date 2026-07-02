@@ -2016,7 +2016,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=18-obsidian">
+  <link rel="stylesheet" href="theme.css?v=19-obsidian-ueba">
 </head>
 
 <body>
@@ -2266,6 +2266,10 @@
       </div>
       <!-- ══ TELEMETRY INTELLIGENCE: value from the 95% of logs that never alert ══ -->
       <div id="page-intelligence" class="page">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+          <span style="font-size:12.5px;color:var(--muted)">Value from the logs that never fire an alert &mdash; ledgers update in real time on every insert.</span>
+          <span class="ti-live" style="margin-left:auto" id="ti-updated">LIVE</span>
+        </div>
         <div class="ti-strip">
           <div class="ti-kpi" onclick="document.getElementById('ti-silence').scrollIntoView({behavior:'smooth'})">
             <div class="ti-kpi-n" id="ti-k-silent">—</div>
@@ -2296,8 +2300,8 @@
 
         <div class="card" id="ti-silence">
           <div class="ch">
-            <span class="ct">1 · Silence Sentinel — who stopped reporting</span>
-            <span class="ti-why">A quiet agent is a broken agent or a compromised one (attackers kill telemetry first — MITRE T1562). Each agent is judged against ITS OWN reporting rhythm.</span>
+            <span class="ct ti-head-l"><span class="ti-num">1</span>Silence Sentinel — who stopped reporting</span>
+            <span id="ti-c-silence" class="ti-count">…</span>
           </div>
           <div class="cb" id="ti-silence-body"><div class="empty">Loading agent health…</div></div>
         </div>
@@ -2305,13 +2309,15 @@
         <div class="ti-grid">
           <div class="card" id="ti-firstseen">
             <div class="ch">
-              <span class="ct">2 · First-Seen Ledger — org-wide novelty</span>
+              <span class="ct ti-head-l"><span class="ti-num">2</span>First-Seen Ledger — org-wide novelty</span>
+              <span id="ti-c-firstseen" class="ti-count">…</span>
             </div>
             <div class="cb" id="ti-firstseen-body"><div class="empty">Building novelty ledger…</div></div>
           </div>
           <div class="card" id="ti-beacons">
             <div class="ch">
-              <span class="ct">3 · Beaconing — heartbeats in allowed traffic</span>
+              <span class="ct ti-head-l"><span class="ti-num">3</span>Beaconing — heartbeats in allowed traffic</span>
+              <span id="ti-c-beacons" class="ti-count">…</span>
             </div>
             <div class="cb" id="ti-beacons-body"><div class="empty">Analysing flow timing…</div></div>
           </div>
@@ -2320,13 +2326,15 @@
         <div class="ti-grid">
           <div class="card" id="ti-policies">
             <div class="ch">
-              <span class="ct">4 · Firewall Policy Analytics — drift &amp; surges</span>
+              <span class="ct ti-head-l"><span class="ti-num">4</span>Firewall Policy Analytics — drift &amp; surges</span>
+              <span id="ti-c-policies" class="ti-count">…</span>
             </div>
             <div class="cb" id="ti-policies-body"><div class="empty">Profiling policies…</div></div>
           </div>
           <div class="card" id="ti-coverage">
             <div class="ch">
-              <span class="ct">5 · Blind-Spot Map — where you can't see</span>
+              <span class="ct ti-head-l"><span class="ti-num">5</span>Blind-Spot Map — where you can't see</span>
+              <span id="ti-c-coverage" class="ti-count">…</span>
             </div>
             <div class="cb" id="ti-coverage-body"><div class="empty">Mapping telemetry coverage…</div></div>
           </div>
@@ -2618,20 +2626,44 @@
 
       <div id="page-ueba" class="page">
         <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
-          <button class="btn pri" onclick="loadUEBA()">↻ Run UEBA sweep</button>
-          <span style="font-size:12px;color:var(--muted);align-self:center">Account takeover · Impossible travel · Peer outliers</span>
+          <button class="btn pri" onclick="loadUEBA()">&#8635; Run UEBA sweep</button>
+          <span style="font-size:12px;color:var(--muted);align-self:center">
+            Every identity vs its own 30-day baseline &mdash; new hosts, new countries, off-hours,
+            volume, takeover patterns, impossible travel, peer deviation</span>
+          <span id="ueba-updated" style="margin-left:auto;font-size:11px;color:var(--faint);font-family:var(--mono)"></span>
         </div>
-        <div class="card" style="margin-bottom:16px">
-          <div class="ch"><span class="ct">Account Takeover</span><span id="ueba-ato-count" style="font-size:11px;color:var(--muted)"></span></div>
-          <div id="ueba-ato-body" class="cb"><span style="color:var(--muted);font-size:12px">Click Refresh to run</span></div>
+
+        <!-- Risk summary strip -->
+        <div class="ti-strip" id="ueba-strip" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+          <div class="ti-kpi"><div class="ti-kpi-n" id="ueba-k-crit">—</div><div class="ti-kpi-l">Critical users</div></div>
+          <div class="ti-kpi"><div class="ti-kpi-n" id="ueba-k-high">—</div><div class="ti-kpi-l">High risk</div></div>
+          <div class="ti-kpi"><div class="ti-kpi-n" id="ueba-k-med">—</div><div class="ti-kpi-l">Medium</div></div>
+          <div class="ti-kpi"><div class="ti-kpi-n" id="ueba-k-pop">—</div><div class="ti-kpi-l">Identities profiled</div></div>
         </div>
+
+        <!-- Risk leaderboard -->
         <div class="card" style="margin-bottom:16px">
-          <div class="ch"><span class="ct">Impossible Travel</span><span id="ueba-travel-count" style="font-size:11px;color:var(--muted)"></span></div>
-          <div id="ueba-travel-body" class="cb"><span style="color:var(--muted);font-size:12px">Click Refresh to run</span></div>
+          <div class="ch">
+            <span class="ct">User Risk Leaderboard</span>
+            <span class="ti-why">score = what this identity did in 24h that its OWN baseline says it never does</span>
+          </div>
+          <div id="ueba-risk-body" class="cb"><div class="empty">Profiling identities&hellip;</div></div>
+        </div>
+
+        <!-- Classic detectors, two-up -->
+        <div class="ti-grid">
+          <div class="card">
+            <div class="ch"><span class="ct">Impossible Travel</span><span id="ueba-travel-count" style="font-size:11px;color:var(--muted)"></span></div>
+            <div id="ueba-travel-body" class="cb"><span style="color:var(--muted);font-size:12px">Run a sweep to populate</span></div>
+          </div>
+          <div class="card">
+            <div class="ch"><span class="ct">Account Takeover</span><span id="ueba-ato-count" style="font-size:11px;color:var(--muted)"></span></div>
+            <div id="ueba-ato-body" class="cb"><span style="color:var(--muted);font-size:12px">Run a sweep to populate</span></div>
+          </div>
         </div>
         <div class="card">
           <div class="ch"><span class="ct">Peer Outliers</span><span id="ueba-peer-count" style="font-size:11px;color:var(--muted)"></span></div>
-          <div id="ueba-peer-body" class="cb"><span style="color:var(--muted);font-size:12px">Click Refresh to run</span></div>
+          <div id="ueba-peer-body" class="cb"><span style="color:var(--muted);font-size:12px">Run a sweep to populate</span></div>
         </div>
       </div>
 
@@ -2909,7 +2941,20 @@ tr:hover td{background:#161b22}</style></head>
     });
 
     /* ══ Telemetry Intelligence — five silent-value modules ══ */
+    function tiChip(id, n, hotWhen) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = n;
+      el.classList.toggle('hot', hotWhen && n > 0);
+      el.classList.toggle('zero', n === 0);
+    }
+    // Real-time: refresh the page every 30s while it is the active view.
+    setInterval(() => {
+      if (document.body.dataset.page === 'intelligence') loadIntelligence();
+    }, 30000);
     async function loadIntelligence() {
+      const up = document.getElementById('ti-updated');
+      if (up) up.textContent = 'LIVE · updated ' + new Date().toLocaleTimeString();
       // Fire all six in parallel; each endpoint is TTL-cached server-side.
       get(`${API}/telemetry/summary`).then(s => {
         if (!s || s.error) return;
@@ -2930,6 +2975,7 @@ tr:hover td{background:#161b22}</style></head>
     function renderSilence(d) {
       const el = document.getElementById('ti-silence-body');
       if (!d || !d.agents) { el.innerHTML = '<div class="empty">No agent telemetry yet.</div>'; return; }
+      tiChip('ti-c-silence', (d.summary?.silent || 0) + (d.summary?.degraded || 0), true);
       if (!d.agents.length) { el.innerHTML = '<div class="empty">No agents with enough history in the window.</div>'; return; }
       const S = { silent_critical: 'SILENT — CRITICAL', silent: 'SILENT', degraded: 'DEGRADED', ok: 'REPORTING' };
       el.innerHTML =
@@ -2950,6 +2996,7 @@ tr:hover td{background:#161b22}</style></head>
     function renderFirstSeen(d) {
       const el = document.getElementById('ti-firstseen-body');
       if (!d) { el.innerHTML = '<div class="empty">Ledger unavailable.</div>'; return; }
+      tiChip('ti-c-firstseen', d.summary?.novelties || 0, false);
       const t = (ts) => toIST(ts).replace(' IST', '');
       const row = (badge, html, ts) =>
         `<div class="ti-nov"><span class="ti-nov-badge">${badge}</span><span class="ti-nov-txt">${html}</span><span class="ti-nov-time">${t(ts)}</span></div>`;
@@ -2975,6 +3022,7 @@ tr:hover td{background:#161b22}</style></head>
     function renderBeacons(d) {
       const el = document.getElementById('ti-beacons-body');
       if (!d || !d.beacons) { el.innerHTML = '<div class="empty">Flow analysis unavailable.</div>'; return; }
+      tiChip('ti-c-beacons', d.summary?.suspicious || 0, true);
       if (!d.beacons.length) { el.innerHTML = '<div class="empty">No machine-regular flows in the last ' + d.window_hours + 'h — nothing beacon-like.</div>'; return; }
       el.innerHTML =
         `<div class="ti-why" style="margin-bottom:10px">Humans are bursty; implants are clockwork. These flows repeat on a near-perfect timer — the C2 pattern no rule catches because each packet looks normal.</div>` +
@@ -2999,6 +3047,7 @@ tr:hover td{background:#161b22}</style></head>
     function renderPolicies(d) {
       const el = document.getElementById('ti-policies-body');
       if (!d || !d.policies) { el.innerHTML = '<div class="empty">Policy analytics unavailable.</div>'; return; }
+      tiChip('ti-c-policies', d.summary?.findings || 0, true);
       if (!d.policies.length) { el.innerHTML = '<div class="empty">No firewall policy ids found in the window (needs Fortigate-style logs with data.policyid).</div>'; return; }
       let h = '';
       if (d.findings.length) {
@@ -3023,6 +3072,7 @@ tr:hover td{background:#161b22}</style></head>
     function renderCoverage(d) {
       const el = document.getElementById('ti-coverage-body');
       if (!d || !d.agents) { el.innerHTML = '<div class="empty">Coverage map unavailable.</div>'; return; }
+      tiChip('ti-c-coverage', d.summary?.with_gaps || 0, true);
       if (!d.agents.length) { el.innerHTML = '<div class="empty">No agents reporting yet.</div>'; return; }
       const dot = (n) => `<span class="ti-cov-dot ${n ? 'on' : 'off'}" title="${n ? n.toLocaleString() + ' events' : 'ZERO events of this class — blind'}"></span>`;
       el.innerHTML =
@@ -4882,7 +4932,55 @@ tr:hover td{background:#161b22}</style></head>
 
 
     // ── UEBA ──────────────────────────────────────────────────────────────────
+    // Tiny inline SVG sparkline (7-day activity), no library needed.
+    function sparkSVG(vals, color) {
+      if (!vals || vals.length < 2) return '';
+      const w = 84, h = 22, max = Math.max(...vals, 1);
+      const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * w},${h - 2 - (v / max) * (h - 6)}`).join(' ');
+      return `<svg width="${w}" height="${h}" style="flex:0 0 auto;opacity:.9">
+        <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="${w}" cy="${h - 2 - (vals[vals.length - 1] / max) * (h - 6)}" r="2" fill="${color}"/></svg>`;
+    }
+    const RISK_COLORS = { critical: '#fb7185', high: '#fb923c', medium: '#fbbf24', low: '#34d399' };
+    function renderUEBARisk(d) {
+      const el = document.getElementById('ueba-risk-body');
+      if (!d || !d.users) { el.innerHTML = '<div class="empty">Risk engine unavailable.</div>'; return; }
+      setNum('ueba-k-crit', d.summary?.critical ?? 0);
+      setNum('ueba-k-high', d.summary?.high ?? 0);
+      setNum('ueba-k-med', d.summary?.medium ?? 0);
+      setNum('ueba-k-pop', d.population ?? 0);
+      document.getElementById('ueba-k-crit').closest('.ti-kpi').classList.toggle('hot', (d.summary?.critical || 0) > 0);
+      document.getElementById('ueba-updated').textContent =
+        d.generated_at ? 'computed ' + toIST(d.generated_at) : '';
+      if (!d.users.length) {
+        el.innerHTML = `<div class="empty">No behavioural anomalies across ${d.population || 0} profiled identities — everyone is inside their own baseline.</div>`;
+        return;
+      }
+      el.innerHTML = d.users.slice(0, 25).map(u => {
+        const col = RISK_COLORS[u.level] || '#8ea3c0';
+        return `<div class="ueba-row" onclick="goTrailEntity('username','${escapeHTML(u.user)}')" title="Open this identity's trail">
+          <div class="ueba-ring" style="--p:${u.score};--c:${col}"><span>${u.score}</span></div>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="font-weight:700;font-size:14px">${escapeHTML(u.user)}</span>
+              <span class="badge ${u.level}">${u.level}</span>
+              ${u.baseline_mature ? '' : '<span class="ent-kind" title="Fewer than 50 baseline events — scores are provisional">young baseline</span>'}
+              <span style="font-size:11px;color:var(--faint);font-family:var(--mono)">${u.ev_24.toLocaleString()} ev/24h</span>
+              ${sparkSVG(u.sparkline, col)}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;margin-top:6px">
+              ${u.drivers.slice(0, 3).map(dr =>
+                `<div style="font-size:12px;line-height:1.5;color:var(--text)">
+                   <span style="color:${col};font-weight:700;font-family:var(--mono)">+${dr.points}</span>
+                   ${escapeHTML(dr.text)}</div>`).join('')}
+              ${u.drivers.length > 3 ? `<div style="font-size:11px;color:var(--faint)">+${u.drivers.length - 3} more drivers — click to investigate</div>` : ''}
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    }
     async function loadUEBA() {
+      get(`${API}/ueba/risk`).then(renderUEBARisk);
       const [ato, travel, peers] = await Promise.all([
         get(`${API}/ueba/account-takeover`),
         get(`${API}/ueba/impossible-travel`),

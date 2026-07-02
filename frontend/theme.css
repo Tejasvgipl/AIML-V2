@@ -910,6 +910,49 @@ body[data-page="intelligence"]  { --accent: #22d3ee; --accent-2: #34d399; }
 .mv-pop { animation: numPop .5s cubic-bezier(.2,.7,.3,1); }
 @keyframes numPop { from { transform: scale(.92); opacity: .4; } to { transform: none; opacity: 1; } }
 
+/* ── UEBA v2: risk leaderboard ─────────────────────────────────────────── */
+.ueba-row {
+  display: flex; gap: 16px; align-items: flex-start;
+  padding: 14px 16px; margin-bottom: 10px; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 13px;
+  transition: transform .16s, border-color .16s, box-shadow .16s;
+}
+.ueba-row:hover { transform: translateY(-2px); border-color: rgba(56,189,248,.4); box-shadow: 0 12px 34px -22px rgba(56,189,248,.5); }
+.ueba-ring {
+  --p: 0; --c: #38bdf8;
+  width: 56px; height: 56px; border-radius: 50%; flex: 0 0 auto;
+  display: grid; place-items: center;
+  background: conic-gradient(from -90deg, var(--c) calc(var(--p) * 1%), rgba(142,163,192,.13) 0);
+  box-shadow: 0 0 18px -6px var(--c);
+  animation: ringIn .8s cubic-bezier(.2,.7,.3,1);
+}
+@keyframes ringIn { from { filter: saturate(0); transform: scale(.9); } to { filter: none; transform: none; } }
+.ueba-ring span {
+  width: 44px; height: 44px; border-radius: 50%; background: var(--bg);
+  display: grid; place-items: center;
+  font-family: var(--mono); font-weight: 800; font-size: 15px; color: var(--c);
+}
+
+/* ── Intelligence module polish: header count chips + module icons ─────── */
+.ti-count {
+  font-size: 11px; font-weight: 800; font-family: var(--mono);
+  border-radius: 999px; padding: 2px 10px; letter-spacing: .3px;
+  background: rgba(56,189,248,.12); color: #7dd3fc; border: 1px solid rgba(56,189,248,.25);
+}
+.ti-count.hot { background: rgba(251,113,133,.13); color: #fda4af; border-color: rgba(251,113,133,.3); }
+.ti-count.zero { background: rgba(52,211,153,.10); color: #6ee7b7; border-color: rgba(52,211,153,.22); }
+.ti-live {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; color: var(--faint); font-family: var(--mono); letter-spacing: .5px;
+}
+.ti-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); animation: pulse 2s infinite; }
+.ti-num {
+  display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 7px;
+  background: var(--grad); color: #041018; font-weight: 800; font-size: 12px; font-family: var(--mono);
+  margin-right: 9px; flex: 0 0 auto; box-shadow: 0 0 14px -4px rgba(56,189,248,.7);
+}
+.ti-head-l { display: inline-flex; align-items: center; }
+
 /* ── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 880px) {
   #login-screen { grid-template-columns: 1fr; }

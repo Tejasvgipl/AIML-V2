@@ -370,6 +370,47 @@ def get_entity_events_desc(field: str, value: str, limit: int = 200) -> list[dic
     return _shape_events(_q(sql, {"v": value}))
 
 
+def get_ueba_user_profiles(days: int = 30, limit: int = 300) -> list[dict]:
+    """Per-user behavioural profile: 30-day baseline vs last-24h, in ONE
+    aggregation pass (bounded arrays, no raw column). This is the feeder for
+    the UEBA risk engine — scoring happens in Python where it's testable."""
+    sql = f"""
+        SELECT username,
+               countIf(ts <  now() - INTERVAL 1 DAY)                        AS ev_base,
+               countIf(ts >= now() - INTERVAL 1 DAY)                        AS ev_24,
+               groupUniqArrayIf(20)(agent,   ts <  now() - INTERVAL 1 DAY AND agent != '')   AS hosts_base,
+               groupUniqArrayIf(20)(agent,   ts >= now() - INTERVAL 1 DAY AND agent != '')   AS hosts_24,
+               groupUniqArrayIf(15)(country, ts <  now() - INTERVAL 1 DAY AND country != '') AS countries_base,
+               groupUniqArrayIf(15)(country, ts >= now() - INTERVAL 1 DAY AND country != '') AS countries_24,
+               groupUniqArrayIf(25)(dst_port, ts <  now() - INTERVAL 1 DAY AND dst_port != '') AS ports_base,
+               groupUniqArrayIf(25)(dst_port, ts >= now() - INTERVAL 1 DAY AND dst_port != '') AS ports_24,
+               groupUniqArrayIf(15)(src_ip,  ts >= now() - INTERVAL 1 DAY AND src_ip != '')  AS srcs_24,
+               sumMapIf([toHour(ts)], [toUInt64(1)], ts <  now() - INTERVAL 1 DAY)           AS hours_base,
+               sumMapIf([toHour(ts)], [toUInt64(1)], ts >= now() - INTERVAL 1 DAY)           AS hours_24,
+               sumMapIf([toDate(ts)], [toUInt64(1)], ts >= now() - INTERVAL 7 DAY)           AS days_7,
+               countIf(threat_type IN ('brute_force','ssh_bruteforce','vpn_bruteforce','rdp_relay')
+                       AND ts >= now() - INTERVAL 1 DAY)                    AS fails_24,
+               countIf(threat_type = 'login_success'
+                       AND ts >= now() - INTERVAL 1 DAY)                    AS success_24,
+               countIf(severity IN ('high','critical')
+                       AND ts >= now() - INTERVAL 1 DAY)                    AS crit_24,
+               max(ts)                                                      AS last_ts
+        FROM {LOGS_TABLE}
+        WHERE ts >= now() - INTERVAL {{days:UInt32}} DAY
+          AND username != ''
+          AND NOT endsWith(username, '$')
+          AND lower(username) != lower(agent)
+        GROUP BY username
+        HAVING ev_base + ev_24 >= 5
+        ORDER BY ev_24 DESC, ev_base DESC
+        LIMIT {int(min(limit, 2000))}
+    """
+    rows = _q(sql, {"days": int(days)})
+    for r in rows:
+        r["last_ts"] = _iso(r.get("last_ts"))
+    return rows
+
+
 def get_hourly_trend(hours: int = 24) -> list[dict]:
     """Events per hour (total + blocked-severity split) from the SummingMergeTree
     rollup — a few hundred rows, never touches the raw logs table."""

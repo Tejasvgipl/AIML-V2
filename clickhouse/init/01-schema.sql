@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS cybersentinel.logs
     decoder         LowCardinality(String) DEFAULT '',   -- Wazuh decoder name
     location        String                 DEFAULT '',   -- log source path
     full_log        String                 DEFAULT '',   -- raw log line (for embeddings)
-    raw             String                 DEFAULT ''    -- full alert JSON (never-lose-data)
+    raw             String                 DEFAULT '',   -- full alert JSON (never-lose-data)
+    policy_id       LowCardinality(String) DEFAULT ''    -- firewall policy that matched (data.policyid)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
