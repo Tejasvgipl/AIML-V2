@@ -2016,7 +2016,7 @@
     }
   </style>
   <!-- enhance.css (old neon theme) disabled — theme.css is now the single source of truth -->
-  <link rel="stylesheet" href="theme.css?v=21-hero">
+  <link rel="stylesheet" href="theme.css?v=22-ai-hero">
 </head>
 
 <body>
@@ -2089,9 +2089,9 @@
       <div id="page-overview" class="page active">
         <section class="ops-hero">
           <div class="ops-main">
-            <div class="ops-kicker"><span class="ops-live-dot"></span>Live situation &middot; CyberSentinel</div>
-            <div class="ops-title" id="ops-posture">Reading the wire&hellip;</div>
-            <div class="ops-copy" id="ops-copy">Correlating telemetry, baselines and behaviour&hellip;</div>
+            <div class="ops-kicker"><span class="ops-live-dot"></span>CyberSentinel AI &middot; autonomous triage</div>
+            <div class="ops-title" id="ops-posture"><span class="ops-ai">AI</span> is reading the wire&hellip;</div>
+            <div class="ops-copy" id="ops-copy">Anomaly model, behavioural baselines and identity risk engines are correlating live telemetry&hellip;</div>
             <div class="ops-tape" id="ops-live-chips"></div>
           </div>
           <div class="ops-start">
@@ -3382,29 +3382,29 @@ tr:hover td{background:#161b22}</style></head>
        telemetry intelligence). Everything is clickable and goes somewhere. */
     function renderHero(s, hot, k) {
       const { hotCount, criticalCount, alertCount, totalLogs } = k;
-      // Verdict headline — say the situation like a human shift-lead would.
+      // Verdict headline — the AI/ML story in one sentence: the machines
+      // triaged everything, here's what still needs a human.
       let title, copy;
-      if (criticalCount > 25) {
-        title = `<span class="ops-red">${criticalCount} sources</span> are hammering you right now`;
-        copy = `Heavy pressure: ${hotCount.toLocaleString()} active hostile sources across ${totalLogs.toLocaleString()} watched events. Work the queue on the right, top to bottom.`;
-      } else if (criticalCount > 0) {
-        title = `<span class="ops-red">${criticalCount} critical source${criticalCount > 1 ? 's' : ''}</span> need${criticalCount > 1 ? '' : 's'} you now`;
-        copy = `${hotCount.toLocaleString()} sources active, ${alertCount.toLocaleString()} behavioural deviations open. The rest of the floor is steady.`;
+      const engines = 'Anomaly model, behavioural baselines, identity risk, beacon timing and the novelty ledger are scoring every event as it lands.';
+      if (criticalCount > 0) {
+        title = `<span class="ops-ai">AI</span> triaged <span class="ops-cyan">${totalLogs.toLocaleString()}</span> events — <span class="ops-red">${criticalCount.toLocaleString()}</span> need a human`;
+        copy = `${engines} ${hotCount.toLocaleString()} sources are running hot; your ranked queue is on the right.`;
       } else if (hotCount > 0) {
-        title = `Watching <span class="ops-cyan">${hotCount.toLocaleString()} sources</span> — no critical pressure`;
-        copy = `${totalLogs.toLocaleString()} events under watch. Nothing is on fire; review deviations when convenient.`;
+        title = `<span class="ops-ai">AI</span> triaged <span class="ops-cyan">${totalLogs.toLocaleString()}</span> events — nothing critical`;
+        copy = `${engines} ${hotCount.toLocaleString()} sources are worth a look when convenient; no human intervention required right now.`;
       } else {
-        title = `All quiet on <span class="ops-cyan">${totalLogs.toLocaleString()}</span> watched events`;
-        copy = 'No hostile sources, no critical signals. Baselines and ledgers keep learning in the background.';
+        title = `<span class="ops-ai">AI</span> is watching <span class="ops-cyan">${totalLogs.toLocaleString()}</span> events — all clear`;
+        copy = `${engines} Nothing has broken from its learned baseline.`;
       }
       document.getElementById('ops-posture').innerHTML = title;
       document.getElementById('ops-copy').textContent = copy;
       // Live chips — every chip is a real number and a real destination.
       const chips = [
-        { t: `${criticalCount.toLocaleString()} critical`, hot: criticalCount > 0, go: "nav('deviations')" },
-        { t: `${alertCount.toLocaleString()} deviations`, hot: false, go: "nav('deviations')" },
-        { t: `${(s.unique_ips || 0).toLocaleString()} sources tracked`, hot: false, go: "nav('logs')" },
-        { t: s.ai_configured ? 'AI online' : 'AI key missing', hot: !s.ai_configured, go: "nav('aiinvestigate')" },
+        { t: `${criticalCount.toLocaleString()} escalated to human`, hot: criticalCount > 0, go: "nav('deviations')" },
+        { t: `anomaly model live`, hot: false, go: "nav('ml')" },
+        { t: `${(s.unique_ips || 0).toLocaleString()} entities profiled`, hot: false, go: "nav('ueba')" },
+        { t: `novelty ledger learning`, hot: false, go: "nav('intelligence')" },
+        { t: s.ai_configured ? 'AI analyst ready' : 'AI key missing', hot: !s.ai_configured, go: "nav('aiinvestigate')" },
       ];
       document.getElementById('ops-live-chips').innerHTML = chips.map(c =>
         `<span class="ops-chip-live${c.hot ? ' hot' : ''}" onclick="${c.go}">${c.t}</span>`).join('');

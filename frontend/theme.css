@@ -960,6 +960,14 @@ body[data-page="intelligence"]  { --accent: #22d3ee; --accent-2: #34d399; }
   margin-right: 8px; animation: pulse 2s infinite; vertical-align: 1px; }
 .ops-title { font-size: clamp(26px, 3vw, 38px) !important; line-height: 1.12 !important; letter-spacing: -1px !important; font-weight: 850 !important; margin: 10px 0 10px; }
 .ops-red { background: linear-gradient(120deg, #fda4af, #fb7185); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 40px rgba(251,113,133,.25); }
+/* The "AI" word: living gradient — the one animated flourish of the headline */
+.ops-ai {
+  background: linear-gradient(120deg, #22d3ee 0%, #818cf8 35%, #c084fc 60%, #22d3ee 100%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  animation: aiFlow 5s linear infinite;
+}
+@keyframes aiFlow { from { background-position: 0% 0; } to { background-position: 220% 0; } }
 .ops-cyan { background: linear-gradient(120deg, #7dd3fc, #22d3ee); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .ops-copy { font-size: 13.5px !important; line-height: 1.65; max-width: 560px; }
 .ops-chip-live {
