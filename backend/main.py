@@ -235,7 +235,17 @@ async def ask_groq(prompt: str, max_tokens: int = 700, model: str | None = None)
                 },
                 json={
                     "model": use_model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [
+                        # White-label guard: analyst-facing text must never name
+                        # underlying vendors/tools; the product is CyberSentinel.
+                        {"role": "system", "content":
+                         "You are CyberSentinel AI, the analysis engine of the "
+                         "CyberSentinel security platform. Never mention Wazuh, "
+                         "OpenSearch, ClickHouse, Grafana, Groq, Llama or any "
+                         "other vendor/tool/model name; say 'CyberSentinel', "
+                         "'the platform', 'the sensor' or 'the log store' instead."},
+                        {"role": "user", "content": prompt},
+                    ],
                     "max_tokens": max_tokens,
                     "temperature": 0.2,
                 },
@@ -1619,7 +1629,7 @@ def _score_ip_reputation(feat: dict) -> dict:
     lvl = int(feat.get("max_level") or 0)
     level_pts = min(15, lvl)
     if lvl >= 12:
-        factors.append(f"triggered a level-{lvl} rule (Wazuh treats 12+ as critical)")
+        factors.append(f"triggered a level-{lvl} rule (level 12+ is critical)")
 
     # Volume — up to 10, log-scaled so a noisy IP doesn't auto-max.
     import math
@@ -3263,7 +3273,7 @@ Tables in database: cybersentinel
    - mitre_technique: String - ATT&CK technique name
    - username: String - user account involved
    - target_user: String - account being targeted/attacked
-   - rule_groups: String - Wazuh rule categories
+   - rule_groups: String - detection rule categories
 
 2. cybersentinel.agg_ip_daily - pre-aggregated daily counts per IP (fast for summaries)
    - day: Date, src_ip, threat_type, severity, events: UInt64
@@ -3323,7 +3333,9 @@ _NL_PRESETS = {
 
 async def _nl_sql_from_ai(question: str) -> str:
     """Fallback for free-form (non-preset) questions: ask Groq to write the SQL."""
-    prompt = f"""You are a ClickHouse SQL expert for a bank's cybersecurity SIEM system.
+    prompt = f"""You are the query engine for CyberSentinel, a bank's cybersecurity SIEM.
+Write ClickHouse-dialect SQL, but NEVER mention ClickHouse, Wazuh or any vendor/tool
+name in prose you produce - the product is called CyberSentinel.
 
 Convert the analyst's natural language question into a valid ClickHouse SELECT query.
 

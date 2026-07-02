@@ -2094,7 +2094,7 @@
             <div class="ops-copy" id="ops-copy">Ingested events, behavioural baselines, anomaly scores, and analyst
               controls are synced into one operational view.</div>
             <div class="ops-tape">
-              <span>LIVE CLICKHOUSE TELEMETRY</span>
+              <span>LIVE TELEMETRY STREAM</span>
               <span>BASELINE ENGINE ONLINE</span>
               <span>ML SIGNALS INDEXED</span>
               <span>AI EXPLAIN READY</span>
@@ -2241,7 +2241,7 @@
               style="width:100%;max-width:340px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 11px;color:var(--text);font-size:12px;outline:none;margin-bottom:6px" />
             <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
               An IP is a <b>location</b>, not an identity. Each row resolves to a real <b>user</b> when one was
-              captured; otherwise to the reporting <b>sensor</b> (the Wazuh agent that logged it, e.g.
+              captured; otherwise to the reporting <b>sensor</b> (the CyberSentinel agent that logged it, e.g.
               <code>agent-19</code> / <code>BANK-DC-01</code> — a machine, not a person).
               <span class="ent-nouser">no user</span> = no username on those events; <span class="tev-warn">&#9888;</span> = raw IP only.
             </div>
@@ -2699,7 +2699,7 @@
         <div class="term-panel">
           <div class="term-title">SOC Query — Ask in Plain English</div>
           <div class="term-grid">
-            <div class="term"><b>No SQL needed:</b> Type any security question. AI converts it to ClickHouse SQL and runs it on your live data instantly.</div>
+            <div class="term"><b>No SQL needed:</b> Type any security question. AI converts it to a query and runs it on your live data instantly.</div>
             <div class="term"><b>Full data access:</b> Searches across all logs, ML scores, baselines, deviations, and blocklist in one place.</div>
             <div class="term"><b>Export ready:</b> Download any result as CSV for tickets, reports, or further analysis.</div>
           </div>
@@ -2816,7 +2816,7 @@
         <div class="term-panel">
           <div class="term-title">SOC Reports</div>
           <div class="term-grid">
-            <div class="term"><b>Evidence-based:</b> Reports are generated from ClickHouse logs, ML scores, and baseline deviation alerts.</div>
+            <div class="term"><b>Evidence-based:</b> Reports are generated from live telemetry, ML scores, and baseline deviation alerts.</div>
             <div class="term"><b>Precise:</b> The report lists which IP caused what activity, the dominant threat types, and the operational response.</div>
             <div class="term"><b>Export-ready:</b> Preview, edit, and download the report as PDF, JSON, or Markdown for handoff or incident notes.</div>
           </div>
@@ -2866,9 +2866,9 @@
       let data;
       try {
         const r = await fetch(`/ch/?${params}`);
-        if (!r.ok) { toast('ClickHouse error ' + r.status, 'warn'); return; }
+        if (!r.ok) { toast('Query engine error ' + r.status, 'warn'); return; }
         data = await r.json();
-      } catch(e) { toast('ClickHouse fetch failed: ' + e.message, 'warn'); return; }
+      } catch(e) { toast('Query fetch failed: ' + e.message, 'warn'); return; }
       const cols = data.meta.map(m => m.name);
       const rows = data.data;
       const sevColor = s => ({'critical':'#e53935','high':'#fb8c00','medium':'#fdd835','low':'#43a047'}[s]||'#aaa');
@@ -3076,7 +3076,7 @@ tr:hover td{background:#161b22}</style></head>
       if (!d.agents.length) { el.innerHTML = '<div class="empty">No agents reporting yet.</div>'; return; }
       const dot = (n) => `<span class="ti-cov-dot ${n ? 'on' : 'off'}" title="${n ? n.toLocaleString() + ' events' : 'ZERO events of this class — blind'}"></span>`;
       el.innerHTML =
-        `<div class="ti-why" style="margin-bottom:10px">An agent with zero <b>process</b> telemetry has no Sysmon — execution there is invisible. Zero <b>auth</b> = logons invisible. Zero <b>FIM</b> = file tampering invisible.</div>
+        `<div class="ti-why" style="margin-bottom:10px">An agent with zero <b>process</b> telemetry can't see what programs run — execution there is invisible. Zero <b>auth</b> = logons invisible. Zero <b>FIM</b> = file tampering invisible.</div>
          <table class="tbl"><thead><tr><th>Agent</th><th>Process</th><th>Auth</th><th>FIM</th><th>Events</th><th>Gaps</th></tr></thead><tbody>` +
         d.agents.slice(0, 40).map(a => `
           <tr>
@@ -3237,6 +3237,8 @@ tr:hover td{background:#161b22}</style></head>
         if (p < 1) requestAnimationFrame(tick);
       })(t0);
     }
+    // White-label: never surface the underlying LLM/vendor model id in the UI.
+    function aiLabel() { return 'CyberSentinel AI'; }
     function escapeHTML(value) {
       return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     }
@@ -3299,7 +3301,7 @@ tr:hover td{background:#161b22}</style></head>
     }
     // Render the users/hosts seen on an IP as compact chips (top N + "+more").
     // Chips for the identities on an IP. Clicking a chip trails THAT identity:
-    // a user chip → trail by username; an agent chip → trail by Wazuh agent.name
+    // a user chip → trail by username; an agent chip → trail by sensor agent name
     // (so you see the agent's own activity and every IP it reported from).
     function identChips(list = [], kind = 'user', max = 4) {
       if (!list.length) return '<span class="ent-none">none</span>';
@@ -3349,7 +3351,7 @@ tr:hover td{background:#161b22}</style></head>
         <div class="ent-card-ip ent-chip-go" onclick="goTrailEntity('ip', '${h.ip}')" title="Trail this source IP">
           &#128279; <b>${h.ip}</b> · ${Number(h.total || 0).toLocaleString()} events · ${String(threatName).replace(/_/g, ' ')}</div>
         <div class="ent-card-row"><span class="ent-lbl" title="Accounts seen on this IP — click to trail the user">Users</span><span class="ent-vals">${identChips(h.users, 'user', 3)}</span></div>
-        <div class="ent-card-row"><span class="ent-lbl" title="Wazuh agent (agent.name) reporting these events — click to trail the agent's endpoint">Agents</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
+        <div class="ent-card-row"><span class="ent-lbl" title="CyberSentinel sensor (agent name) reporting these events — click to trail the agent's endpoint">Agents</span><span class="ent-vals">${identChips(h.hosts, 'host', 3)}</span></div>
       </div>`;
     }
     // Filterable table of every source IP and the identities behind it.
@@ -3518,7 +3520,7 @@ tr:hover td{background:#161b22}</style></head>
       } catch(e) { console.error('refreshAll error:', e); }
     }
     function doSearch() { const q = document.getElementById('ip-search').value.trim(); if (!q) return; goTrail(q); }
-    // Trail any entity. mode = 'ip' | 'username' | 'host' (host = Wazuh agent.name).
+    // Trail any entity. mode = 'ip' | 'username' | 'host' (host = sensor agent name).
     // Trailing a user/agent shows every IP that identity used, so the endpoint and
     // its IP are visible inside the trail — not just a bare address.
     function goTrailEntity(mode, value) {
@@ -3550,7 +3552,7 @@ tr:hover td{background:#161b22}</style></head>
       document.getElementById('ai-ip-input').value = ip;
       await aiFullInvestigate();
     }
-    const TRAIL_PLACEHOLDER = { ip: 'Enter IP (e.g. 85.11.187.36)', username: 'Enter username (e.g. jdoe)', host: 'Enter Wazuh agent name (e.g. Harsh_777)' };
+    const TRAIL_PLACEHOLDER = { ip: 'Enter IP (e.g. 85.11.187.36)', username: 'Enter username (e.g. jdoe)', host: 'Enter agent name (e.g. Harsh_777)' };
     function onTrailModeChange() {
       const m = document.getElementById('trail-mode').value;
       document.getElementById('trail-input').placeholder = TRAIL_PLACEHOLDER[m] || TRAIL_PLACEHOLDER.ip;
@@ -3633,7 +3635,7 @@ tr:hover td{background:#161b22}</style></head>
         `${evs.length} of ${TRAIL_EVENTS.length} events` + (trailFilter.source || trailFilter.user ? ' (filtered)' : '');
       document.getElementById('trail-events').innerHTML = evs.length ? evs.map(trailEventCard).join('') : '<div class="empty">No events match the filter</div>';
     }
-    // Values pulled from raw Wazuh JSON sometimes arrive still JSON-escaped
+    // Values pulled from raw source JSON sometimes arrive still JSON-escaped
     // (RUPALI\\HP, \"C:\\Program Files\\...). Un-escape for human display. This is
     // a no-op on already-clean values (a normal path has no \\ or \" sequences).
     function deEsc(s) {
@@ -3684,8 +3686,8 @@ tr:hover td{background:#161b22}</style></head>
       // gets the interactive value without a separate (duplicate) row below.
       const chip = (id, tip) => `<span class="tev-id" style="cursor:pointer" title="${tip}" onclick="copyEid(event,'${escapeHTML(String(id))}')">#${escapeHTML(String(id))}</span>`;
       s += e.rule_id
-        ? ` Matched <b>Wazuh detection rule</b> ${chip(e.rule_id, 'Wazuh detection rule id (NOT the firewall policy) — click to copy')}`
-        : ' Matched a <b>Wazuh detection rule</b>';
+        ? ` Matched <b>detection rule</b> ${chip(e.rule_id, 'Detection rule id (NOT the firewall policy) — click to copy')}`
+        : ' Matched a <b>detection rule</b>';
       s += (e.rule_level ? ` (severity level ${escapeHTML(String(e.rule_level))}/15)` : '') +
         (e.mitre ? `, MITRE ${escapeHTML(e.mitre)}${mn ? ' — ' + escapeHTML(mn) : ''}` : '') + '.';
       if (e.policy_id) s += ` Firewall policy ${chip(e.policy_id, 'Firewall policy id (data.policyid) — click to copy')} is what ${blocked ? 'blocked' : allowed ? 'allowed' : 'matched'} the traffic.`;
@@ -3729,8 +3731,8 @@ tr:hover td{background:#161b22}</style></head>
           ${actHtml}
           <span class="tev-threat">${e.threat_label || (e.threat_type || '').replace(/_/g, ' ')}</span>
           ${e.alert_id
-            ? `<span class="tev-eid" onclick="copyEid(event,'${e.alert_id}')" title="Wazuh / OpenSearch _id — search this exact value in your alerts index or alerts.json. Click to copy">_id ${escapeHTML(e.alert_id)}</span>`
-            : (e.event_id ? `<span class="tev-eid" style="opacity:.65" onclick="copyEid(event,'${e.event_id}')" title="Internal reference (hash) — no Wazuh id on this row. NOT searchable in your data. Click to copy">${e.event_id}</span>` : '')}
+            ? `<span class="tev-eid" onclick="copyEid(event,'${e.alert_id}')" title="Source log id — search this exact value in your log store to find the original record. Click to copy">_id ${escapeHTML(e.alert_id)}</span>`
+            : (e.event_id ? `<span class="tev-eid" style="opacity:.65" onclick="copyEid(event,'${e.event_id}')" title="Internal reference (hash) — no source id on this row. Click to copy">${e.event_id}</span>` : '')}
         </div>
         <div class="tev-body">
           <div class="tev-plain" style="font-size:12.5px;line-height:1.55;color:var(--text);background:var(--panel-2,rgba(127,127,127,.08));border-left:3px solid var(--accent,#3b82f6);border-radius:6px;padding:8px 10px;margin-bottom:10px">${trailPlain(e, blocked, allowed)}</div>
@@ -3752,7 +3754,7 @@ tr:hover td{background:#161b22}</style></head>
       aiLoading(body);
       const r = await get(`${API}/explain/${curIP}`);
       if (!r) { body.innerHTML = '<span style="color:var(--danger)">AI unavailable. Check the AI key in .env and restart backend.</span>'; return; }
-      document.getElementById('ai-trail-model').textContent = (r.model || 'AI model') + ' · ' + String(r.generated_at || '').substring(0, 19);
+      document.getElementById('ai-trail-model').textContent = aiLabel() + ' · ' + String(r.generated_at || '').substring(0, 19);
       body.innerHTML = formatAIText(r.explanation);
       toast('AI analysis ready', 'ai');
     }
@@ -4516,7 +4518,7 @@ tr:hover td{background:#161b22}</style></head>
           return;
         }
         const r = await resp.json();
-        document.getElementById('ai-inv-model').textContent = r.model ? `${r.model} · ${toIST(r.generated_at)}` : '';
+        document.getElementById('ai-inv-model').textContent = r.model ? `${aiLabel()} · ${toIST(r.generated_at)}` : '';
         body.innerHTML = formatReportText(r.explanation || '');
         toast('AI ML explanation ready', 'ai');
       } catch (e) {
@@ -4567,7 +4569,7 @@ tr:hover td{background:#161b22}</style></head>
           return;
         }
         const r = await resp.json();
-        document.getElementById('ai-ml-model').textContent = r.model ? `${r.model} · ${toIST(r.generated_at)}` : '';
+        document.getElementById('ai-ml-model').textContent = r.model ? `${aiLabel()} · ${toIST(r.generated_at)}` : '';
         aiBody.innerHTML = formatReportText(r.explanation || '');
         toast('AI ML explanation ready', 'ai');
       } catch (e) {
@@ -4586,7 +4588,7 @@ tr:hover td{background:#161b22}</style></head>
       try { data = JSON.parse(text); } catch (e) { }
       const r = await post(`${API}/explain/pattern`, { data, context: 'Submitted from CyberSentinel AI Investigator' });
       if (!r) { body.innerHTML = '<span style="color:var(--danger)">AI unavailable. Check the AI key in .env and restart backend.</span>'; return; }
-      document.getElementById('ai-inv-model').textContent = (r.model || 'AI model') + ' · ' + String(r.generated_at || '').substring(0, 19);
+      document.getElementById('ai-inv-model').textContent = aiLabel() + ' · ' + String(r.generated_at || '').substring(0, 19);
       body.innerHTML = formatAIText(r.explanation);
       toast('Pattern analysis ready', 'ai');
     }
@@ -4820,7 +4822,7 @@ tr:hover td{background:#161b22}</style></head>
           <div class="ai-header">
             <span class="ai-badge">AI</span>
             <span class="ai-title">Incident Narrative</span>
-            <span class="ai-model">${r.model || ''} · ${String(r.generated_at || '').substring(0, 19).replace('T',' ')} IST</span>
+            <span class="ai-model">${aiLabel()} · ${String(r.generated_at || '').substring(0, 19).replace('T',' ')} IST</span>
           </div>
           <div class="ai-body">${formatReportText(r.ai_narrative || r.explanation || '')}</div>
         </div>
@@ -5435,7 +5437,7 @@ tr:hover td{background:#161b22}</style></head>
         const resp = await fetch(`${API}/explain/grounded/${ip}`, {});
         if (!resp.ok) { document.getElementById('kc-ai-body').textContent = `Error ${resp.status} from server.`; return; }
         const r = await resp.json();
-        document.getElementById('kc-ai-model').textContent = (r.model || '') + (r.generated_at ? ' · ' + toIST(r.generated_at) : '');
+        document.getElementById('kc-ai-model').textContent = aiLabel() + (r.generated_at ? ' · ' + toIST(r.generated_at) : '');
         document.getElementById('kc-ai-body').innerHTML = formatReportText(r.explanation || '');
       } catch (e) {
         document.getElementById('kc-ai-body').textContent = 'Request failed: ' + e.message;
@@ -5711,12 +5713,12 @@ tr:hover td{background:#161b22}</style></head>
           </svg>
         </div>
         <div style="flex:1">
-          <div style="font-weight:600;font-size:13px">Grafana Log Explorer</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">Visualise live ClickHouse logs — timelines, histograms, raw log browser</div>
+          <div style="font-weight:600;font-size:13px">Visual Log Explorer</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">Visualise live logs — timelines, histograms, raw log browser</div>
         </div>
         <a href="${url}" target="_blank" rel="noopener"
            style="display:inline-flex;align-items:center;gap:6px;background:#f0883e;color:#fff;font-size:12px;font-weight:600;padding:7px 14px;border-radius:6px;text-decoration:none;white-space:nowrap">
-          Open Grafana
+          Open Explorer
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
         </a>
         <div style="font-size:10px;color:var(--muted);text-align:right;min-width:90px">
